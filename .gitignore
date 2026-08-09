@@ -1,1 +1,3 @@
 .superpowers/
+backend/target/
+node_modules/
