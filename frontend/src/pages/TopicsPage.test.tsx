@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import { screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { renderWithQuery } from '../test/utils'
+import { renderWithRouter } from '../test/utils'
 import { TopicsView } from './TopicsPage'
 import * as client from '../api/client'
 
@@ -20,17 +20,38 @@ const topics = {
 }
 
 describe('TopicsView', () => {
-  it('lists topics, hides internal by default, links to detail', async () => {
+  it('lists topics, hides internal by default, links to detail via SPA navigation', async () => {
     vi.mocked(client.getTopics).mockResolvedValue(topics)
-    renderWithQuery(<TopicsView cluster="prod" />)
+    await renderWithRouter(<TopicsView cluster="prod" />, { initialPath: '/c/prod/topics/orders' })
     expect(await screen.findByText('orders')).toBeInTheDocument()
     expect(screen.queryByText('__consumer_offsets')).not.toBeInTheDocument()
-    expect(screen.getByRole('link', { name: /orders/ })).toHaveAttribute('href', '/c/prod/topics/orders')
+    const link = screen.getByRole('link', { name: /orders/ })
+    expect(link).toHaveAttribute('href', '/c/prod/topics/orders')
+    // router-rendered <Link>, not a plain <a> full-reload anchor: the router
+    // marks the link matching the current location as active itself
+    expect(link).toHaveAttribute('data-status', 'active')
+  })
+
+  it('encodes topic names with spaces and slashes in the detail link href', async () => {
+    vi.mocked(client.getTopics).mockResolvedValue({
+      topics: [
+        { name: 'order events', partitions: 1, replication_factor: 1, message_estimate: 0, size_bytes: null, internal: false },
+        { name: 'a/b', partitions: 1, replication_factor: 1, message_estimate: 0, size_bytes: null, internal: false },
+      ],
+      as_of: Date.now(),
+    })
+    await renderWithRouter(<TopicsView cluster="prod" />)
+    expect(await screen.findByText('order events')).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: 'order events' })).toHaveAttribute(
+      'href',
+      '/c/prod/topics/order%20events',
+    )
+    expect(screen.getByRole('link', { name: 'a/b' })).toHaveAttribute('href', '/c/prod/topics/a%2Fb')
   })
 
   it('filter narrows instantly and show-internal reveals internals', async () => {
     vi.mocked(client.getTopics).mockResolvedValue(topics)
-    renderWithQuery(<TopicsView cluster="prod" />)
+    await renderWithRouter(<TopicsView cluster="prod" />)
     await screen.findByText('orders')
     await userEvent.type(screen.getByPlaceholderText('filter topics…'), 'pay')
     expect(screen.queryByText('orders')).not.toBeInTheDocument()

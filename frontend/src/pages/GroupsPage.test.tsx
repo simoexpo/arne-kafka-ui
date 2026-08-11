@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import { screen } from '@testing-library/react'
-import { renderWithQuery } from '../test/utils'
+import { renderWithRouter } from '../test/utils'
 import { GroupsView } from './GroupsPage'
 import * as client from '../api/client'
 
@@ -10,7 +10,7 @@ vi.mock('../api/client', async (importOriginal) => ({
 }))
 
 describe('GroupsView', () => {
-  it('lists groups with state, members and aggregate lag', async () => {
+  it('lists groups with state, members, aggregate lag, and links to detail via SPA navigation', async () => {
     vi.mocked(client.getGroups).mockResolvedValue({
       groups: [
         { group_id: 'billing', state: 'Stable', protocol_type: 'consumer', member_count: 2, total_lag: 42 },
@@ -18,10 +18,31 @@ describe('GroupsView', () => {
       ],
       as_of: Date.now(),
     })
-    renderWithQuery(<GroupsView cluster="prod" />)
+    await renderWithRouter(<GroupsView cluster="prod" />, { initialPath: '/c/prod/groups/billing' })
     expect(await screen.findByText('billing')).toBeInTheDocument()
     expect(screen.getByText('Stable')).toBeInTheDocument()
     expect(screen.getByText('42')).toBeInTheDocument()
-    expect(screen.getByRole('link', { name: /billing/ })).toHaveAttribute('href', '/c/prod/groups/billing')
+    const link = screen.getByRole('link', { name: /billing/ })
+    expect(link).toHaveAttribute('href', '/c/prod/groups/billing')
+    // router-rendered <Link>, not a plain <a> full-reload anchor: the router
+    // marks the link matching the current location as active itself
+    expect(link).toHaveAttribute('data-status', 'active')
+  })
+
+  it('encodes group ids with spaces and slashes in the detail link href', async () => {
+    vi.mocked(client.getGroups).mockResolvedValue({
+      groups: [
+        { group_id: 'billing team', state: 'Stable', protocol_type: 'consumer', member_count: 1, total_lag: 0 },
+        { group_id: 'a/b', state: 'Stable', protocol_type: 'consumer', member_count: 1, total_lag: 0 },
+      ],
+      as_of: Date.now(),
+    })
+    await renderWithRouter(<GroupsView cluster="prod" />)
+    expect(await screen.findByText('billing team')).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: 'billing team' })).toHaveAttribute(
+      'href',
+      '/c/prod/groups/billing%20team',
+    )
+    expect(screen.getByRole('link', { name: 'a/b' })).toHaveAttribute('href', '/c/prod/groups/a%2Fb')
   })
 })

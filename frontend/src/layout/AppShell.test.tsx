@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { renderWithQuery } from '../test/utils'
+import { renderWithQuery, renderWithRouter } from '../test/utils'
 import { Sidebar, ThemeToggle, sectionFromPathname } from './AppShell'
 
 const clusters = [
@@ -10,14 +10,20 @@ const clusters = [
 ]
 
 describe('Sidebar', () => {
-  it('renders nav sections and cluster switcher with health dots', () => {
-    renderWithQuery(<Sidebar cluster="prod" clusters={[...clusters]} active="topics" />)
+  it('renders nav sections and cluster switcher with health dots', async () => {
+    await renderWithRouter(<Sidebar cluster="prod" clusters={[...clusters]} active="topics" />, {
+      initialPath: '/c/prod/topics',
+    })
     expect(screen.getByRole('link', { name: /overview/i })).toHaveAttribute('href', '/c/prod/overview')
     expect(screen.getByRole('link', { name: /topics/i })).toHaveAttribute('href', '/c/prod/topics')
     expect(screen.getByRole('link', { name: /groups/i })).toHaveAttribute('href', '/c/prod/groups')
     expect(screen.getByText('prod')).toBeInTheDocument()
     // switcher lists the other cluster as a link preserving the section
     expect(screen.getByRole('link', { name: /dead/i })).toHaveAttribute('href', '/c/dead/topics')
+    // SPA navigation, not a full page reload: router-rendered <Link> marks
+    // the link matching the current location as active itself (data-status),
+    // something a plain <a href> can never do.
+    expect(screen.getByRole('link', { name: /topics/i })).toHaveAttribute('data-status', 'active')
   })
 })
 

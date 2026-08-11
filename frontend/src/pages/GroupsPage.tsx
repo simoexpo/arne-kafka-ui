@@ -1,5 +1,5 @@
 import { useQuery } from '@tanstack/react-query'
-import { useParams } from '@tanstack/react-router'
+import { Link, useParams } from '@tanstack/react-router'
 import { getGroups } from '../api/client'
 import { Panel } from '../components/Panel'
 import { StalenessChip } from '../components/StalenessChip'
@@ -26,10 +26,13 @@ export function GroupsView({ cluster }: { cluster: string }) {
             {groups.data?.groups.map((g) => (
               <tr key={g.group_id} className="border-t border-zinc-100 dark:border-zinc-800">
                 <td className="py-1.5">
-                  <a href={`/c/${encodeURIComponent(cluster)}/groups/${encodeURIComponent(g.group_id)}`}
-                     className="font-mono text-blue-600 hover:underline dark:text-blue-400">
+                  <Link
+                    to="/c/$cluster/groups/$group"
+                    params={{ cluster, group: g.group_id }}
+                    className="font-mono text-blue-600 hover:underline dark:text-blue-400"
+                  >
                     {g.group_id}
-                  </a>
+                  </Link>
                 </td>
                 <td>{g.state}</td>
                 <td className="text-zinc-500">{g.protocol_type}</td>

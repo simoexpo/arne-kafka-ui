@@ -1,6 +1,6 @@
 import { useMemo, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { useParams } from '@tanstack/react-router'
+import { Link, useParams } from '@tanstack/react-router'
 import { getTopics } from '../api/client'
 import { Panel } from '../components/Panel'
 import { StalenessChip } from '../components/StalenessChip'
@@ -50,10 +50,13 @@ export function TopicsView({ cluster }: { cluster: string }) {
             {visible.map((t) => (
               <tr key={t.name} className="border-t border-zinc-100 dark:border-zinc-800">
                 <td className="py-1.5">
-                  <a href={`/c/${encodeURIComponent(cluster)}/topics/${encodeURIComponent(t.name)}`}
-                     className="font-mono text-blue-600 hover:underline dark:text-blue-400">
+                  <Link
+                    to="/c/$cluster/topics/$topic"
+                    params={{ cluster, topic: t.name }}
+                    className="font-mono text-blue-600 hover:underline dark:text-blue-400"
+                  >
                     {t.name}
-                  </a>
+                  </Link>
                 </td>
                 <td>{t.partitions}</td>
                 <td>{t.replication_factor}</td>

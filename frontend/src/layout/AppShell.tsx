@@ -1,5 +1,5 @@
 import { useQuery } from '@tanstack/react-query'
-import { Outlet, useLocation, useParams } from '@tanstack/react-router'
+import { Link, Outlet, useLocation, useParams } from '@tanstack/react-router'
 import { getClusters } from '../api/client'
 import type { ClusterHealth } from '../api/types'
 import { CommandPalette } from '../components/CommandPalette' // Task 11 stub
@@ -10,6 +10,15 @@ export function useClusters() {
 
 const SECTIONS = ['overview', 'topics', 'groups'] as const
 type Section = (typeof SECTIONS)[number]
+
+// Registered route path per section — kept as literals (rather than a single
+// generic `/c/$cluster/$section` template) because that's what's actually
+// registered in the route tree, so typed `<Link to>` can check them.
+const SECTION_PATHS = {
+  overview: '/c/$cluster/overview',
+  topics: '/c/$cluster/topics',
+  groups: '/c/$cluster/groups',
+} as const satisfies Record<Section, string>
 
 // Derives the active sidebar section from the exact path segment that follows
 // `/c/{cluster}/`, rather than a substring match against the whole pathname —
@@ -34,9 +43,10 @@ export function Sidebar({ cluster, clusters, active }: {
       <div className="text-sm font-semibold tracking-wide">Betrachtung</div>
       <nav className="flex flex-col gap-1">
         {SECTIONS.map((s) => (
-          <a
+          <Link
             key={s}
-            href={`/c/${encodeURIComponent(cluster)}/${s}`}
+            to={SECTION_PATHS[s]}
+            params={{ cluster }}
             className={`rounded px-2 py-1 text-sm capitalize ${
               s === active
                 ? 'bg-zinc-200 font-medium dark:bg-zinc-800'
@@ -44,7 +54,7 @@ export function Sidebar({ cluster, clusters, active }: {
             }`}
           >
             {s}
-          </a>
+          </Link>
         ))}
       </nav>
       <div className="mt-auto">
@@ -55,14 +65,15 @@ export function Sidebar({ cluster, clusters, active }: {
         </div>
         <div className="mt-2 flex flex-col gap-1">
           {clusters.filter((c) => c.name !== cluster).map((c) => (
-            <a
+            <Link
               key={c.name}
-              href={`/c/${encodeURIComponent(c.name)}/${active}`}
+              to={SECTION_PATHS[active]}
+              params={{ cluster: c.name }}
               className="flex items-center gap-2 rounded px-1 py-0.5 text-sm text-zinc-600 hover:bg-zinc-100 dark:text-zinc-400 dark:hover:bg-zinc-900"
             >
               <HealthDot status={c.status} />
               {c.name}
-            </a>
+            </Link>
           ))}
         </div>
         <div className="mt-4"><ThemeToggle /></div>
