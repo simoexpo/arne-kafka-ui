@@ -38,6 +38,34 @@ async fn topics_inventory_lists_topic_with_message_estimate() {
 }
 
 #[tokio::test]
+async fn topic_detail_shows_partitions_offsets_and_configs() {
+    let bootstrap = start_kafka().await;
+    create_topic(&bootstrap, "detail-topic", 2).await;
+    produce(&bootstrap, "detail-topic", 5).await;
+    let state = state_for(&bootstrap, vec![]);
+    let (status, body) = get_json(app(state), "/api/clusters/test/topics/detail-topic").await;
+    assert_eq!(status, 200);
+    assert_eq!(body["name"], "detail-topic");
+    let parts = body["partitions"].as_array().unwrap();
+    assert_eq!(parts.len(), 2);
+    let total: i64 = parts.iter().map(|p| p["end_offset"].as_i64().unwrap() - p["start_offset"].as_i64().unwrap()).sum();
+    assert_eq!(total, 5);
+    assert!(parts[0]["leader"].as_i64().is_some());
+    assert!(!parts[0]["isr"].as_array().unwrap().is_empty());
+    let configs = body["configs"].as_array().unwrap();
+    assert!(configs.iter().any(|c| c["name"] == "retention.ms"), "expected retention.ms in configs");
+}
+
+#[tokio::test]
+async fn unknown_topic_detail_is_404() {
+    let bootstrap = start_kafka().await;
+    let state = state_for(&bootstrap, vec![]);
+    let (status, body) = get_json(app(state), "/api/clusters/test/topics/ghost-topic").await;
+    assert_eq!(status, 404);
+    assert_eq!(body["code"], "topic_not_found");
+}
+
+#[tokio::test]
 async fn topics_on_unknown_cluster_is_404() {
     let bootstrap = start_kafka().await;
     let state = state_for(&bootstrap, vec![]);
