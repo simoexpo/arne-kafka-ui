@@ -271,9 +271,9 @@ pub async fn tail_sse(
     let handle = state.registry.get(&cluster)?;
     let (rx, cancel) = tail::run(handle, topic).await?;
     let guard = CancelOnDrop(cancel);
-    let stream = ReceiverStream::new(rx).map(move |msg| {
+    let stream = ReceiverStream::new(rx).map(move |event: tail::TailEvent| {
         let _hold = &guard; // move the guard into the stream: dropped on disconnect
-        Ok(Event::default().event("message").data(serde_json::to_string(&msg).unwrap_or_default()))
+        Ok(Event::default().event(event.name()).data(serde_json::to_string(&event).unwrap_or_default()))
     });
     Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
 }
