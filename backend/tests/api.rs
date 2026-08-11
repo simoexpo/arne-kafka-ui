@@ -280,6 +280,37 @@ async fn search_stops_at_max_matches() {
 }
 
 #[tokio::test]
+async fn search_max_matches_with_deep_partitions() {
+    use betrachtung::config::Limits;
+    let bootstrap = start_kafka().await;
+    create_topic(&bootstrap, "search-deep-topic", 2).await;
+    produce(&bootstrap, "search-deep-topic", 200).await;
+    let mut state = state_for(&bootstrap, vec![]);
+    state.limits = std::sync::Arc::new(Limits { max_search_matches: 3, ..Limits::default() });
+    // A worker that hits the match cap breaks out of its own recv loop while
+    // its partition's scanner thread may still be parked mid-send; if that
+    // scanner is never woken, the stream never reaches `done` and this hangs
+    // forever. Bound it explicitly so a regression fails fast instead of
+    // wedging the test run. (The exact lock-step race is captured
+    // deterministically, independent of real Kafka timing, by
+    // `message::search::tests::worker_giving_up_early_wakes_a_parked_scanner`
+    // in src/message/search.rs; this test covers the same defect end to end.)
+    let events = tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        collect_sse(
+            app(state),
+            "/api/clusters/test/topics/search-deep-topic/search?range=last_n&n=200&filter=value_contains&q=v",
+            500,
+        ),
+    )
+    .await
+    .expect("search must terminate with done{max_matches} within 30s instead of hanging");
+    let matches = events.iter().filter(|(n, _)| n == "match").count();
+    assert_eq!(matches, 3, "events: {events:?}");
+    assert_eq!(events.last().unwrap().1["reason"], "max_matches");
+}
+
+#[tokio::test]
 async fn search_bad_filter_is_error_event_or_400() {
     let bootstrap = start_kafka().await;
     let state = state_for(&bootstrap, vec![]);

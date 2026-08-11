@@ -11,11 +11,21 @@ use rdkafka::Offset;
 use serde::Serialize;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, Semaphore};
+use tokio::task::JoinHandle;
 
 const PARTITION_CONCURRENCY: usize = 8;
 const PROGRESS_EVERY: u64 = 500;
+/// If a partition scanner goes this long without successfully receiving a
+/// message (persistent poll errors, unreachable broker, ...) it gives up
+/// instead of spinning on 200ms polls forever.
+const STALL_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long a scanner waits, re-checking `cancelled` between attempts,
+/// before retrying to hand a record to a full channel. Keeps a scanner
+/// from parking in a plain blocking send forever once nobody is left to
+/// drain the channel (see `send_or_stop`).
+const SEND_RETRY_INTERVAL: Duration = Duration::from_millis(20);
 
 #[derive(Debug, Serialize)]
 #[serde(untagged)]
@@ -58,6 +68,16 @@ pub fn run(
         let grand_total = total(&ranges);
         let scanned = Arc::new(AtomicU64::new(0));
         let matched = Arc::new(AtomicU64::new(0));
+        // Highest 500-boundary already reported: concurrent partition
+        // workers CAS-race to claim each boundary exactly once, instead of
+        // every worker separately sampling the shared `scanned` counter
+        // (which could skip, duplicate, or emit boundaries out of order —
+        // see `maybe_report_progress`).
+        let last_reported = Arc::new(AtomicU64::new(0));
+        // Set as soon as any partition scan fails, so the coordinator sends
+        // exactly one `error` event and skips the final progress/done pair
+        // — per the SSE contract, `error` is terminal.
+        let error_sent = Arc::new(AtomicBool::new(false));
         let semaphore = Arc::new(Semaphore::new(PARTITION_CONCURRENCY));
         let mut workers = Vec::new();
 
@@ -74,42 +94,22 @@ pub fn run(
             let cancelled = cancelled.clone();
             let scanned = scanned.clone();
             let matched = matched.clone();
+            let last_reported = last_reported.clone();
+            let error_sent = error_sent.clone();
+            let partition = r.partition;
 
             workers.push(tokio::spawn(async move {
-                let _permit = permit;
-                let (raw_tx, mut raw_rx) = mpsc::channel::<RawRecord>(64);
+                let (raw_tx, raw_rx) = mpsc::channel::<RawRecord>(64);
                 let scan_cancel = cancelled.clone();
                 let scan_scanned = scanned.clone();
                 let scan = tokio::task::spawn_blocking(move || {
                     scan_partition_blocking(&cfg, &topic, &r, &scan_cancel, &scan_scanned, raw_tx)
                 });
-
-                while let Some(record) = raw_rx.recv().await {
-                    let msg = one_message_out(record, sr.as_deref()).await;
-                    if filter::matches(&filter, &msg) {
-                        let m = matched.fetch_add(1, Ordering::SeqCst) + 1;
-                        if m > max_matches {
-                            cancelled.store(true, Ordering::SeqCst);
-                            break;
-                        }
-                        if tx.send(SearchEvent::Match(Box::new(msg))).await.is_err() {
-                            cancelled.store(true, Ordering::SeqCst);
-                            break;
-                        }
-                        if m == max_matches {
-                            cancelled.store(true, Ordering::SeqCst);
-                        }
-                    }
-                    let s = scanned.load(Ordering::SeqCst);
-                    if s.is_multiple_of(PROGRESS_EVERY) {
-                        let _ = tx.try_send(SearchEvent::Progress {
-                            scanned: s,
-                            total: grand_total,
-                            matches: matched.load(Ordering::SeqCst),
-                        });
-                    }
-                }
-                let _ = scan.await;
+                let _permit = permit;
+                drive_partition(
+                    raw_rx, scan, partition, sr, filter, tx, cancelled, scanned, matched,
+                    last_reported, error_sent, grand_total, max_matches,
+                ).await;
             }));
         }
 
@@ -117,19 +117,164 @@ pub fn run(
             let _ = w.await;
         }
 
-        let matches = matched.load(Ordering::SeqCst).min(max_matches);
-        let _ = tx
-            .send(SearchEvent::Progress {
-                scanned: scanned.load(Ordering::SeqCst),
-                total: grand_total,
-                matches,
-            })
-            .await;
-        let reason = if matched.load(Ordering::SeqCst) >= max_matches { "max_matches" } else { "complete" };
-        let _ = tx.send(SearchEvent::Done { reason: reason.into() }).await;
+        // `error` is terminal per the SSE contract: a scan failure has
+        // already been reported by whichever worker hit it, so no trailing
+        // progress/done follows it.
+        if !error_sent.load(Ordering::SeqCst) {
+            let matches = matched.load(Ordering::SeqCst).min(max_matches);
+            let _ = tx
+                .send(SearchEvent::Progress {
+                    scanned: scanned.load(Ordering::SeqCst),
+                    total: grand_total,
+                    matches,
+                })
+                .await;
+            let reason = if matched.load(Ordering::SeqCst) >= max_matches { "max_matches" } else { "complete" };
+            let _ = tx.send(SearchEvent::Done { reason: reason.into() }).await;
+        }
     });
 
     (rx, cancel)
+}
+
+/// Drains one partition's raw-record channel, decoding and filtering each
+/// record and forwarding matches, then joins the scanner's blocking task.
+///
+/// Extracted from `run()`'s per-partition loop so the exact worker
+/// lifecycle — in particular what happens to `raw_rx` and to `scan` once
+/// the worker stops reading — can be exercised directly in tests without a
+/// real Kafka broker (see `tests::worker_giving_up_early_wakes_a_parked_scanner`).
+#[allow(clippy::too_many_arguments)]
+async fn drive_partition(
+    mut raw_rx: mpsc::Receiver<RawRecord>,
+    scan: JoinHandle<Result<(), String>>,
+    partition: i32,
+    sr: Option<Arc<SchemaRegistry>>,
+    filter: Filter,
+    tx: mpsc::Sender<SearchEvent>,
+    cancelled: Arc<AtomicBool>,
+    scanned: Arc<AtomicU64>,
+    matched: Arc<AtomicU64>,
+    last_reported: Arc<AtomicU64>,
+    error_sent: Arc<AtomicBool>,
+    grand_total: u64,
+    max_matches: u64,
+) {
+    while let Some(record) = raw_rx.recv().await {
+        let msg = one_message_out(record, sr.as_deref()).await;
+        if filter::matches(&filter, &msg) {
+            let m = matched.fetch_add(1, Ordering::SeqCst) + 1;
+            if m > max_matches {
+                cancelled.store(true, Ordering::SeqCst);
+                break;
+            }
+            if tx.send(SearchEvent::Match(Box::new(msg))).await.is_err() {
+                cancelled.store(true, Ordering::SeqCst);
+                break;
+            }
+            if m == max_matches {
+                cancelled.store(true, Ordering::SeqCst);
+            }
+        }
+        maybe_report_progress(&scanned, &last_reported, &matched, grand_total, &tx);
+    }
+
+    // F1 fix: if this worker broke out early (max-matches hit, or the SSE
+    // channel closed) the blocking scan thread may be parked in
+    // `blocking_send`/`send_or_stop`, waiting for buffer space that will
+    // never free up now that nobody is reading. Dropping `raw_rx` closes
+    // the channel and wakes it immediately — without this the scanner
+    // thread, its semaphore permit, and its BaseConsumer leak forever (a
+    // zombie scan). This must happen *before* awaiting `scan` below.
+    drop(raw_rx);
+
+    match scan.await {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => report_scan_error(&tx, &cancelled, &error_sent, e).await,
+        Err(join_err) => {
+            report_scan_error(
+                &tx,
+                &cancelled,
+                &error_sent,
+                format!("partition {partition} scan task failed: {join_err}"),
+            ).await;
+        }
+    }
+}
+
+/// Emits a `SearchEvent::Progress` for each 500-record boundary the shared
+/// `scanned` counter has crossed since the last report, advancing
+/// `last_reported` via compare-exchange so exactly one worker emits per
+/// boundary and reported `scanned` values are strictly increasing — never
+/// skipped, duplicated, or delivered out of order across partitions.
+fn maybe_report_progress(
+    scanned: &AtomicU64,
+    last_reported: &AtomicU64,
+    matched: &AtomicU64,
+    grand_total: u64,
+    tx: &mpsc::Sender<SearchEvent>,
+) {
+    let s = scanned.load(Ordering::SeqCst);
+    loop {
+        let last = last_reported.load(Ordering::SeqCst);
+        let next_boundary = last + PROGRESS_EVERY;
+        if s < next_boundary {
+            return;
+        }
+        if last_reported.compare_exchange(last, next_boundary, Ordering::SeqCst, Ordering::SeqCst).is_ok() {
+            let _ = tx.try_send(SearchEvent::Progress {
+                scanned: next_boundary,
+                total: grand_total,
+                matches: matched.load(Ordering::SeqCst),
+            });
+            // `s` may already be several boundaries ahead (e.g. this
+            // worker was scheduled late); loop to catch up instead of
+            // reporting only one boundary per call.
+            continue;
+        }
+        // CAS lost the race: another worker just advanced `last_reported`.
+        // Reload and re-check against the (unchanged) `s` we captured.
+    }
+}
+
+/// Reports a partition scan failure as a terminal `error` event and stops
+/// every other scanner. `error_sent` ensures only the first failure (of
+/// possibly several concurrent ones, e.g. a broker outage hitting every
+/// partition at once) reaches the client — later ones are superseded since
+/// the stream is ending regardless.
+async fn report_scan_error(
+    tx: &mpsc::Sender<SearchEvent>,
+    cancelled: &AtomicBool,
+    error_sent: &AtomicBool,
+    message: String,
+) {
+    cancelled.store(true, Ordering::SeqCst);
+    if error_sent.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_ok() {
+        let _ = tx.send(SearchEvent::Error { code: "kafka_error".into(), message }).await;
+    }
+}
+
+/// Hands `record` to the async decode/filter task without ever parking
+/// forever: a plain `blocking_send` on a full channel blocks until the
+/// receiver drains it, but if the receiver has already stopped reading
+/// (its worker hit max-matches, or the SSE client disconnected) nobody
+/// ever will. Retrying with `try_send` and re-checking `cancelled` between
+/// attempts lets the scanner notice and give up instead of leaking its
+/// thread and consumer forever.
+fn send_or_stop(out: &mpsc::Sender<RawRecord>, mut record: RawRecord, cancelled: &AtomicBool) -> bool {
+    loop {
+        match out.try_send(record) {
+            Ok(()) => return true,
+            Err(mpsc::error::TrySendError::Closed(_)) => return false,
+            Err(mpsc::error::TrySendError::Full(rec)) => {
+                if cancelled.load(Ordering::SeqCst) {
+                    return false;
+                }
+                record = rec;
+                std::thread::sleep(SEND_RETRY_INTERVAL);
+            }
+        }
+    }
 }
 
 fn scan_partition_blocking(
@@ -153,6 +298,8 @@ fn scan_partition_blocking(
     consumer.assign(&tpl).map_err(|e| e.to_string())?;
 
     let mut next = r.start;
+    let mut last_progress = Instant::now();
+    let mut last_err: Option<String> = None;
     while next < r.end && !cancelled.load(Ordering::SeqCst) {
         match consumer.poll(Duration::from_millis(200)) {
             Some(Ok(msg)) => {
@@ -161,6 +308,7 @@ fn scan_partition_blocking(
                 }
                 next = msg.offset() + 1;
                 scanned.fetch_add(1, Ordering::SeqCst);
+                last_progress = Instant::now();
                 let headers = msg
                     .headers()
                     .map(|hs| hs.iter().map(|h| (h.key.to_string(), h.value.unwrap_or_default().to_vec())).collect())
@@ -173,12 +321,19 @@ fn scan_partition_blocking(
                     value: msg.payload().map(<[u8]>::to_vec),
                     headers,
                 };
-                if out.blocking_send(record).is_err() {
+                if !send_or_stop(&out, record, cancelled) {
                     break;
                 }
             }
             Some(Err(rdkafka::error::KafkaError::PartitionEOF(_))) => break,
-            Some(Err(_)) | None => {}
+            Some(Err(e)) => {
+                last_err = Some(e.to_string());
+            }
+            None => {}
+        }
+        if last_progress.elapsed() > STALL_TIMEOUT {
+            let reason = last_err.unwrap_or_else(|| "no messages received".to_string());
+            return Err(format!("partition {} stalled: {reason}", r.partition));
         }
     }
     Ok(())
@@ -186,4 +341,76 @@ fn scan_partition_blocking(
 
 async fn one_message_out(record: RawRecord, sr: Option<&SchemaRegistry>) -> MessageOut {
     fetch::to_message_out(vec![record], sr).await.pop().expect("one in, one out")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn dummy_record(offset: i64) -> RawRecord {
+        RawRecord { partition: 0, offset, timestamp_ms: Some(0), key: None, value: Some(b"x".to_vec()), headers: vec![] }
+    }
+
+    /// F1 regression, reproduced deterministically without Kafka.
+    ///
+    /// `drive_partition`'s recv loop breaks out early once the match cap is
+    /// hit (here: after exactly 2 records, via `max_matches = 1`), while
+    /// its scanner (a fake blocking task standing in for
+    /// `scan_partition_blocking`) is still trying to push more records
+    /// into a small channel. With capacity 2 and 2 reads, at most 4 sends
+    /// can ever succeed (2 to fill the initial buffer, 2 more unblocked by
+    /// the 2 reads) — the fake scanner tries to push 10, so its 5th send
+    /// is *guaranteed* to block forever once nobody drains the channel
+    /// again, unless `drive_partition` drops its receiver (waking a
+    /// `send_or_stop`-style scanner, or failing a plain blocking send)
+    /// before joining the scanner's `JoinHandle`.
+    #[tokio::test]
+    async fn worker_giving_up_early_wakes_a_parked_scanner() {
+        let (raw_tx, raw_rx) = mpsc::channel::<RawRecord>(2);
+        let cancel_flag = Arc::new(AtomicBool::new(false));
+        let scan_cancel = cancel_flag.clone();
+        let scan: JoinHandle<Result<(), String>> = tokio::task::spawn_blocking(move || {
+            for i in 0..10i64 {
+                if !send_or_stop(&raw_tx, dummy_record(i), &scan_cancel) {
+                    return Ok(());
+                }
+            }
+            Ok(())
+        });
+
+        let (tx, mut rx) = mpsc::channel::<SearchEvent>(16);
+        // Keep the SSE-side receiver alive and draining so `tx.send` for
+        // the first match doesn't itself fail (that's a different code
+        // path, not what this test is about).
+        let drain = tokio::spawn(async move { while rx.recv().await.is_some() {} });
+
+        let scanned = Arc::new(AtomicU64::new(0));
+        let matched = Arc::new(AtomicU64::new(0));
+        let last_reported = Arc::new(AtomicU64::new(0));
+        let error_sent = Arc::new(AtomicBool::new(false));
+
+        let drive = drive_partition(
+            raw_rx,
+            scan,
+            0,
+            None,
+            Filter::ValueContains("x".into()),
+            tx.clone(),
+            cancel_flag,
+            scanned,
+            matched,
+            last_reported,
+            error_sent,
+            10,
+            1, // max_matches: the 2nd match (m=2) exceeds this and breaks
+        );
+
+        let result = tokio::time::timeout(Duration::from_secs(5), drive).await;
+        drop(tx);
+        let _ = drain.await;
+        assert!(
+            result.is_ok(),
+            "drive_partition hung: a scanner parked mid-send on a full, un-drained channel was never woken"
+        );
+    }
 }
