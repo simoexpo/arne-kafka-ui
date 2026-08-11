@@ -37,7 +37,7 @@ pub fn read_message_indexes(bytes: &[u8]) -> Result<(Vec<i32>, &[u8]), String> {
     if count == 0 {
         return Ok((vec![0], rest));
     }
-    if count < 0 || count > MAX_MESSAGE_INDEX_COUNT {
+    if !(0..=MAX_MESSAGE_INDEX_COUNT).contains(&count) {
         return Err(format!(
             "invalid message index count {count} (must be between 0 and {MAX_MESSAGE_INDEX_COUNT})"
         ));
@@ -81,7 +81,12 @@ pub fn decode(proto_src: &str, payload_after_header: &[u8]) -> Result<String, St
     let fd_proto = parsed
         .file_descriptors
         .into_iter()
-        .find(|fd| fd.name.as_deref().map(|n| n.ends_with("schema.proto")).unwrap_or(false))
+        .find(|fd| {
+            fd.name
+                .as_deref()
+                .map(|n| n.ends_with("schema.proto"))
+                .unwrap_or(false)
+        })
         .ok_or("proto parse produced no descriptor")?;
     let fd = FileDescriptor::new_dynamic(fd_proto, &[]).map_err(|e| format!("descriptor: {e}"))?;
     let md = fd

@@ -1,3 +1,5 @@
+#![allow(deprecated)]
+
 use apache_avro::{from_avro_datum, Schema};
 
 pub fn decode(schema_json: &str, datum: &[u8]) -> Result<String, String> {
