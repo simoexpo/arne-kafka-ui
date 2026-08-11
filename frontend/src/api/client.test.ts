@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { ApiError, fetchJson, getClusters } from './client'
+import { ApiError, fetchJson, getClusters, getMessages } from './client'
 
 function mockFetchOnce(status: number, body: unknown) {
   vi.stubGlobal('fetch', vi.fn().mockResolvedValue(
@@ -40,5 +40,18 @@ describe('endpoints', () => {
     mockFetchOnce(200, { clusters: [] })
     await getClusters()
     expect(vi.mocked(fetch).mock.calls[0][0]).toBe('/api/clusters')
+  })
+
+  it('fetchJson forwards an AbortSignal', async () => {
+    mockFetchOnce(200, { ok: true })
+    const controller = new AbortController()
+    await fetchJson('/api/x', controller.signal)
+    expect(vi.mocked(fetch).mock.calls[0][1]).toEqual({ signal: controller.signal })
+  })
+
+  it('getMessages builds anchor query strings', async () => {
+    mockFetchOnce(200, { messages: [], as_of: 1 })
+    await getMessages('c', 't', { anchor: 'offset', partition: 0, offset: 42, limit: 50 })
+    expect(vi.mocked(fetch).mock.calls[0][0]).toBe('/api/clusters/c/topics/t/messages?anchor=offset&partition=0&offset=42&limit=50')
   })
 })
