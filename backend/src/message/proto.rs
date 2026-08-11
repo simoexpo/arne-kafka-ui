@@ -3,6 +3,16 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 static CALL_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+/// Removes its directory (recursively) when dropped, so early `?` returns
+/// in `decode` still clean up the per-call temp dir.
+struct TempDirGuard(std::path::PathBuf);
+
+impl Drop for TempDirGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
 fn read_zigzag_varint(bytes: &[u8]) -> Result<(i64, &[u8]), String> {
     let mut result: u64 = 0;
     let mut shift = 0;
@@ -20,10 +30,17 @@ fn read_zigzag_varint(bytes: &[u8]) -> Result<(i64, &[u8]), String> {
     Err("truncated varint in message indexes".into())
 }
 
+const MAX_MESSAGE_INDEX_COUNT: i64 = 128;
+
 pub fn read_message_indexes(bytes: &[u8]) -> Result<(Vec<i32>, &[u8]), String> {
     let (count, mut rest) = read_zigzag_varint(bytes)?;
     if count == 0 {
         return Ok((vec![0], rest));
+    }
+    if count < 0 || count > MAX_MESSAGE_INDEX_COUNT {
+        return Err(format!(
+            "invalid message index count {count} (must be between 0 and {MAX_MESSAGE_INDEX_COUNT})"
+        ));
     }
     let mut indexes = Vec::with_capacity(count as usize);
     for _ in 0..count {
@@ -50,6 +67,7 @@ pub fn decode(proto_src: &str, payload_after_header: &[u8]) -> Result<String, St
         call_id
     ));
     std::fs::create_dir_all(&dir).map_err(|e| format!("tmp dir: {e}"))?;
+    let _dir_guard = TempDirGuard(dir.clone());
     let path = dir.join("schema.proto");
     std::fs::write(&path, proto_src).map_err(|e| format!("tmp write: {e}"))?;
 
@@ -95,6 +113,11 @@ message User {
         let (idx, rest) = read_message_indexes(&[0x00, 0xAA]).unwrap();
         assert_eq!(idx, vec![0]);
         assert_eq!(rest, &[0xAA]);
+    }
+
+    #[test]
+    fn negative_index_count_is_error() {
+        assert!(read_message_indexes(&[0x01, 0x00]).is_err());
     }
 
     #[test]
