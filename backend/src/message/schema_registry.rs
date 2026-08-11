@@ -25,6 +25,17 @@ pub struct RegisteredSchema {
     pub schema: String,
 }
 
+/// The parsed/structured form of a registered schema — an
+/// `apache_avro::Schema` or a protobuf `FileDescriptor`, rather than the raw
+/// schema string. Parsing is the expensive part of decoding (temp-file +
+/// `protobuf_parse` for protobuf, a full grammar parse for Avro), and
+/// schemas are immutable per id, so `SchemaRegistry` caches this alongside
+/// the raw string cache instead of re-parsing on every message.
+pub enum ParsedSchema {
+    Avro(apache_avro::Schema),
+    Protobuf(protobuf::reflect::FileDescriptor),
+}
+
 #[derive(Deserialize)]
 struct SrResponse {
     schema: String,
@@ -36,6 +47,7 @@ pub struct SchemaRegistry {
     base: String,
     http: reqwest::Client,
     cache: RwLock<HashMap<i32, Arc<RegisteredSchema>>>,
+    parsed_cache: RwLock<HashMap<i32, Arc<ParsedSchema>>>,
     negative_cache: RwLock<HashMap<i32, NegativeEntry>>,
 }
 
@@ -48,6 +60,7 @@ impl SchemaRegistry {
                 .build()
                 .expect("reqwest client"),
             cache: RwLock::new(HashMap::new()),
+            parsed_cache: RwLock::new(HashMap::new()),
             negative_cache: RwLock::new(HashMap::new()),
         }
     }
@@ -92,6 +105,28 @@ impl SchemaRegistry {
         };
         let entry = Arc::new(RegisteredSchema { schema_type, schema: body.schema });
         self.cache.write().await.insert(id, entry.clone());
+        Ok(entry)
+    }
+
+    /// Returns the parsed/structured form of schema `id` (an
+    /// `apache_avro::Schema` or protobuf `FileDescriptor`), parsing it only
+    /// on first use and caching the result thereafter — schemas are
+    /// immutable per id, so re-parsing on every decode call is pure waste.
+    /// Not meaningful for `SchemaType::Json`, which has no parsed artifact;
+    /// callers decode JSON-typed schemas via `decode::decode_plain`
+    /// directly instead of calling this.
+    pub async fn parsed(&self, id: i32) -> Result<Arc<ParsedSchema>, String> {
+        if let Some(hit) = self.parsed_cache.read().await.get(&id) {
+            return Ok(hit.clone());
+        }
+        let schema = self.schema(id).await?;
+        let parsed = match schema.schema_type {
+            SchemaType::Avro => crate::message::avro::parse_schema(&schema.schema).map(ParsedSchema::Avro)?,
+            SchemaType::Protobuf => crate::message::proto::build_descriptor(&schema.schema).map(ParsedSchema::Protobuf)?,
+            SchemaType::Json => return Err(format!("schema id {id} is JSON-typed and has no parsed artifact")),
+        };
+        let entry = Arc::new(parsed);
+        self.parsed_cache.write().await.insert(id, entry.clone());
         Ok(entry)
     }
 }
@@ -163,6 +198,31 @@ pub(crate) mod tests {
     /// unreachable/misbehaving registry this stampedes it on every message.
     /// Two lookups of the same failing id within the negative-cache TTL must
     /// hit the registry once.
+    /// I3 regression: decoding re-parsed the schema string (rebuilding the
+    /// Avro `Schema` / protobuf `FileDescriptor` from scratch) on every
+    /// single message, even though schemas are immutable per id and already
+    /// have a string-level cache. `parsed()` must reuse the same parsed
+    /// artifact across repeated calls for the same id — proven here by
+    /// pointer identity: a fresh parse would allocate a new object, so two
+    /// calls returning the *same* `Arc` allocation means the parse ran once.
+    #[tokio::test]
+    async fn parsed_avro_schema_is_cached_and_reused() {
+        let sr = SchemaRegistry::new(&mock_sr_for_decode().await);
+        let p1 = sr.parsed(7).await.unwrap();
+        let p2 = sr.parsed(7).await.unwrap();
+        assert!(Arc::ptr_eq(&p1, &p2), "parsed avro schema must be cached, not reparsed each call");
+        assert!(matches!(&*p1, ParsedSchema::Avro(_)));
+    }
+
+    #[tokio::test]
+    async fn parsed_protobuf_schema_is_cached_and_reused() {
+        let sr = SchemaRegistry::new(&mock_sr_for_decode().await);
+        let p1 = sr.parsed(8).await.unwrap();
+        let p2 = sr.parsed(8).await.unwrap();
+        assert!(Arc::ptr_eq(&p1, &p2), "parsed protobuf descriptor must be cached, not reparsed each call");
+        assert!(matches!(&*p1, ParsedSchema::Protobuf(_)));
+    }
+
     #[tokio::test]
     async fn failing_lookup_is_negatively_cached_within_ttl() {
         let hits = Arc::new(AtomicUsize::new(0));

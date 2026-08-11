@@ -1,6 +1,6 @@
 use super::{DecodedPayload, Encoding};
 use base64::Engine as _;
-use crate::message::schema_registry::{SchemaRegistry, SchemaType};
+use crate::message::schema_registry::{ParsedSchema, SchemaRegistry, SchemaType};
 use crate::message::{avro, proto};
 
 pub fn confluent_schema_id(bytes: &[u8]) -> Option<i32> {
@@ -47,8 +47,16 @@ pub async fn decode_payload(bytes: Option<&[u8]>, sr: Option<&SchemaRegistry>) -
     };
     let body = &bytes[5..];
     let result = match schema.schema_type {
-        SchemaType::Avro => avro::decode(&schema.schema, body).map(|text| (Encoding::Avro, text)),
-        SchemaType::Protobuf => proto::decode(&schema.schema, body).map(|text| (Encoding::Protobuf, text)),
+        // Avro/Protobuf decoding needs the *parsed* schema artifact, not
+        // the raw string — `sr.parsed` parses it once per schema id and
+        // caches the result, instead of re-parsing on every message (I3).
+        SchemaType::Avro | SchemaType::Protobuf => match sr.parsed(schema_id).await {
+            Err(e) => Err(e),
+            Ok(parsed) => match &*parsed {
+                ParsedSchema::Avro(s) => avro::decode_with_schema(s, body).map(|text| (Encoding::Avro, text)),
+                ParsedSchema::Protobuf(fd) => proto::decode_with_descriptor(fd, body).map(|text| (Encoding::Protobuf, text)),
+            },
+        },
         SchemaType::Json => {
             let plain = decode_plain(body);
             // `decode_plain` labels non-JSON bodies Utf8/Bytes; only trust

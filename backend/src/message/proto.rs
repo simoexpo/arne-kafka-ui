@@ -51,14 +51,13 @@ pub fn read_message_indexes(bytes: &[u8]) -> Result<(Vec<i32>, &[u8]), String> {
     Ok((indexes, rest))
 }
 
-pub fn decode(proto_src: &str, payload_after_header: &[u8]) -> Result<String, String> {
-    let (indexes, body) = read_message_indexes(payload_after_header)?;
-    if indexes != [0] {
-        return Err(format!(
-            "unsupported protobuf message index path {indexes:?} (v1 decodes only the first top-level message)"
-        ));
-    }
-
+/// Parses `.proto` source text into a `FileDescriptor`. This is the
+/// expensive part of protobuf decoding — it shells out to `protobuf-parse`
+/// via a temp file and rebuilds the descriptor from scratch — so callers
+/// that decode many messages against the same schema id should parse once
+/// and reuse the result via `decode_with_descriptor` (see
+/// `SchemaRegistry::parsed`'s cache), rather than calling this per message.
+pub fn build_descriptor(proto_src: &str) -> Result<FileDescriptor, String> {
     // protobuf-parse reads files from disk; write the SR schema text to a temp file
     let call_id = CALL_COUNTER.fetch_add(1, Ordering::Relaxed);
     let dir = std::env::temp_dir().join(format!(
@@ -88,7 +87,19 @@ pub fn decode(proto_src: &str, payload_after_header: &[u8]) -> Result<String, St
                 .unwrap_or(false)
         })
         .ok_or("proto parse produced no descriptor")?;
-    let fd = FileDescriptor::new_dynamic(fd_proto, &[]).map_err(|e| format!("descriptor: {e}"))?;
+    FileDescriptor::new_dynamic(fd_proto, &[]).map_err(|e| format!("descriptor: {e}"))
+}
+
+/// Decodes `payload_after_header` (the confluent-framed body past the
+/// magic byte + schema id + message indexes) using an already-parsed
+/// `FileDescriptor`. Cheap: no re-parsing of the `.proto` source.
+pub fn decode_with_descriptor(fd: &FileDescriptor, payload_after_header: &[u8]) -> Result<String, String> {
+    let (indexes, body) = read_message_indexes(payload_after_header)?;
+    if indexes != [0] {
+        return Err(format!(
+            "unsupported protobuf message index path {indexes:?} (v1 decodes only the first top-level message)"
+        ));
+    }
     let md = fd
         .messages()
         .next()
@@ -97,6 +108,16 @@ pub fn decode(proto_src: &str, payload_after_header: &[u8]) -> Result<String, St
         .parse_from_bytes(body)
         .map_err(|e| format!("protobuf decode: {e}"))?;
     protobuf_json_mapping::print_to_string(&*msg).map_err(|e| format!("proto to json: {e}"))
+}
+
+/// Parses `proto_src` and decodes `payload_after_header` in one call. Kept
+/// for callers that don't need to reuse the parsed descriptor across
+/// multiple decodes (and for tests); the schema registry decode path uses
+/// `build_descriptor` + `decode_with_descriptor` separately so it can cache
+/// the descriptor per schema id.
+pub fn decode(proto_src: &str, payload_after_header: &[u8]) -> Result<String, String> {
+    let fd = build_descriptor(proto_src)?;
+    decode_with_descriptor(&fd, payload_after_header)
 }
 
 #[cfg(test)]
