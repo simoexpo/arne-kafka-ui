@@ -1,5 +1,6 @@
 pub mod clusters;
 pub mod groups;
+pub mod messages;
 pub mod topics;
 
 use crate::state::AppState;
@@ -14,6 +15,7 @@ pub fn app(state: AppState) -> Router {
         .route("/api/clusters/{cluster}/topics/{topic}", get(topics::detail))
         .route("/api/clusters/{cluster}/topics/{topic}/consumers", get(topics::consumers))
         .route("/api/clusters/{cluster}/topics/{topic}/throughput", get(topics::throughput))
+        .route("/api/clusters/{cluster}/topics/{topic}/messages", get(messages::browse))
         .route("/api/clusters/{cluster}/groups", get(groups::list))
         .route("/api/clusters/{cluster}/groups/{group}", get(groups::detail))
         .with_state(state)

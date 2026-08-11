@@ -184,3 +184,50 @@ async fn topics_on_unknown_cluster_is_404() {
     assert_eq!(status, 404);
     assert_eq!(body["code"], "cluster_not_found");
 }
+
+#[tokio::test]
+async fn browse_latest_returns_newest_messages_decoded() {
+    let bootstrap = start_kafka().await;
+    create_topic(&bootstrap, "browse-topic", 2).await;
+    produce(&bootstrap, "browse-topic", 10).await; // keys k0..k9, values v0..v9
+    let state = state_for(&bootstrap, vec![]);
+    let (status, body) = get_json(app(state), "/api/clusters/test/topics/browse-topic/messages?anchor=latest&limit=4").await;
+    assert_eq!(status, 200, "body: {body}");
+    let messages = body["messages"].as_array().unwrap();
+    assert_eq!(messages.len(), 4);
+    for m in messages {
+        assert_eq!(m["value"]["encoding"], "utf8");
+        assert!(m["value"]["text"].as_str().unwrap().starts_with('v'));
+        assert!(m["offset"].as_i64().is_some());
+        assert!(m["timestamp_ms"].as_i64().unwrap() > 0);
+    }
+    assert!(body["as_of"].as_i64().unwrap() > 0);
+}
+
+#[tokio::test]
+async fn browse_by_offset_is_exact() {
+    let bootstrap = start_kafka().await;
+    create_topic(&bootstrap, "browse-offset-topic", 1).await;
+    produce(&bootstrap, "browse-offset-topic", 10).await;
+    let state = state_for(&bootstrap, vec![]);
+    let (status, body) = get_json(
+        app(state),
+        "/api/clusters/test/topics/browse-offset-topic/messages?anchor=offset&partition=0&offset=3&limit=2",
+    ).await;
+    assert_eq!(status, 200, "body: {body}");
+    let messages = body["messages"].as_array().unwrap();
+    assert_eq!(messages.len(), 2);
+    let offsets: Vec<i64> = messages.iter().map(|m| m["offset"].as_i64().unwrap()).collect();
+    assert!(offsets.contains(&3) && offsets.contains(&4), "got offsets {offsets:?}");
+}
+
+#[tokio::test]
+async fn browse_bad_anchor_is_400_and_unknown_topic_404() {
+    let bootstrap = start_kafka().await;
+    let state = state_for(&bootstrap, vec![]);
+    let (status, body) = get_json(app(state.clone()), "/api/clusters/test/topics/x/messages?anchor=sideways").await;
+    assert_eq!(status, 400, "body: {body}");
+    let (status, body) = get_json(app(state), "/api/clusters/test/topics/ghost-topic/messages?anchor=latest").await;
+    assert_eq!(status, 404, "body: {body}");
+    assert_eq!(body["code"], "topic_not_found");
+}
