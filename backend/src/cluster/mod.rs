@@ -3,6 +3,7 @@ pub mod registry;
 pub mod sampler;
 
 use crate::config::{ClusterConfig, SaslMechanism};
+use crate::message::schema_registry::SchemaRegistry;
 use rdkafka::admin::AdminClient;
 use rdkafka::client::DefaultClientContext;
 use rdkafka::consumer::{BaseConsumer, Consumer};
@@ -45,6 +46,7 @@ pub struct ClusterHandle {
     pub name: String,
     pub config: ClusterConfig,
     pub sampler: Arc<sampler::SamplerStore>,
+    pub schema_registry: Option<Arc<SchemaRegistry>>,
     consumer: Arc<BaseConsumer>,
     admin: AdminClient<DefaultClientContext>,
 }
@@ -71,10 +73,12 @@ impl ClusterHandle {
         let cc = build_client_config(&config);
         let consumer: BaseConsumer = cc.create()?;
         let admin: AdminClient<DefaultClientContext> = cc.create()?;
+        let schema_registry = config.schema_registry.as_ref().map(|sr| Arc::new(SchemaRegistry::new(&sr.url)));
         Ok(Self {
             name: config.name.clone(),
             config,
             sampler: Arc::new(sampler::SamplerStore::new(360)),
+            schema_registry,
             consumer: Arc::new(consumer),
             admin,
         })

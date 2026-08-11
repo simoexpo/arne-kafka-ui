@@ -63,11 +63,16 @@ impl SchemaRegistry {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use axum::{extract::Path, routing::get, Json, Router};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+
+    pub(crate) async fn mock_sr_for_decode() -> String {
+        let hits = Arc::new(AtomicUsize::new(0));
+        mock_sr(hits).await
+    }
 
     async fn mock_sr(hits: Arc<AtomicUsize>) -> String {
         let app = Router::new().route(
