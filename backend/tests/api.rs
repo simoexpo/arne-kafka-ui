@@ -231,3 +231,62 @@ async fn browse_bad_anchor_is_400_and_unknown_topic_404() {
     assert_eq!(status, 404, "body: {body}");
     assert_eq!(body["code"], "topic_not_found");
 }
+
+#[tokio::test]
+async fn search_streams_matches_progress_and_done() {
+    let bootstrap = start_kafka().await;
+    create_topic(&bootstrap, "search-topic", 2).await;
+    produce(&bootstrap, "search-topic", 30).await; // v0..v29
+    let state = state_for(&bootstrap, vec![]);
+    let events = collect_sse(
+        app(state),
+        "/api/clusters/test/topics/search-topic/search?range=last_n&n=30&filter=value_contains&q=v2",
+        200,
+    ).await;
+
+    let matches: Vec<_> = events.iter().filter(|(n, _)| n == "match").collect();
+    // v2, v20..v29 = 11 matches
+    assert_eq!(matches.len(), 11, "events: {events:?}");
+    for (_, m) in &matches {
+        assert!(m["value"]["text"].as_str().unwrap().contains("v2"));
+    }
+    let (last_name, last) = events.last().unwrap();
+    assert_eq!(last_name, "done");
+    assert_eq!(last["reason"], "complete");
+    let progress: Vec<_> = events.iter().filter(|(n, _)| n == "progress").collect();
+    assert!(!progress.is_empty(), "expected progress events");
+    let (_, p) = progress.last().unwrap();
+    assert_eq!(p["total"], 30);
+    assert_eq!(p["scanned"], 30);
+    assert_eq!(p["matches"], 11);
+}
+
+#[tokio::test]
+async fn search_stops_at_max_matches() {
+    use betrachtung::config::Limits;
+    let bootstrap = start_kafka().await;
+    create_topic(&bootstrap, "search-cap-topic", 1).await;
+    produce(&bootstrap, "search-cap-topic", 20).await;
+    let mut state = state_for(&bootstrap, vec![]);
+    state.limits = std::sync::Arc::new(Limits { max_search_matches: 3, ..Limits::default() });
+    let events = collect_sse(
+        app(state),
+        "/api/clusters/test/topics/search-cap-topic/search?range=last_n&n=20&filter=value_contains&q=v",
+        200,
+    ).await;
+    let matches = events.iter().filter(|(n, _)| n == "match").count();
+    assert_eq!(matches, 3, "events: {events:?}");
+    assert_eq!(events.last().unwrap().1["reason"], "max_matches");
+}
+
+#[tokio::test]
+async fn search_bad_filter_is_error_event_or_400() {
+    let bootstrap = start_kafka().await;
+    let state = state_for(&bootstrap, vec![]);
+    let (status, body) = get_json(
+        app(state),
+        "/api/clusters/test/topics/x/search?range=last_n&n=10&filter=sideways&q=x",
+    ).await;
+    assert_eq!(status, 400, "body: {body}");
+    assert_eq!(body["code"], "bad_request");
+}

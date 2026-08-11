@@ -5,6 +5,7 @@ pub mod filter;
 pub mod proto;
 pub mod range;
 pub mod schema_registry;
+pub mod search;
 
 use serde::Serialize;
 

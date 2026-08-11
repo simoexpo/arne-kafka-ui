@@ -198,6 +198,41 @@ pub async fn consume_and_commit(bootstrap: &str, topic: &str, group: &str, count
     .unwrap();
 }
 
+/// Start `app` on an ephemeral port and collect SSE events (name, json) from
+/// `path` until a `done`/`error` event or `max` events.
+pub async fn collect_sse(app: Router, path: &str, max: usize) -> Vec<(String, serde_json::Value)> {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let res = reqwest::get(format!("http://{addr}{path}")).await.unwrap();
+    assert_eq!(res.status(), 200, "sse endpoint status");
+    let mut events = Vec::new();
+    let mut buf = String::new();
+    let mut stream = res.bytes_stream();
+    use futures_util::StreamExt;
+    while let Some(chunk) = stream.next().await {
+        buf.push_str(&String::from_utf8_lossy(&chunk.unwrap()));
+        while let Some(pos) = buf.find("\n\n") {
+            let frame = buf[..pos].to_string();
+            buf.drain(..pos + 2);
+            let mut name = String::new();
+            let mut data = String::new();
+            for line in frame.lines() {
+                if let Some(v) = line.strip_prefix("event: ") { name = v.to_string(); }
+                if let Some(v) = line.strip_prefix("data: ") { data.push_str(v); }
+            }
+            if name.is_empty() { continue; } // keep-alive comments
+            let json = serde_json::from_str(&data).unwrap_or(serde_json::Value::Null);
+            let terminal = name == "done" || name == "error";
+            events.push((name, json));
+            if terminal || events.len() >= max {
+                return events;
+            }
+        }
+    }
+    events
+}
+
 pub async fn produce(bootstrap: &str, topic: &str, count: usize) {
     let producer: FutureProducer = client(bootstrap).create().unwrap();
     for i in 0..count {

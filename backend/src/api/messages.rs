@@ -1,14 +1,22 @@
 use crate::cluster::{ClusterHandle, ADMIN_TIMEOUT};
 use crate::error::{self, ApiError};
 use crate::message::fetch;
+use crate::message::filter::Filter;
 use crate::message::range::{self, PartitionRange};
+use crate::message::search::{self, SearchEvent};
 use crate::state::AppState;
 use crate::util::now_ms;
 use axum::extract::{Path, Query, State};
+use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::Json;
+use futures_util::stream::Stream;
 use rdkafka::consumer::Consumer;
 use serde::Deserialize;
 use serde_json::{json, Value};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use tokio_stream::wrappers::ReceiverStream;
+use tokio_stream::StreamExt as _;
 
 #[derive(Debug, Deserialize)]
 pub struct BrowseParams {
@@ -133,4 +141,100 @@ pub async fn browse(
     messages.sort_by(|a, b| b.timestamp_ms.cmp(&a.timestamp_ms).then(b.offset.cmp(&a.offset)));
     messages.truncate(limit as usize);
     Ok(Json(json!({ "messages": messages, "as_of": now_ms() })))
+}
+
+/// `latest_ranges` casts `n` to `i64` unchecked; capping here keeps that cast
+/// from ever wrapping on an adversarial `n`.
+const MAX_SEARCH_N: u64 = 1_000_000;
+
+#[derive(Debug, Deserialize)]
+pub struct SearchParams {
+    pub range: String,
+    pub n: Option<u64>,
+    pub from: Option<i64>,
+    pub to: Option<i64>,
+    pub from_ms: Option<i64>,
+    pub to_ms: Option<i64>,
+    pub partition: Option<i32>,
+    pub filter: String,
+    pub q: String,
+    pub path: Option<String>,
+}
+
+/// Sets the cancel flag when the SSE stream is dropped (client disconnected),
+/// stopping every partition scanner at its next poll iteration — no zombie
+/// scans survive a client that goes away mid-search.
+struct CancelOnDrop(Arc<AtomicBool>);
+impl Drop for CancelOnDrop {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+}
+
+pub async fn search(
+    State(state): State<AppState>,
+    Path((cluster, topic)): Path<(String, String)>,
+    Query(params): Query<SearchParams>,
+) -> Result<Sse<impl Stream<Item = Result<Event, std::convert::Infallible>>>, ApiError> {
+    let handle = state.registry.get(&cluster)?;
+    let filter = Filter::parse(&params.filter, &params.q, params.path.as_deref())
+        .map_err(ApiError::bad_request)?;
+
+    if let Some(n) = params.n
+        && n > MAX_SEARCH_N
+    {
+        return Err(ApiError::bad_request(format!("n must be <= {MAX_SEARCH_N}")));
+    }
+
+    let ranges = {
+        let handle = handle.clone();
+        let topic = topic.clone();
+        let range_kind = params.range.clone();
+        tokio::task::spawn_blocking(move || -> Result<_, ApiError> {
+            let wm = watermarks_blocking(&handle, &topic)?;
+            match range_kind.as_str() {
+                "last_n" => {
+                    let n = params.n.ok_or_else(|| ApiError::bad_request("range=last_n requires n"))?;
+                    Ok(range::latest_ranges(&wm, n))
+                }
+                "offsets" => {
+                    let from = params.from.ok_or_else(|| ApiError::bad_request("range=offsets requires from"))?;
+                    let to = params.to.ok_or_else(|| ApiError::bad_request("range=offsets requires to"))?;
+                    let parts: Vec<i32> = match params.partition {
+                        Some(p) => vec![p],
+                        None => wm.iter().map(|&(p, _, _)| p).collect(),
+                    };
+                    let starts: Vec<(i32, Option<i64>)> = parts.iter().map(|&p| (p, Some(from))).collect();
+                    let ends: Vec<(i32, i64)> = parts.iter().map(|&p| (p, to)).collect();
+                    Ok(range::window_ranges(&wm, &starts, Some(&ends)))
+                }
+                "ts" => {
+                    let from_ms = params.from_ms.ok_or_else(|| ApiError::bad_request("range=ts requires from_ms"))?;
+                    let starts = ts_starts_blocking(&handle, &topic, &wm, from_ms)?;
+                    let ends = match params.to_ms {
+                        Some(to_ms) => {
+                            let end_starts = ts_starts_blocking(&handle, &topic, &wm, to_ms)?;
+                            Some(end_starts.into_iter()
+                                .map(|(p, o)| (p, o.unwrap_or_else(|| {
+                                    wm.iter().find(|(wp, _, _)| *wp == p).map(|&(_, _, hi)| hi).unwrap_or(0)
+                                })))
+                                .collect::<Vec<_>>())
+                        }
+                        None => None,
+                    };
+                    Ok(range::window_ranges(&wm, &starts, ends.as_deref()))
+                }
+                other => Err(ApiError::bad_request(format!("unknown range '{other}'"))),
+            }
+        }).await.map_err(|e| ApiError::internal(format!("task join: {e}")))??
+    };
+
+    let max = u64::from(state.limits.max_search_matches);
+    let (rx, cancel) = search::run(handle, topic, ranges, filter, max);
+    let guard = CancelOnDrop(cancel);
+    let stream = ReceiverStream::new(rx).map(move |event: SearchEvent| {
+        let _hold = &guard; // move the guard into the stream: dropped on disconnect
+        Ok(Event::default().event(event.name()).data(serde_json::to_string(&event).unwrap_or_default()))
+    });
+    Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
 }
