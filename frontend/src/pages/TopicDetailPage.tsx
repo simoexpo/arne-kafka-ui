@@ -6,13 +6,14 @@ import { Panel } from '../components/Panel'
 import { StalenessChip } from '../components/StalenessChip'
 import { Sparkline } from '../components/Sparkline'
 import { formatCount } from '../lib/format'
+import { MessagesTab } from './MessagesTab'
 import type { TopicGroupLag } from '../api/types'
 
 const TABS = ['Messages', 'Partitions', 'Consumers', 'Config'] as const
 type Tab = (typeof TABS)[number]
 
 export function TopicDetailView({ cluster, topic }: { cluster: string; topic: string }) {
-  const [tab, setTab] = useState<Tab>('Partitions')
+  const [tab, setTab] = useState<Tab>('Messages')
   const detail = useQuery({
     queryKey: ['topic', cluster, topic],
     queryFn: () => getTopicDetail(cluster, topic),
@@ -40,11 +41,7 @@ export function TopicDetailView({ cluster, topic }: { cluster: string; topic: st
           </button>
         ))}
       </div>
-      {tab === 'Messages' && (
-        <Panel title="Messages">
-          <p className="text-sm text-zinc-500">Message browsing arrives with the message engine (v1 plan 2).</p>
-        </Panel>
-      )}
+      {tab === 'Messages' && <MessagesTab cluster={cluster} topic={topic} />}
       {tab === 'Partitions' && (
         <Panel title="Partitions" error={detail.error} loading={detail.isPending}>
           <table className="w-full text-left text-sm">
