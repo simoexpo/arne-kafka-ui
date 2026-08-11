@@ -1,4 +1,5 @@
 pub mod decode;
+pub mod schema_registry;
 
 use serde::Serialize;
 
