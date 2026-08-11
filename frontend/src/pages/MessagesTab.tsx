@@ -25,6 +25,7 @@ export function MessagesTab({ cluster, topic }: { cluster: string; topic: string
   })
 
   const load = () => {
+    setTailError(null)
     const lim = Math.min(Number(limit) || 50, 500)
     if (anchorKind === 'latest') setAnchor({ anchor: 'latest', limit: lim })
     else if (anchorKind === 'offset') setAnchor({ anchor: 'offset', partition: Number(partition) || 0, offset: Number(offset) || 0, limit: lim })
@@ -47,7 +48,7 @@ export function MessagesTab({ cluster, topic }: { cluster: string; topic: string
         stopTail()
       },
       onTransportError: () => {
-        setTailError({ text: 'connection lost', kind: 'transport' })
+        setTailError({ text: 'connection lost — retrying is manual', kind: 'transport' })
         stopTail()
       },
     })
@@ -67,6 +68,12 @@ export function MessagesTab({ cluster, topic }: { cluster: string; topic: string
   }, [])
 
   const isTailing = mode === 'tail'
+  // An error/transport stop freezes the tail buffer on screen (with the error
+  // + caption) instead of silently swapping to the possibly-stale browse
+  // results underneath. Manual toggle-off (no tailError) is user-initiated
+  // and unambiguous, so it returns to the browse view as before.
+  const isFrozen = mode === 'browse' && tailError !== null
+  const showTailView = isTailing || isFrozen
   const inputCls = 'w-24 rounded border border-zinc-300 bg-transparent px-2 py-1 text-sm dark:border-zinc-700'
   return (
     <div className="space-y-3">
@@ -103,16 +110,19 @@ export function MessagesTab({ cluster, topic }: { cluster: string; topic: string
         </div>
       </div>
       {tailError && (
-        <p className={tailError.kind === 'error' ? 'text-sm text-red-600 dark:text-red-400' : 'text-sm text-amber-600 dark:text-amber-400'}>
-          {tailError.kind === 'error' ? tailError.text : 'connection lost — retrying is manual'}
-        </p>
+        <div className="space-y-0.5">
+          <p className={tailError.kind === 'error' ? 'text-sm text-red-600 dark:text-red-400' : 'text-sm text-amber-600 dark:text-amber-400'}>
+            {tailError.text}
+          </p>
+          {isFrozen && <p className="text-xs text-zinc-500 dark:text-zinc-400">tail stopped — showing last received messages</p>}
+        </div>
       )}
       <Panel
-        title={isTailing ? `${tailBuffer.length} messages` : `${messages.data?.messages.length ?? 0} messages`}
-        error={isTailing ? null : messages.error}
-        loading={isTailing ? false : messages.isPending}
+        title={showTailView ? `${tailBuffer.length} messages` : `${messages.data?.messages.length ?? 0} messages`}
+        error={showTailView ? null : messages.error}
+        loading={showTailView ? false : messages.isPending}
       >
-        <MessageList messages={isTailing ? tailBuffer : messages.data?.messages ?? []} />
+        <MessageList messages={showTailView ? tailBuffer : messages.data?.messages ?? []} />
       </Panel>
     </div>
   )
