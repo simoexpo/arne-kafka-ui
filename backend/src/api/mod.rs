@@ -9,6 +9,7 @@ pub fn app(state: AppState) -> Router {
     Router::new()
         .route("/healthz", get(|| async { "ok" }))
         .route("/api/clusters", get(clusters::list))
+        .route("/api/clusters/{cluster}/overview", get(clusters::overview))
         .route("/api/clusters/{cluster}/topics", get(topics::list))
         .route("/api/clusters/{cluster}/topics/{topic}", get(topics::detail))
         .route("/api/clusters/{cluster}/topics/{topic}/consumers", get(topics::consumers))

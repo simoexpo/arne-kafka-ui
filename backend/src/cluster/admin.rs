@@ -309,3 +309,43 @@ pub async fn topic_consumers(handle: Arc<ClusterHandle>, topic: String) -> Resul
     .await
     .map_err(|e| ApiError::internal(format!("task join: {e}")))?
 }
+
+#[derive(Debug, Serialize)]
+pub struct BrokerInfo { pub id: i32, pub host: String, pub port: i32 }
+
+#[derive(Debug, Serialize)]
+pub struct Overview {
+    pub brokers: Vec<BrokerInfo>,
+    pub controller_id: Option<i32>, // librdkafka metadata does not expose the controller; null in v1
+    pub topic_count: usize,
+    pub partition_count: usize,
+    pub under_replicated_partitions: usize,
+    pub as_of: i64,
+}
+
+pub async fn overview(handle: Arc<ClusterHandle>) -> Result<Overview, ApiError> {
+    tokio::task::spawn_blocking(move || {
+        let md = handle.consumer()
+            .fetch_metadata(None, ADMIN_TIMEOUT)
+            .map_err(|e| error::from_kafka(&handle.name, "fetch metadata", &e))?;
+        let brokers = md.brokers().iter()
+            .map(|b| BrokerInfo { id: b.id(), host: b.host().to_string(), port: b.port() })
+            .collect();
+        let mut partition_count = 0;
+        let mut urp = 0;
+        for t in md.topics() {
+            partition_count += t.partitions().len();
+            urp += t.partitions().iter().filter(|p| p.isr().len() < p.replicas().len()).count();
+        }
+        Ok(Overview {
+            brokers,
+            controller_id: None,
+            topic_count: md.topics().len(),
+            partition_count,
+            under_replicated_partitions: urp,
+            as_of: now_ms(),
+        })
+    })
+    .await
+    .map_err(|e| ApiError::internal(format!("task join: {e}")))?
+}

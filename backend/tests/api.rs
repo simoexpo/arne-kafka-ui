@@ -147,6 +147,19 @@ async fn throughput_endpoint_reports_positive_rate_after_producing() {
 }
 
 #[tokio::test]
+async fn overview_reports_brokers_and_counts() {
+    let bootstrap = start_kafka().await;
+    create_topic(&bootstrap, "ov-topic", 2).await;
+    let state = state_for(&bootstrap, vec![]);
+    let (status, body) = get_json(app(state), "/api/clusters/test/overview").await;
+    assert_eq!(status, 200);
+    assert_eq!(body["brokers"].as_array().unwrap().len(), 1);
+    assert!(body["topic_count"].as_u64().unwrap() >= 1);
+    assert!(body["partition_count"].as_u64().unwrap() >= 2);
+    assert_eq!(body["under_replicated_partitions"], 0);
+}
+
+#[tokio::test]
 async fn topics_on_unknown_cluster_is_404() {
     let bootstrap = start_kafka().await;
     let state = state_for(&bootstrap, vec![]);
