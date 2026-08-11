@@ -18,5 +18,6 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 [dev-dependencies]
 http-body-util = "0.1.4"
 reqwest = { version = "0.13.4", features = ["json"] }
+testcontainers = { version = "0.27", features = ["reusable-containers"] }
 testcontainers-modules = { version = "0.15.0", features = ["kafka"] }
 tower = { version = "0.5.3", features = ["util"] }

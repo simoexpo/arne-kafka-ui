@@ -13,7 +13,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use testcontainers_modules::kafka::apache::Kafka;
 use testcontainers_modules::testcontainers::runners::AsyncRunner;
-use testcontainers_modules::testcontainers::ContainerAsync;
+use testcontainers_modules::testcontainers::{ContainerAsync, ImageExt, ReuseDirective};
 use tokio::sync::OnceCell;
 use tower::ServiceExt;
 
@@ -22,11 +22,19 @@ static KAFKA: OnceCell<(ContainerAsync<Kafka>, String)> = OnceCell::const_new();
 pub async fn start_kafka() -> String {
     let (_c, bootstrap) = KAFKA
         .get_or_init(|| async {
-            let container = Kafka::default().start().await.expect("start kafka container (is Docker running?)");
+            // Reuse one long-lived, named container across test runs: the static
+            // OnceCell is never dropped, so without reuse every run leaks a container.
+            let container = Kafka::default()
+                .with_container_name("betrachtung-test-kafka")
+                .with_reuse(ReuseDirective::Always)
+                .start()
+                .await
+                .expect("start kafka container (is Docker running?)");
             let host = container.get_host().await.unwrap();
             let port = container.get_host_port_ipv4(9092).await.unwrap();
             let bootstrap = format!("{host}:{port}");
             wait_until_broker_ready(&bootstrap).await;
+            reset_cluster_state(&bootstrap).await;
             (container, bootstrap)
         })
         .await;
@@ -59,6 +67,56 @@ async fn wait_until_broker_ready(bootstrap: &str) {
     })
     .await
     .unwrap();
+}
+
+/// The container is reused across test runs, so wipe topics and consumer
+/// groups left behind by the previous run — tests assume a fresh cluster.
+async fn reset_cluster_state(bootstrap: &str) {
+    let (topics, groups) = {
+        let bootstrap = bootstrap.to_string();
+        tokio::task::spawn_blocking(move || {
+            let consumer: BaseConsumer = client(&bootstrap).create().unwrap();
+            let md = consumer.fetch_metadata(None, Duration::from_secs(10)).unwrap();
+            let topics: Vec<String> = md.topics().iter()
+                .map(|t| t.name().to_string())
+                .filter(|n| !n.starts_with("__"))
+                .collect();
+            let gl = consumer.fetch_group_list(None, Duration::from_secs(10)).unwrap();
+            let groups: Vec<String> = gl.groups().iter().map(|g| g.name().to_string()).collect();
+            (topics, groups)
+        })
+        .await
+        .unwrap()
+    };
+
+    let admin: AdminClient<_> = client(bootstrap).create().unwrap();
+    let opts = AdminOptions::new().operation_timeout(Some(Duration::from_secs(10)));
+    if !groups.is_empty() {
+        let refs: Vec<&str> = groups.iter().map(String::as_str).collect();
+        // per-group failures (e.g. already gone) are fine; deletion is best-effort
+        let _ = admin.delete_groups(&refs, &opts).await;
+    }
+    if !topics.is_empty() {
+        let refs: Vec<&str> = topics.iter().map(String::as_str).collect();
+        admin.delete_topics(&refs, &opts).await.unwrap();
+        // topic deletion is asynchronous — wait until they are actually gone
+        // so tests can recreate same-named topics without racing
+        let bootstrap = bootstrap.to_string();
+        tokio::task::spawn_blocking(move || {
+            let consumer: BaseConsumer = client(&bootstrap).create().unwrap();
+            let deadline = std::time::Instant::now() + Duration::from_secs(30);
+            loop {
+                let md = consumer.fetch_metadata(None, Duration::from_secs(5)).unwrap();
+                if md.topics().iter().all(|t| t.name().starts_with("__") || !topics.contains(&t.name().to_string())) {
+                    return;
+                }
+                assert!(std::time::Instant::now() < deadline, "stale topics not deleted within 30s");
+                std::thread::sleep(Duration::from_millis(200));
+            }
+        })
+        .await
+        .unwrap();
+    }
 }
 
 pub fn cluster_cfg(name: &str, bootstrap: &str) -> ClusterConfig {
