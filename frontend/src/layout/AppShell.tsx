@@ -40,7 +40,10 @@ export function Sidebar({ cluster, clusters, active }: {
 }) {
   return (
     <aside className="flex w-56 flex-col gap-6 border-r border-zinc-200 p-4 dark:border-zinc-800">
-      <div className="text-sm font-semibold tracking-wide">Betrachtung</div>
+      <div className="flex items-center gap-2 text-sm font-semibold tracking-wide">
+        <img src="/logo.svg" alt="Betrachtung logo" className="h-6 w-auto" />
+        Betrachtung
+      </div>
       <nav className="flex flex-col gap-1">
         {SECTIONS.map((s) => (
           <Link

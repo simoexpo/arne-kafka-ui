@@ -25,6 +25,13 @@ describe('Sidebar', () => {
     // something a plain <a href> can never do.
     expect(screen.getByRole('link', { name: /topics/i })).toHaveAttribute('data-status', 'active')
   })
+
+  it('renders the brand logo', async () => {
+    await renderWithRouter(<Sidebar cluster="prod" clusters={[...clusters]} active="topics" />, {
+      initialPath: '/c/prod/topics',
+    })
+    expect(screen.getByAltText('Betrachtung logo')).toHaveAttribute('src', '/logo.svg')
+  })
 })
 
 describe('sectionFromPathname', () => {
