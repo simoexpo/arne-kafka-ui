@@ -5,7 +5,7 @@ import type { ClusterHealth } from '../api/types'
 import { CommandPalette } from '../components/CommandPalette' // Task 11 stub
 
 export function useClusters() {
-  return useQuery({ queryKey: ['clusters'], queryFn: () => getClusters(), refetchInterval: 10_000 })
+  return useQuery({ queryKey: ['clusters'], queryFn: ({ signal }) => getClusters(signal), refetchInterval: 10_000 })
 }
 
 const SECTIONS = ['overview', 'topics', 'groups'] as const

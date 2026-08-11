@@ -79,9 +79,9 @@ export function CommandPalette({ cluster }: { cluster: string }) {
   }, [])
 
   const enc = encodeURIComponent
-  const clusters = useQuery({ queryKey: ['clusters'], queryFn: () => getClusters(), enabled: open })
-  const topics = useQuery({ queryKey: ['topics', cluster], queryFn: () => getTopics(cluster), enabled: open })
-  const groups = useQuery({ queryKey: ['groups', cluster], queryFn: () => getGroups(cluster), enabled: open })
+  const clusters = useQuery({ queryKey: ['clusters'], queryFn: ({ signal }) => getClusters(signal), enabled: open })
+  const topics = useQuery({ queryKey: ['topics', cluster], queryFn: ({ signal }) => getTopics(cluster, signal), enabled: open })
+  const groups = useQuery({ queryKey: ['groups', cluster], queryFn: ({ signal }) => getGroups(cluster, signal), enabled: open })
 
   if (!open) return null
   const items: PaletteItem[] = [
