@@ -1,0 +1,42 @@
+import { describe, expect, it, vi } from 'vitest'
+import { screen } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
+import { renderWithQuery } from '../test/utils'
+import { TopicsView } from './TopicsPage'
+import * as client from '../api/client'
+
+vi.mock('../api/client', async (importOriginal) => ({
+  ...(await importOriginal<typeof client>()),
+  getTopics: vi.fn(),
+}))
+
+const topics = {
+  topics: [
+    { name: 'orders', partitions: 3, replication_factor: 2, message_estimate: 1200, size_bytes: null, internal: false },
+    { name: 'payments', partitions: 1, replication_factor: 2, message_estimate: 50, size_bytes: null, internal: false },
+    { name: '__consumer_offsets', partitions: 50, replication_factor: 3, message_estimate: 0, size_bytes: null, internal: true },
+  ],
+  as_of: Date.now(),
+}
+
+describe('TopicsView', () => {
+  it('lists topics, hides internal by default, links to detail', async () => {
+    vi.mocked(client.getTopics).mockResolvedValue(topics)
+    renderWithQuery(<TopicsView cluster="prod" />)
+    expect(await screen.findByText('orders')).toBeInTheDocument()
+    expect(screen.queryByText('__consumer_offsets')).not.toBeInTheDocument()
+    expect(screen.getByRole('link', { name: /orders/ })).toHaveAttribute('href', '/c/prod/topics/orders')
+  })
+
+  it('filter narrows instantly and show-internal reveals internals', async () => {
+    vi.mocked(client.getTopics).mockResolvedValue(topics)
+    renderWithQuery(<TopicsView cluster="prod" />)
+    await screen.findByText('orders')
+    await userEvent.type(screen.getByPlaceholderText('filter topics…'), 'pay')
+    expect(screen.queryByText('orders')).not.toBeInTheDocument()
+    expect(screen.getByText('payments')).toBeInTheDocument()
+    await userEvent.clear(screen.getByPlaceholderText('filter topics…'))
+    await userEvent.click(screen.getByRole('checkbox', { name: /internal/i }))
+    expect(screen.getByText('__consumer_offsets')).toBeInTheDocument()
+  })
+})
