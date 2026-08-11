@@ -296,7 +296,7 @@ async fn search_max_matches_with_deep_partitions() {
     // `message::search::tests::worker_giving_up_early_wakes_a_parked_scanner`
     // in src/message/search.rs; this test covers the same defect end to end.)
     let events = tokio::time::timeout(
-        std::time::Duration::from_secs(30),
+        std::time::Duration::from_secs(10),
         collect_sse(
             app(state),
             "/api/clusters/test/topics/search-deep-topic/search?range=last_n&n=200&filter=value_contains&q=v",
@@ -304,7 +304,7 @@ async fn search_max_matches_with_deep_partitions() {
         ),
     )
     .await
-    .expect("search must terminate with done{max_matches} within 30s instead of hanging");
+    .expect("search must terminate with done{max_matches} within 10s instead of hanging");
     let matches = events.iter().filter(|(n, _)| n == "match").count();
     assert_eq!(matches, 3, "events: {events:?}");
     assert_eq!(events.last().unwrap().1["reason"], "max_matches");

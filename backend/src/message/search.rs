@@ -21,11 +21,6 @@ const PROGRESS_EVERY: u64 = 500;
 /// message (persistent poll errors, unreachable broker, ...) it gives up
 /// instead of spinning on 200ms polls forever.
 const STALL_TIMEOUT: Duration = Duration::from_secs(10);
-/// How long a scanner waits, re-checking `cancelled` between attempts,
-/// before retrying to hand a record to a full channel. Keeps a scanner
-/// from parking in a plain blocking send forever once nobody is left to
-/// drain the channel (see `send_or_stop`).
-const SEND_RETRY_INTERVAL: Duration = Duration::from_millis(20);
 
 #[derive(Debug, Serialize)]
 #[serde(untagged)]
@@ -254,26 +249,29 @@ async fn report_scan_error(
     }
 }
 
-/// Hands `record` to the async decode/filter task without ever parking
-/// forever: a plain `blocking_send` on a full channel blocks until the
-/// receiver drains it, but if the receiver has already stopped reading
-/// (its worker hit max-matches, or the SSE client disconnected) nobody
-/// ever will. Retrying with `try_send` and re-checking `cancelled` between
-/// attempts lets the scanner notice and give up instead of leaking its
-/// thread and consumer forever.
-fn send_or_stop(out: &mpsc::Sender<RawRecord>, mut record: RawRecord, cancelled: &AtomicBool) -> bool {
-    loop {
-        match out.try_send(record) {
-            Ok(()) => return true,
-            Err(mpsc::error::TrySendError::Closed(_)) => return false,
-            Err(mpsc::error::TrySendError::Full(rec)) => {
-                if cancelled.load(Ordering::SeqCst) {
-                    return false;
-                }
-                record = rec;
-                std::thread::sleep(SEND_RETRY_INTERVAL);
-            }
-        }
+/// Hands `record` to the async decode/filter task. The fast path is a
+/// plain `try_send` (no cost beyond the channel op itself, so a healthy
+/// scan runs at full speed with no artificial throughput cap). If the
+/// channel is momentarily full — the decoder briefly falling behind a
+/// burst — this falls back to a real `blocking_send`, which parks the
+/// thread but wakes it *immediately* either when capacity frees up or when
+/// the channel closes. It never leaks a thread: after the F1 fix,
+/// `drive_partition` drops its `raw_rx` on every loop exit (max-matches
+/// hit, SSE client gone, or the recv loop ending normally), so `Closed`
+/// covers every case where nobody is left to drain the channel. The
+/// `cancelled` checks are cheap early-outs, not a substitute for that —
+/// they just skip a doomed send attempt slightly sooner.
+fn send_or_stop(out: &mpsc::Sender<RawRecord>, record: RawRecord, cancelled: &AtomicBool) -> bool {
+    if cancelled.load(Ordering::SeqCst) {
+        return false;
+    }
+    match out.try_send(record) {
+        Ok(()) => true,
+        Err(mpsc::error::TrySendError::Closed(_)) => false,
+        Err(mpsc::error::TrySendError::Full(rec)) => match out.blocking_send(rec) {
+            Ok(()) => !cancelled.load(Ordering::SeqCst),
+            Err(_) => false,
+        },
     }
 }
 
@@ -308,7 +306,6 @@ fn scan_partition_blocking(
                 }
                 next = msg.offset() + 1;
                 scanned.fetch_add(1, Ordering::SeqCst);
-                last_progress = Instant::now();
                 let headers = msg
                     .headers()
                     .map(|hs| hs.iter().map(|h| (h.key.to_string(), h.value.unwrap_or_default().to_vec())).collect())
@@ -324,6 +321,14 @@ fn scan_partition_blocking(
                 if !send_or_stop(&out, record, cancelled) {
                     break;
                 }
+                // Reset only *after* the handoff completes: `send_or_stop`
+                // can legitimately block for a while on downstream
+                // backpressure (a slow SSE client) or decode latency (a
+                // flaky Schema Registry), and none of that is Kafka being
+                // stalled — Kafka just handed us a message. Resetting
+                // beforehand would let that wait count against the stall
+                // budget and fabricate a Kafka error for a local slowdown.
+                last_progress = Instant::now();
             }
             Some(Err(rdkafka::error::KafkaError::PartitionEOF(_))) => break,
             Some(Err(e)) => {
@@ -361,17 +366,25 @@ mod tests {
     /// can ever succeed (2 to fill the initial buffer, 2 more unblocked by
     /// the 2 reads) — the fake scanner tries to push 10, so its 5th send
     /// is *guaranteed* to block forever once nobody drains the channel
-    /// again, unless `drive_partition` drops its receiver (waking a
-    /// `send_or_stop`-style scanner, or failing a plain blocking send)
-    /// before joining the scanner's `JoinHandle`.
+    /// again, unless `drive_partition` drops its receiver before joining
+    /// the scanner's `JoinHandle`.
+    ///
+    /// The fake scanner deliberately calls the *raw* `raw_tx.blocking_send`
+    /// here, not `send_or_stop`: `send_or_stop` has its own `cancelled`
+    /// early-out, which would rescue a parked sender independently of
+    /// whether the receiver was ever dropped, making this test pass for
+    /// the wrong reason (guarding a redundant safety net instead of the
+    /// actual fix). A plain `blocking_send` has no such escape hatch — the
+    /// only thing that can unblock it is the channel closing, which is
+    /// exactly what `drop(raw_rx)` does. See the report's "Fix round 2 —
+    /// N3" section for the kill-the-fix verification (temporarily removing
+    /// `drop(raw_rx)` turns this test red).
     #[tokio::test]
     async fn worker_giving_up_early_wakes_a_parked_scanner() {
         let (raw_tx, raw_rx) = mpsc::channel::<RawRecord>(2);
-        let cancel_flag = Arc::new(AtomicBool::new(false));
-        let scan_cancel = cancel_flag.clone();
         let scan: JoinHandle<Result<(), String>> = tokio::task::spawn_blocking(move || {
             for i in 0..10i64 {
-                if !send_or_stop(&raw_tx, dummy_record(i), &scan_cancel) {
+                if raw_tx.blocking_send(dummy_record(i)).is_err() {
                     return Ok(());
                 }
             }
@@ -384,6 +397,7 @@ mod tests {
         // path, not what this test is about).
         let drain = tokio::spawn(async move { while rx.recv().await.is_some() {} });
 
+        let cancelled = Arc::new(AtomicBool::new(false));
         let scanned = Arc::new(AtomicU64::new(0));
         let matched = Arc::new(AtomicU64::new(0));
         let last_reported = Arc::new(AtomicU64::new(0));
@@ -396,7 +410,7 @@ mod tests {
             None,
             Filter::ValueContains("x".into()),
             tx.clone(),
-            cancel_flag,
+            cancelled,
             scanned,
             matched,
             last_reported,
