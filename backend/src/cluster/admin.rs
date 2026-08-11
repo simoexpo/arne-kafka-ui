@@ -182,8 +182,26 @@ pub fn group_lag_blocking(
     }
     let gc = group_consumer(&handle.config, group)
         .map_err(|e| error::from_kafka(&handle.name, "create group consumer", &e))?;
-    let committed = gc.committed_offsets(tpl, ADMIN_TIMEOUT)
-        .map_err(|e| error::from_kafka(&handle.name, "fetch committed offsets", &e))?;
+    // NotCoordinator/CoordinatorNotAvailable/CoordinatorLoadInProgress are
+    // transient by protocol contract: the coordinator is moving or still
+    // loading. Retry briefly instead of surfacing a 502 for a healthy cluster.
+    let committed = {
+        use rdkafka::error::RDKafkaErrorCode::*;
+        let mut attempt = 0u32;
+        loop {
+            match gc.committed_offsets(tpl.clone(), ADMIN_TIMEOUT) {
+                Ok(c) => break c,
+                Err(e) if attempt < 4 && matches!(
+                    e.rdkafka_error_code(),
+                    Some(NotCoordinator | CoordinatorNotAvailable | CoordinatorLoadInProgress)
+                ) => {
+                    attempt += 1;
+                    std::thread::sleep(std::time::Duration::from_millis(100 * u64::from(attempt)));
+                }
+                Err(e) => return Err(error::from_kafka(&handle.name, "fetch committed offsets", &e)),
+            }
+        }
+    };
     let mut out = Vec::new();
     for e in committed.elements() {
         if let Offset::Offset(c) = e.offset() {
@@ -249,6 +267,44 @@ pub async fn group_detail(handle: Arc<ClusterHandle>, group: String) -> Result<G
             partitions,
             as_of: now_ms(),
         })
+    })
+    .await
+    .map_err(|e| ApiError::internal(format!("task join: {e}")))?
+}
+
+#[derive(Debug, Serialize)]
+pub struct TopicGroupLag {
+    pub group_id: String,
+    pub state: String,
+    pub total_lag: i64,
+    pub partitions: Vec<PartitionLag>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct TopicConsumers {
+    pub topic: String,
+    pub groups: Vec<TopicGroupLag>,
+    pub as_of: i64,
+}
+
+pub async fn topic_consumers(handle: Arc<ClusterHandle>, topic: String) -> Result<TopicConsumers, ApiError> {
+    tokio::task::spawn_blocking(move || {
+        let gl = handle.consumer()
+            .fetch_group_list(None, ADMIN_TIMEOUT)
+            .map_err(|e| error::from_kafka(&handle.name, "list groups", &e))?;
+        let mut groups = Vec::new();
+        for g in gl.groups() {
+            let partitions = group_lag_blocking(&handle, g.name(), Some(&topic))?;
+            if partitions.is_empty() { continue; }
+            groups.push(TopicGroupLag {
+                group_id: g.name().to_string(),
+                state: g.state().to_string(),
+                total_lag: partitions.iter().map(|p| p.lag).sum(),
+                partitions,
+            });
+        }
+        groups.sort_by(|a, b| a.group_id.cmp(&b.group_id));
+        Ok(TopicConsumers { topic, groups, as_of: now_ms() })
     })
     .await
     .map_err(|e| ApiError::internal(format!("task join: {e}")))?

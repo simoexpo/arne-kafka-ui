@@ -19,3 +19,11 @@ pub async fn detail(
     let handle = state.registry.get(&cluster)?;
     Ok(Json(admin::topic_detail(handle, topic).await?))
 }
+
+pub async fn consumers(
+    State(state): State<AppState>,
+    Path((cluster, topic)): Path<(String, String)>,
+) -> Result<Json<admin::TopicConsumers>, ApiError> {
+    let handle = state.registry.get(&cluster)?;
+    Ok(Json(admin::topic_consumers(handle, topic).await?))
+}

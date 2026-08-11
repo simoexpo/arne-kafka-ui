@@ -91,11 +91,30 @@ async fn groups_list_and_detail_report_lag() {
 }
 
 #[tokio::test]
+async fn topic_consumers_lists_groups_reading_the_topic() {
+    let bootstrap = start_kafka().await;
+    create_topic(&bootstrap, "tc-topic", 1).await;
+    create_topic(&bootstrap, "tc-other", 1).await;
+    produce(&bootstrap, "tc-topic", 6).await;
+    produce(&bootstrap, "tc-other", 3).await;
+    consume_and_commit(&bootstrap, "tc-topic", "tc-group", 6).await;
+    consume_and_commit(&bootstrap, "tc-other", "tc-other-group", 3).await;
+    let state = state_for(&bootstrap, vec![]);
+    let (status, body) = get_json(app(state), "/api/clusters/test/topics/tc-topic/consumers").await;
+    assert_eq!(status, 200);
+    let groups = body["groups"].as_array().unwrap();
+    assert!(groups.iter().any(|g| g["group_id"] == "tc-group"));
+    assert!(!groups.iter().any(|g| g["group_id"] == "tc-other-group"), "unrelated group must not appear");
+    let g = groups.iter().find(|g| g["group_id"] == "tc-group").unwrap();
+    assert_eq!(g["total_lag"], 0);
+}
+
+#[tokio::test]
 async fn unknown_group_is_404() {
     let bootstrap = start_kafka().await;
     let state = state_for(&bootstrap, vec![]);
     let (status, body) = get_json(app(state), "/api/clusters/test/groups/ghost-group").await;
-    assert_eq!(status, 404);
+    assert_eq!(status, 404, "body: {body}");
     assert_eq!(body["code"], "group_not_found");
 }
 
