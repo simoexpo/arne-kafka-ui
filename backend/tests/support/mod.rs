@@ -115,11 +115,10 @@ pub async fn consume_and_commit(bootstrap: &str, topic: &str, group: &str, count
         consumer.subscribe(&[&topic]).unwrap();
         let mut seen = 0;
         while seen < count {
-            match consumer.poll(Duration::from_secs(10)) {
-                Some(Ok(_)) => seen += 1,
-                // transient errors (e.g. transport failures while brokers settle)
-                // are informational events; keep polling
-                Some(Err(_)) | None => {}
+            // transient errors (e.g. transport failures while brokers settle)
+            // are informational events; keep polling
+            if let Some(Ok(_)) = consumer.poll(Duration::from_secs(10)) {
+                seen += 1;
             }
         }
         consumer.commit_consumer_state(CommitMode::Sync).unwrap();

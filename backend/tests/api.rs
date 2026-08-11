@@ -160,6 +160,23 @@ async fn overview_reports_brokers_and_counts() {
 }
 
 #[tokio::test]
+async fn full_app_boots_and_serves_over_tcp() {
+    let bootstrap = start_kafka().await;
+    let state = state_for(&bootstrap, vec![]);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app(state)).await.unwrap();
+    });
+    let base = format!("http://{addr}");
+    let health = reqwest::get(format!("{base}/healthz")).await.unwrap();
+    assert_eq!(health.status(), 200);
+    let clusters: serde_json::Value = reqwest::get(format!("{base}/api/clusters"))
+        .await.unwrap().json().await.unwrap();
+    assert_eq!(clusters["clusters"][0]["status"], "healthy");
+}
+
+#[tokio::test]
 async fn topics_on_unknown_cluster_is_404() {
     let bootstrap = start_kafka().await;
     let state = state_for(&bootstrap, vec![]);

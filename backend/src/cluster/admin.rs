@@ -175,7 +175,7 @@ pub fn group_lag_blocking(
         .map_err(|e| error::from_kafka(&handle.name, "fetch metadata", &e))?;
     let mut tpl = TopicPartitionList::new();
     for t in md.topics() {
-        if let Some(f) = topic_filter { if t.name() != f { continue; } }
+        if topic_filter.is_some_and(|f| t.name() != f) { continue; }
         for p in t.partitions() {
             tpl.add_partition(t.name(), p.id());
         }
@@ -214,7 +214,7 @@ pub fn group_lag_blocking(
             });
         }
     }
-    out.sort_by(|a, b| (a.topic.clone(), a.partition).cmp(&(b.topic.clone(), b.partition)));
+    out.sort_by_key(|a| (a.topic.clone(), a.partition));
     Ok(out)
 }
 
