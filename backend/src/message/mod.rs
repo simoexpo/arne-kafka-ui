@@ -1,6 +1,7 @@
 pub mod avro;
 pub mod decode;
 pub mod fetch;
+pub mod filter;
 pub mod proto;
 pub mod range;
 pub mod schema_registry;
