@@ -29,6 +29,7 @@ describe('GroupDetailView', () => {
       new client.ApiError(404, 'group_not_found', "consumer group 'ghost' does not exist", 'prod', false),
     )
     renderWithQuery(<GroupDetailView cluster="prod" group="ghost" />)
-    expect(await screen.findByText(/group_not_found/)).toBeInTheDocument()
+    const errors = await screen.findAllByText(/group_not_found/)
+    expect(errors).toHaveLength(2)
   })
 })

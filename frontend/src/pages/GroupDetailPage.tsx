@@ -31,26 +31,24 @@ export function GroupDetailView({ cluster, group }: { cluster: string; group: st
           </ul>
         )}
       </Panel>
-      {!detail.error && (
-        <Panel title="Partition lag" loading={detail.isPending}>
-          <table className="w-full text-left font-mono text-sm">
-            <thead className="text-xs text-zinc-500">
-              <tr><th className="py-1">topic</th><th>partition</th><th>committed</th><th>end</th><th>lag</th></tr>
-            </thead>
-            <tbody>
-              {detail.data?.partitions.map((p) => (
-                <tr key={`${p.topic}-${p.partition}`} className="border-t border-zinc-100 dark:border-zinc-800">
-                  <td className="py-1">{p.topic}</td>
-                  <td>{p.partition}</td>
-                  <td>{p.committed_offset}</td>
-                  <td>{p.end_offset}</td>
-                  <td className={p.lag > 0 ? 'font-semibold' : 'text-zinc-400'}>{p.lag}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </Panel>
-      )}
+      <Panel title="Partition lag" error={detail.error} loading={detail.isPending}>
+        <table className="w-full text-left font-mono text-sm">
+          <thead className="text-xs text-zinc-500">
+            <tr><th className="py-1">topic</th><th>partition</th><th>committed</th><th>end</th><th>lag</th></tr>
+          </thead>
+          <tbody>
+            {detail.data?.partitions.map((p) => (
+              <tr key={`${p.topic}-${p.partition}`} className="border-t border-zinc-100 dark:border-zinc-800">
+                <td className="py-1">{p.topic}</td>
+                <td>{p.partition}</td>
+                <td>{p.committed_offset}</td>
+                <td>{p.end_offset}</td>
+                <td className={p.lag > 0 ? 'font-semibold' : 'text-zinc-400'}>{p.lag}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </Panel>
     </div>
   )
 }
