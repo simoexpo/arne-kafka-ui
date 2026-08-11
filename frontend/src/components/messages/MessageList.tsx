@@ -21,6 +21,7 @@ export function MessageList({ messages }: { messages: MessageOut[] }) {
         {virtualizer.getVirtualItems().map((item) => (
           <div
             key={`${messages[item.index].partition}-${messages[item.index].offset}-${item.index}`}
+            ref={typeof ResizeObserver !== 'undefined' ? virtualizer.measureElement : undefined}
             data-index={item.index}
             style={{ position: 'absolute', top: 0, left: 0, width: '100%', transform: `translateY(${item.start}px)` }}
           >
