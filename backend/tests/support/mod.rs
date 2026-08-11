@@ -233,6 +233,17 @@ pub async fn collect_sse(app: Router, path: &str, max: usize) -> Vec<(String, se
     events
 }
 
+/// Produces a single message with an arbitrary raw byte payload (as opposed
+/// to `produce`'s string values) — used to construct confluent-framed
+/// (magic byte + schema id) payloads by hand for decode-path tests.
+pub async fn produce_raw(bootstrap: &str, topic: &str, key: &str, value: &[u8]) {
+    let producer: FutureProducer = client(bootstrap).create().unwrap();
+    producer
+        .send(FutureRecord::to(topic).key(key).payload(value), Duration::from_secs(10))
+        .await
+        .unwrap();
+}
+
 pub async fn produce(bootstrap: &str, topic: &str, count: usize) {
     let producer: FutureProducer = client(bootstrap).create().unwrap();
     for i in 0..count {

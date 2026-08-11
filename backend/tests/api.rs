@@ -378,3 +378,51 @@ async fn tail_streams_new_messages() {
     }
     assert_eq!(got, vec!["v0", "v1", "v2"], "tail must stream only new messages in order");
 }
+
+/// End-to-end "never silently skipped" guard: a confluent-framed message
+/// (magic byte 0x0 + a schema id) lands on a cluster with NO schema
+/// registry configured. Nothing should ever drop or hide this record — it
+/// must surface as `encoding: "decode_error"` with a non-empty error and
+/// the raw bytes as base64, in both browse (poll) and search (streaming)
+/// results.
+#[tokio::test]
+async fn confluent_framed_message_without_registry_surfaces_as_decode_error_everywhere() {
+    let bootstrap = start_kafka().await;
+    create_topic(&bootstrap, "confluent-no-sr-topic", 1).await;
+    // magic byte 0x00 + fake schema id 999 (big-endian i32), then arbitrary
+    // bytes that are neither valid avro/protobuf nor meant to be — there's
+    // no registry to even attempt a decode against.
+    let mut payload = vec![0u8, 0, 0, 3, 231];
+    payload.extend_from_slice(b"not-a-real-schema-payload");
+    produce_raw(&bootstrap, "confluent-no-sr-topic", "confluent-key", &payload).await;
+    // The "test" cluster (state_for) has no schema_registry configured.
+    let state = state_for(&bootstrap, vec![]);
+
+    let (status, body) = get_json(
+        app(state.clone()),
+        "/api/clusters/test/topics/confluent-no-sr-topic/messages?anchor=latest",
+    ).await;
+    assert_eq!(status, 200, "body: {body}");
+    let messages = body["messages"].as_array().unwrap();
+    assert_eq!(messages.len(), 1, "messages: {messages:?}");
+    let v = &messages[0]["value"];
+    assert_eq!(v["encoding"], "decode_error", "browse must surface the decode failure, not skip it: {v:?}");
+    assert!(v["error"].as_str().is_some_and(|e| !e.is_empty()), "expected a non-empty error: {v:?}");
+    assert!(v["text"].as_str().is_some_and(|t| !t.is_empty()), "expected base64 raw bytes: {v:?}");
+
+    // Filter on the key (which decodes fine as utf8) so the match doesn't
+    // depend on the value's content — the point here is that the record
+    // still surfaces in search results at all, with its value correctly
+    // labeled as a decode error.
+    let events = collect_sse(
+        app(state),
+        "/api/clusters/test/topics/confluent-no-sr-topic/search?range=last_n&n=10&filter=key_contains&q=confluent",
+        50,
+    ).await;
+    let matches: Vec<_> = events.iter().filter(|(n, _)| n == "match").collect();
+    assert_eq!(matches.len(), 1, "events: {events:?}");
+    let (_, m) = matches[0];
+    assert_eq!(m["value"]["encoding"], "decode_error", "search must surface the decode failure too: {m:?}");
+    assert!(m["value"]["error"].as_str().is_some_and(|e| !e.is_empty()), "expected a non-empty error: {m:?}");
+    assert!(m["value"]["text"].as_str().is_some_and(|t| !t.is_empty()), "expected base64 raw bytes: {m:?}");
+}
