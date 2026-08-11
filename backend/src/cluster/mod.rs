@@ -1,3 +1,4 @@
+pub mod admin;
 pub mod registry;
 
 use crate::config::{ClusterConfig, SaslMechanism};
