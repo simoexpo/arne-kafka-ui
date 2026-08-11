@@ -1,5 +1,6 @@
 pub mod admin;
 pub mod registry;
+pub mod sampler;
 
 use crate::config::{ClusterConfig, SaslMechanism};
 use rdkafka::admin::AdminClient;
@@ -43,6 +44,7 @@ pub fn group_consumer(cfg: &ClusterConfig, group: &str) -> KafkaResult<BaseConsu
 pub struct ClusterHandle {
     pub name: String,
     pub config: ClusterConfig,
+    pub sampler: Arc<sampler::SamplerStore>,
     consumer: Arc<BaseConsumer>,
     admin: AdminClient<DefaultClientContext>,
 }
@@ -69,7 +71,13 @@ impl ClusterHandle {
         let cc = build_client_config(&config);
         let consumer: BaseConsumer = cc.create()?;
         let admin: AdminClient<DefaultClientContext> = cc.create()?;
-        Ok(Self { name: config.name.clone(), config, consumer: Arc::new(consumer), admin })
+        Ok(Self {
+            name: config.name.clone(),
+            config,
+            sampler: Arc::new(sampler::SamplerStore::new(360)),
+            consumer: Arc::new(consumer),
+            admin,
+        })
     }
 
     pub fn consumer(&self) -> &BaseConsumer { &self.consumer }

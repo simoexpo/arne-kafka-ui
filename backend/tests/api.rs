@@ -119,6 +119,34 @@ async fn unknown_group_is_404() {
 }
 
 #[tokio::test]
+async fn throughput_endpoint_reports_positive_rate_after_producing() {
+    use betrachtung::cluster::sampler::spawn_sampler;
+    use std::time::Duration;
+
+    let bootstrap = start_kafka().await;
+    create_topic(&bootstrap, "tp-topic", 1).await;
+    let state = state_for(&bootstrap, vec![]);
+    let handle = state.registry.get("test").unwrap();
+    let _task = spawn_sampler(handle, Duration::from_millis(500));
+
+    produce(&bootstrap, "tp-topic", 20).await;
+    // wait for at least two samples spanning the produce
+    let mut found = false;
+    for _ in 0..30 {
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let (status, body) = get_json(app(state.clone()), "/api/clusters/test/topics/tp-topic/throughput").await;
+        assert_eq!(status, 200);
+        let samples = body["samples"].as_array().unwrap();
+        if samples.iter().any(|p| p["msgs_per_sec"].as_f64().unwrap() > 0.0) {
+            assert!(body["as_of"].as_i64().unwrap() > 0);
+            found = true;
+            break;
+        }
+    }
+    assert!(found, "expected a positive throughput sample within 15s");
+}
+
+#[tokio::test]
 async fn topics_on_unknown_cluster_is_404() {
     let bootstrap = start_kafka().await;
     let state = state_for(&bootstrap, vec![]);
