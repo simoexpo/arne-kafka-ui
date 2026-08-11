@@ -1,8 +1,20 @@
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
+
+/// How long a failed schema lookup is remembered before being retried.
+/// Without this, every message carrying an id the registry can't (or
+/// currently doesn't) serve pays a full HTTP round trip — under an
+/// unreachable registry that's the request timeout, per message, and a
+/// recovering registry gets stampeded by every worker retrying at once.
+const NEGATIVE_TTL: Duration = Duration::from_secs(30);
+
+struct NegativeEntry {
+    until: Instant,
+    message: String,
+}
 
 #[derive(Debug, PartialEq, Clone, Copy)]
 pub enum SchemaType { Avro, Protobuf, Json }
@@ -24,6 +36,7 @@ pub struct SchemaRegistry {
     base: String,
     http: reqwest::Client,
     cache: RwLock<HashMap<i32, Arc<RegisteredSchema>>>,
+    negative_cache: RwLock<HashMap<i32, NegativeEntry>>,
 }
 
 impl SchemaRegistry {
@@ -35,26 +48,47 @@ impl SchemaRegistry {
                 .build()
                 .expect("reqwest client"),
             cache: RwLock::new(HashMap::new()),
+            negative_cache: RwLock::new(HashMap::new()),
         }
+    }
+
+    /// Records `message` as id's failure for `NEGATIVE_TTL` and returns it
+    /// as the error, so every fallible exit from `schema` goes through the
+    /// same negative-caching path.
+    async fn fail(&self, id: i32, message: String) -> Result<Arc<RegisteredSchema>, String> {
+        self.negative_cache.write().await.insert(id, NegativeEntry {
+            until: Instant::now() + NEGATIVE_TTL,
+            message: message.clone(),
+        });
+        Err(message)
     }
 
     pub async fn schema(&self, id: i32) -> Result<Arc<RegisteredSchema>, String> {
         if let Some(hit) = self.cache.read().await.get(&id) {
             return Ok(hit.clone());
         }
-        let url = format!("{}/schemas/ids/{id}", self.base);
-        let res = self.http.get(&url).send().await
-            .map_err(|e| format!("schema registry unreachable fetching id {id}: {e}"))?;
-        if !res.status().is_success() {
-            return Err(format!("schema registry returned {} for schema id {id}", res.status()));
+        if let Some(neg) = self.negative_cache.read().await.get(&id)
+            && neg.until > Instant::now()
+        {
+            return Err(neg.message.clone());
         }
-        let body: SrResponse = res.json().await
-            .map_err(|e| format!("schema registry bad body for id {id}: {e}"))?;
+        let url = format!("{}/schemas/ids/{id}", self.base);
+        let res = match self.http.get(&url).send().await {
+            Ok(r) => r,
+            Err(e) => return self.fail(id, format!("schema registry unreachable fetching id {id}: {e}")).await,
+        };
+        if !res.status().is_success() {
+            return self.fail(id, format!("schema registry returned {} for schema id {id}", res.status())).await;
+        }
+        let body: SrResponse = match res.json().await {
+            Ok(b) => b,
+            Err(e) => return self.fail(id, format!("schema registry bad body for id {id}: {e}")).await,
+        };
         let schema_type = match body.schema_type.as_deref() {
             None | Some("AVRO") => SchemaType::Avro,
             Some("PROTOBUF") => SchemaType::Protobuf,
             Some("JSON") => SchemaType::Json,
-            Some(other) => return Err(format!("unsupported schema type '{other}' for id {id}")),
+            Some(other) => return self.fail(id, format!("unsupported schema type '{other}' for id {id}")).await,
         };
         let entry = Arc::new(RegisteredSchema { schema_type, schema: body.schema });
         self.cache.write().await.insert(id, entry.clone());
@@ -122,5 +156,20 @@ pub(crate) mod tests {
         let sr = SchemaRegistry::new(&mock_sr(hits).await);
         let err = sr.schema(999).await.unwrap_err();
         assert!(err.contains("999"), "got: {err}");
+    }
+
+    /// I6 regression: without negative caching, every lookup of a
+    /// permanently-failing schema id pays a full HTTP round trip — under an
+    /// unreachable/misbehaving registry this stampedes it on every message.
+    /// Two lookups of the same failing id within the negative-cache TTL must
+    /// hit the registry once.
+    #[tokio::test]
+    async fn failing_lookup_is_negatively_cached_within_ttl() {
+        let hits = Arc::new(AtomicUsize::new(0));
+        let sr = SchemaRegistry::new(&mock_sr(hits.clone()).await);
+        let err1 = sr.schema(999).await.unwrap_err();
+        let err2 = sr.schema(999).await.unwrap_err();
+        assert_eq!(hits.load(Ordering::SeqCst), 1, "second lookup within TTL must not hit the registry again");
+        assert_eq!(err1, err2);
     }
 }
