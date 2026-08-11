@@ -1,5 +1,5 @@
 import { useQuery } from '@tanstack/react-query'
-import { Outlet, useParams } from '@tanstack/react-router'
+import { Outlet, useLocation, useParams } from '@tanstack/react-router'
 import { getClusters } from '../api/client'
 import type { ClusterHealth } from '../api/types'
 import { CommandPalette } from '../components/CommandPalette' // Task 11 stub
@@ -10,6 +10,19 @@ export function useClusters() {
 
 const SECTIONS = ['overview', 'topics', 'groups'] as const
 type Section = (typeof SECTIONS)[number]
+
+// Derives the active sidebar section from the exact path segment that follows
+// `/c/{cluster}/`, rather than a substring match against the whole pathname —
+// a topic or group literally named e.g. "groups-events" must not be
+// misclassified, and this must be a pure function of `pathname` so callers
+// can subscribe reactively (via useLocation) instead of reading a stale
+// snapshot of `location.pathname`.
+export function sectionFromPathname(pathname: string, cluster: string): Section {
+  const prefix = `/c/${encodeURIComponent(cluster)}/`
+  if (!pathname.startsWith(prefix)) return 'overview'
+  const segment = pathname.slice(prefix.length).split('/')[0]
+  return segment === 'topics' || segment === 'groups' ? segment : 'overview'
+}
 
 export function Sidebar({ cluster, clusters, active }: {
   cluster: string
@@ -83,10 +96,8 @@ export function AppShell() {
   const params = useParams({ strict: false }) as { cluster?: string }
   const cluster = params.cluster ?? ''
   const { data } = useClusters()
-  const active: Section =
-    location.pathname.includes('/groups') ? 'groups'
-    : location.pathname.includes('/topics') ? 'topics'
-    : 'overview'
+  const { pathname } = useLocation()
+  const active = sectionFromPathname(pathname, cluster)
   return (
     <div className="flex min-h-screen bg-white text-zinc-900 dark:bg-zinc-950 dark:text-zinc-100">
       {cluster && <Sidebar cluster={cluster} clusters={data?.clusters ?? []} active={active} />}

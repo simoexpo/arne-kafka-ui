@@ -123,6 +123,7 @@ export function ConsumersTab({ cluster, topic }: { cluster: string; topic: strin
         </div>
       </Panel>
       <Panel title="Consumer groups" error={consumers.error} loading={consumers.isPending}>
+        <div className="mb-2"><StalenessChip asOf={consumers.data?.as_of ?? null} /></div>
         {consumers.data && consumers.data.groups.length === 0 && (
           <p className="text-sm text-zinc-500">no consumer groups are reading this topic</p>
         )}

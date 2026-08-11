@@ -26,12 +26,14 @@ describe('ConsumersTab', () => {
         group_id: 'billing', state: 'Stable', total_lag: 7,
         partitions: [{ topic: 'orders', partition: 0, committed_offset: 35, end_offset: 42, lag: 7 }],
       }],
-      as_of: 2000,
+      as_of: Date.now(),
     })
     renderWithQuery(<ConsumersTab cluster="prod" topic="orders" />)
     expect(await screen.findByText('5.5 msg/s')).toBeInTheDocument()
     expect(screen.getByText('billing')).toBeInTheDocument()
     expect(screen.getByText('7')).toBeInTheDocument()
+    // lag data carries its own sample timestamp, distinct from the throughput panel's
+    expect(screen.getByText('just now')).toBeInTheDocument()
   })
 
   it('shows empty state when no group consumes the topic', async () => {
