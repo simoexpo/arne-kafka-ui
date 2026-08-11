@@ -1,4 +1,4 @@
-use super::MessageOut;
+use super::{Encoding, MessageOut};
 
 #[derive(Debug, Clone)]
 pub enum Filter {
@@ -48,12 +48,18 @@ pub fn matches(filter: &Filter, msg: &MessageOut) -> bool {
     match filter {
         Filter::KeyEquals(q) => msg.key.as_ref().is_some_and(|k| k.text == *q),
         Filter::KeyContains(q) => msg.key.as_ref().is_some_and(|k| k.text.contains(q.as_str())),
-        Filter::ValueContains(q) => msg.value.as_ref().is_some_and(|v| v.text.contains(q.as_str())),
+        // A value that failed to decode has no real content to search — its
+        // `text` is just the base64 of the raw bytes, so matching against it
+        // would produce false hits with no relationship to actual content.
+        Filter::ValueContains(q) => msg.value.as_ref().is_some_and(|v| {
+            v.encoding != Encoding::DecodeError && v.text.contains(q.as_str())
+        }),
         Filter::JsonPathEquals { path, value } => msg.value.as_ref().is_some_and(|v| {
-            serde_json::from_str::<serde_json::Value>(&v.text)
-                .ok()
-                .and_then(|root| json_at_path(&root, path).map(|found| scalar_eq(found, value)))
-                .unwrap_or(false)
+            v.encoding != Encoding::DecodeError
+                && serde_json::from_str::<serde_json::Value>(&v.text)
+                    .ok()
+                    .and_then(|root| json_at_path(&root, path).map(|found| scalar_eq(found, value)))
+                    .unwrap_or(false)
         }),
     }
 }
@@ -87,6 +93,25 @@ mod tests {
         let m = msg(None, "hello kafka world", Encoding::Utf8);
         assert!(matches(&Filter::ValueContains("kafka".into()), &m));
         assert!(!matches(&Filter::ValueContains("rabbit".into()), &m));
+    }
+
+    /// C2 regression: a value that failed to decode is stored as the raw
+    /// payload's base64 `text` under `Encoding::DecodeError`. Matching
+    /// content filters against that base64 blob produces false matches with
+    /// no relationship to the actual (undecodable) content — per plan
+    /// semantics, a decode-failed value matches NO content filter.
+    #[test]
+    fn value_contains_never_matches_decode_error() {
+        let m = msg(None, "a-base64-blob-that-happens-to-contain-kafka", Encoding::DecodeError);
+        assert!(!matches(&Filter::ValueContains("kafka".into()), &m));
+    }
+
+    #[test]
+    fn json_path_never_matches_decode_error() {
+        // Base64 text that also happens to be valid JSON shaped like the path expects.
+        let m = msg(None, r#"{"a":1}"#, Encoding::DecodeError);
+        let f = Filter::JsonPathEquals { path: "a".into(), value: "1".into() };
+        assert!(!matches(&f, &m));
     }
 
     #[test]
