@@ -1,0 +1,128 @@
+use protobuf::reflect::FileDescriptor;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static CALL_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+fn read_zigzag_varint(bytes: &[u8]) -> Result<(i64, &[u8]), String> {
+    let mut result: u64 = 0;
+    let mut shift = 0;
+    for (i, b) in bytes.iter().enumerate() {
+        result |= u64::from(b & 0x7f) << shift;
+        if b & 0x80 == 0 {
+            let decoded = ((result >> 1) as i64) ^ -((result & 1) as i64);
+            return Ok((decoded, &bytes[i + 1..]));
+        }
+        shift += 7;
+        if shift >= 64 {
+            break;
+        }
+    }
+    Err("truncated varint in message indexes".into())
+}
+
+pub fn read_message_indexes(bytes: &[u8]) -> Result<(Vec<i32>, &[u8]), String> {
+    let (count, mut rest) = read_zigzag_varint(bytes)?;
+    if count == 0 {
+        return Ok((vec![0], rest));
+    }
+    let mut indexes = Vec::with_capacity(count as usize);
+    for _ in 0..count {
+        let (idx, r) = read_zigzag_varint(rest)?;
+        indexes.push(idx as i32);
+        rest = r;
+    }
+    Ok((indexes, rest))
+}
+
+pub fn decode(proto_src: &str, payload_after_header: &[u8]) -> Result<String, String> {
+    let (indexes, body) = read_message_indexes(payload_after_header)?;
+    if indexes != [0] {
+        return Err(format!(
+            "unsupported protobuf message index path {indexes:?} (v1 decodes only the first top-level message)"
+        ));
+    }
+
+    // protobuf-parse reads files from disk; write the SR schema text to a temp file
+    let call_id = CALL_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!(
+        "betrachtung-proto-{}-{}",
+        std::process::id(),
+        call_id
+    ));
+    std::fs::create_dir_all(&dir).map_err(|e| format!("tmp dir: {e}"))?;
+    let path = dir.join("schema.proto");
+    std::fs::write(&path, proto_src).map_err(|e| format!("tmp write: {e}"))?;
+
+    let parsed = protobuf_parse::Parser::new()
+        .pure()
+        .include(&dir)
+        .input(&path)
+        .parse_and_typecheck()
+        .map_err(|e| format!("proto parse: {e}"))?;
+
+    let fd_proto = parsed
+        .file_descriptors
+        .into_iter()
+        .find(|fd| fd.name.as_deref().map(|n| n.ends_with("schema.proto")).unwrap_or(false))
+        .ok_or("proto parse produced no descriptor")?;
+    let fd = FileDescriptor::new_dynamic(fd_proto, &[]).map_err(|e| format!("descriptor: {e}"))?;
+    let md = fd
+        .messages()
+        .next()
+        .ok_or("proto schema declares no message")?;
+    let msg = md
+        .parse_from_bytes(body)
+        .map_err(|e| format!("protobuf decode: {e}"))?;
+    protobuf_json_mapping::print_to_string(&*msg).map_err(|e| format!("proto to json: {e}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const PROTO: &str = r#"syntax = "proto3";
+message User {
+  int64 id = 1;
+  string name = 2;
+}
+"#;
+
+    // field 1 (varint) = 42, field 2 (len-delimited) = "ada"
+    const USER_BYTES: &[u8] = &[0x08, 0x2a, 0x12, 0x03, b'a', b'd', b'a'];
+
+    #[test]
+    fn zero_byte_means_first_message() {
+        let (idx, rest) = read_message_indexes(&[0x00, 0xAA]).unwrap();
+        assert_eq!(idx, vec![0]);
+        assert_eq!(rest, &[0xAA]);
+    }
+
+    #[test]
+    fn explicit_indexes_are_parsed() {
+        // count=1 (zigzag 1 = 0x02), index=1 (zigzag 1 = 0x02)
+        let (idx, rest) = read_message_indexes(&[0x02, 0x02, 0xBB]).unwrap();
+        assert_eq!(idx, vec![1]);
+        assert_eq!(rest, &[0xBB]);
+    }
+
+    #[test]
+    fn decodes_first_message_to_json() {
+        let mut payload = vec![0x00];
+        payload.extend_from_slice(USER_BYTES);
+        let json = decode(PROTO, &payload).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["name"], "ada");
+        assert_eq!(v["id"].as_str().unwrap_or_default(), "42"); // proto3 JSON prints int64 as string
+    }
+
+    #[test]
+    fn non_first_message_index_is_a_clear_error() {
+        let err = decode(PROTO, &[0x02, 0x02, 0x08, 0x2a]).unwrap_err();
+        assert!(err.contains("message index"), "got: {err}");
+    }
+
+    #[test]
+    fn garbage_proto_source_is_error() {
+        assert!(decode("not proto at all {{{", &[0x00]).is_err());
+    }
+}

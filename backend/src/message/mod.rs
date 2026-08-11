@@ -1,5 +1,6 @@
 pub mod avro;
 pub mod decode;
+pub mod proto;
 pub mod schema_registry;
 
 use serde::Serialize;

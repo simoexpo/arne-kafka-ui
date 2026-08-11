@@ -8,6 +8,9 @@ anyhow = "1.0.104"
 apache-avro = "0.22.0"
 axum = "0.8.9"
 base64 = "0.23.1"
+protobuf = "3.7.2"
+protobuf-json-mapping = "3.7.2"
+protobuf-parse = "3.7.2"
 rdkafka = { version = "0.39.0", features = ["cmake-build", "ssl-vendored"] }
 reqwest = { version = "0.13.4", features = ["json"] }
 serde = { version = "1.0.229", features = ["derive"] }
