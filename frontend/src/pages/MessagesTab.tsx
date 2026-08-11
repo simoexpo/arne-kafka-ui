@@ -7,14 +7,22 @@ import { MessageList } from '../components/messages/MessageList'
 import { Panel } from '../components/Panel'
 import { StalenessChip } from '../components/StalenessChip'
 
-type SearchStatus = 'running' | 'complete' | 'max_matches' | 'cancelled' | 'error'
+// 'idle' is the sentinel before any search has been started (or after
+// Load/Tail reset it) — distinct from 'running', which means a stream is
+// actually open. Handlers only apply their update while 'running': the
+// invariant "ignore stream events once a search is no longer active" is
+// localized in `applyIfRunning` below, so a terminal event that arrives
+// after another terminal event (or after cancel) can never resurrect or
+// overwrite settled state.
+type SearchStatus = 'idle' | 'running' | 'complete' | 'max_matches' | 'cancelled' | 'error'
 interface SearchState {
   results: MessageOut[]
   progress: SearchProgress | null
   status: SearchStatus
   error?: string
 }
-const initialSearchState: SearchState = { results: [], progress: null, status: 'running' }
+const initialSearchState: SearchState = { results: [], progress: null, status: 'idle' }
+const isNum = (v: string) => v.trim() !== '' && !Number.isNaN(Number(v))
 
 export function MessagesTab({ cluster, topic }: { cluster: string; topic: string }) {
   const [mode, setMode] = useState<'browse' | 'tail' | 'search'>('browse')
@@ -45,14 +53,18 @@ export function MessagesTab({ cluster, topic }: { cluster: string; topic: string
     queryFn: ({ signal }) => getMessages(cluster, topic, anchor, signal),
   })
 
+  const closeSearchStream = () => {
+    searchHandle.current?.close()
+    searchHandle.current = null
+  }
+
   // Starting any of Load/Tail/Search must close whatever stream is currently
   // open — only one of tail/search can be live at a time. Idempotent: safe
   // to call when nothing is open.
   const stopStreams = () => {
     tailHandle.current?.close()
     tailHandle.current = null
-    searchHandle.current?.close()
-    searchHandle.current = null
+    closeSearchStream()
   }
 
   const load = () => {
@@ -106,24 +118,40 @@ export function MessagesTab({ cluster, topic }: { cluster: string; topic: string
       ? { filter: 'json_eq', q: filterQ, path: filterPath }
       : { filter: filterKind as 'key_eq' | 'key_contains' | 'value_contains', q: filterQ }
 
+  // Applies `update` only while a search is actually running. Once the
+  // stream has settled into a terminal state (or been cancelled), further
+  // events for that same handle — including ones already in flight when we
+  // closed it — are dropped instead of resurrecting or overwriting the
+  // settled status.
+  const applyIfRunning = (update: (s: SearchState) => SearchState) =>
+    setSearchState((s) => (s.status === 'running' ? update(s) : s))
+
   const runSearch = () => {
     stopStreams()
     setTailError(null)
     setSearchState({ results: [], progress: null, status: 'running' })
     searchHandle.current = searchTopic(cluster, topic, buildSearchRange(), buildSearchFilter(), {
-      onProgress: (p) => setSearchState((s) => ({ ...s, progress: p })),
-      onMatch: (m) => setSearchState((s) => ({ ...s, results: [...s.results, m] })),
-      onDone: (reason) => setSearchState((s) => ({ ...s, status: reason === 'max_matches' ? 'max_matches' : 'complete' })),
-      onError: (e) => setSearchState((s) => ({ ...s, status: 'error', error: `${e.code}: ${e.message}` })),
-      onTransportError: () => setSearchState((s) => ({ ...s, status: 'error', error: 'connection lost — retrying is manual' })),
+      onProgress: (p) => applyIfRunning((s) => ({ ...s, progress: p })),
+      onMatch: (m) => applyIfRunning((s) => ({ ...s, results: [...s.results, m] })),
+      onDone: (reason) => {
+        closeSearchStream()
+        applyIfRunning((s) => ({ ...s, status: reason === 'max_matches' ? 'max_matches' : 'complete' }))
+      },
+      onError: (e) => {
+        closeSearchStream()
+        applyIfRunning((s) => ({ ...s, status: 'error', error: `${e.code}: ${e.message}` }))
+      },
+      onTransportError: () => {
+        closeSearchStream()
+        applyIfRunning((s) => ({ ...s, status: 'error', error: 'connection lost — retrying is manual' }))
+      },
     })
     setMode('search')
   }
 
   const cancelSearch = () => {
-    searchHandle.current?.close()
-    searchHandle.current = null
-    setSearchState((s) => ({ ...s, status: 'cancelled' }))
+    closeSearchStream()
+    applyIfRunning((s) => ({ ...s, status: 'cancelled' }))
   }
 
   useEffect(() => {
@@ -140,7 +168,14 @@ export function MessagesTab({ cluster, topic }: { cluster: string; topic: string
   const isFrozen = mode === 'browse' && tailError !== null
   const showTailView = isTailing || isFrozen
   const inputCls = 'w-24 rounded border border-zinc-300 bg-transparent px-2 py-1 text-sm dark:border-zinc-700'
-  const canSearch = filterKind !== 'none' && filterQ.trim() !== ''
+  const filterValid = filterKind !== 'none' && filterQ.trim() !== '' && (filterKind !== 'json_eq' || filterPath.trim() !== '')
+  const rangeValid =
+    rangeKind === 'last_n'
+      ? isNum(rangeN) && Number(rangeN) >= 1
+      : rangeKind === 'offsets'
+        ? isNum(rangeFrom) && isNum(rangeTo) && Number(rangeTo) > Number(rangeFrom)
+        : isNum(rangeFromMs)
+  const canSearch = filterValid && rangeValid
   const searchStatusText =
     searchState.status === 'complete'
       ? 'complete'
@@ -240,7 +275,7 @@ export function MessagesTab({ cluster, topic }: { cluster: string; topic: string
         <div className="space-y-1">
           {searchState.progress && (
             <div className="flex items-center gap-2">
-              <progress max={searchState.progress.total} value={searchState.progress.scanned} />
+              <progress aria-label="search progress" max={searchState.progress.total} value={searchState.progress.scanned} />
               <span className="text-sm text-zinc-600 dark:text-zinc-400">
                 {`${searchState.progress.scanned}/${searchState.progress.total} scanned · ${searchState.progress.matches} matches`}
               </span>

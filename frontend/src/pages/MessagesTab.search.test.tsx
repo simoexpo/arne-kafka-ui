@@ -36,6 +36,7 @@ describe('MessagesTab search', () => {
     es.emit('match', mk(4))
     es.emit('progress', { scanned: 1000, total: 1000, matches: 1 })
     es.emit('done', { reason: 'complete' })
+    expect(FakeEventSource.instances.at(-1)!.closed).toBe(true)
     expect(await screen.findByText('p0·4')).toBeInTheDocument()
     expect(screen.getByText(/1000\/1000 scanned · 1 matches/)).toBeInTheDocument()
     expect(screen.getByText(/complete/)).toBeInTheDocument()
@@ -58,6 +59,24 @@ describe('MessagesTab search', () => {
   it('server errors surface in red', async () => {
     const es = await startSearch()
     es.emit('error', { code: 'kafka_timeout', message: 'fetch metadata timed out' })
+    expect(FakeEventSource.instances.at(-1)!.closed).toBe(true)
     expect(await screen.findByText(/kafka_timeout/)).toBeInTheDocument()
+  })
+
+  it('disables Search for json_eq with an empty path', async () => {
+    renderWithQuery(<MessagesTab cluster="prod" topic="orders" />)
+    await screen.findByText('no messages')
+    await userEvent.selectOptions(screen.getByLabelText('filter'), 'json_eq')
+    await userEvent.type(screen.getByLabelText('query'), '42')
+    expect(screen.getByRole('button', { name: 'Search' })).toBeDisabled()
+  })
+
+  it('disables Search for an offsets range with empty bounds', async () => {
+    renderWithQuery(<MessagesTab cluster="prod" topic="orders" />)
+    await screen.findByText('no messages')
+    await userEvent.selectOptions(screen.getByLabelText('filter'), 'value_contains')
+    await userEvent.type(screen.getByLabelText('query'), 'v4')
+    await userEvent.selectOptions(screen.getByLabelText('range'), 'offsets')
+    expect(screen.getByRole('button', { name: 'Search' })).toBeDisabled()
   })
 })
