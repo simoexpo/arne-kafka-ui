@@ -1,9 +1,12 @@
 import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { useParams } from '@tanstack/react-router'
-import { getTopicDetail } from '../api/client'
+import { getTopicDetail, getThroughput, getTopicConsumers } from '../api/client'
 import { Panel } from '../components/Panel'
 import { StalenessChip } from '../components/StalenessChip'
+import { Sparkline } from '../components/Sparkline'
+import { formatCount } from '../lib/format'
+import type { TopicGroupLag } from '../api/types'
 
 const TABS = ['Messages', 'Partitions', 'Consumers', 'Config'] as const
 type Tab = (typeof TABS)[number]
@@ -92,9 +95,79 @@ export function TopicDetailView({ cluster, topic }: { cluster: string; topic: st
   )
 }
 
-// Replaced with the real implementation in the next task (throughput + lag).
-export function ConsumersTab(_props: { cluster: string; topic: string }) {
-  return null
+export function ConsumersTab({ cluster, topic }: { cluster: string; topic: string }) {
+  const throughput = useQuery({
+    queryKey: ['throughput', cluster, topic],
+    queryFn: () => getThroughput(cluster, topic),
+    refetchInterval: 10_000,
+  })
+  const consumers = useQuery({
+    queryKey: ['consumers', cluster, topic],
+    queryFn: () => getTopicConsumers(cluster, topic),
+    refetchInterval: 10_000,
+  })
+  const samples = throughput.data?.samples ?? []
+  const current = samples.at(-1)
+
+  return (
+    <div className="space-y-4">
+      <Panel title="Throughput" error={throughput.error} loading={throughput.isPending}>
+        <div className="flex items-end gap-4">
+          <Sparkline points={samples.map((s) => ({ x: s.ts_ms, y: s.msgs_per_sec }))} />
+          <div className="text-sm">
+            {current
+              ? <span className="text-xl font-semibold">{current.msgs_per_sec.toFixed(1)} msg/s</span>
+              : <span className="text-zinc-500">—</span>}
+            <div className="mt-1"><StalenessChip asOf={throughput.data?.as_of ?? null} /></div>
+          </div>
+        </div>
+      </Panel>
+      <Panel title="Consumer groups" error={consumers.error} loading={consumers.isPending}>
+        {consumers.data && consumers.data.groups.length === 0 && (
+          <p className="text-sm text-zinc-500">no consumer groups are reading this topic</p>
+        )}
+        <div className="space-y-2">
+          {consumers.data?.groups.map((g) => (
+            <GroupRow key={g.group_id} group={g} />
+          ))}
+        </div>
+      </Panel>
+    </div>
+  )
+}
+
+function GroupRow({ group }: { group: TopicGroupLag }) {
+  const [open, setOpen] = useState(false)
+  return (
+    <details
+      className="rounded border border-zinc-100 p-2 dark:border-zinc-800"
+      open={open}
+      onToggle={(e) => setOpen(e.currentTarget.open)}
+    >
+      <summary className="flex cursor-pointer items-center gap-3 text-sm">
+        <span className="font-mono font-medium">{group.group_id}</span>
+        <span className="text-xs text-zinc-500">{group.state}</span>
+        <span className="ml-auto">lag <span className="font-semibold">{formatCount(group.total_lag)}</span></span>
+      </summary>
+      {open && (
+        <table className="mt-2 w-full text-left font-mono text-xs">
+          <thead className="text-zinc-500">
+            <tr><th className="py-1">partition</th><th>committed</th><th>end</th><th>lag</th></tr>
+          </thead>
+          <tbody>
+            {group.partitions.map((p) => (
+              <tr key={p.partition} className="border-t border-zinc-100 dark:border-zinc-800">
+                <td className="py-1">{p.partition}</td>
+                <td>{p.committed_offset}</td>
+                <td>{p.end_offset}</td>
+                <td>{p.lag}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+    </details>
+  )
 }
 
 export function TopicDetailPage() {
