@@ -6,6 +6,7 @@ pub mod proto;
 pub mod range;
 pub mod schema_registry;
 pub mod search;
+pub mod tail;
 
 use serde::Serialize;
 

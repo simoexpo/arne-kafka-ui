@@ -321,3 +321,44 @@ async fn search_bad_filter_is_error_event_or_400() {
     assert_eq!(status, 400, "body: {body}");
     assert_eq!(body["code"], "bad_request");
 }
+
+#[tokio::test]
+async fn tail_streams_new_messages() {
+    let bootstrap = start_kafka().await;
+    create_topic(&bootstrap, "tail-topic", 1).await;
+    produce(&bootstrap, "tail-topic", 5).await; // pre-existing, must NOT appear
+    let state = state_for(&bootstrap, vec![]);
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app(state)).await.unwrap() });
+    let res = reqwest::get(format!("http://{addr}/api/clusters/test/topics/tail-topic/tail")).await.unwrap();
+    assert_eq!(res.status(), 200);
+
+    // give the tail consumer a moment to assign at end, then produce
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    produce(&bootstrap, "tail-topic", 3).await;
+
+    use futures_util::StreamExt;
+    let mut stream = res.bytes_stream();
+    let mut buf = String::new();
+    let mut got = Vec::new();
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(15);
+    while got.len() < 3 && tokio::time::Instant::now() < deadline {
+        let chunk = tokio::time::timeout_at(deadline, stream.next()).await;
+        let Ok(Some(Ok(bytes))) = chunk else { break };
+        buf.push_str(&String::from_utf8_lossy(&bytes));
+        while let Some(pos) = buf.find("\n\n") {
+            let frame = buf[..pos].to_string();
+            buf.drain(..pos + 2);
+            for line in frame.lines() {
+                if let Some(data) = line.strip_prefix("data: ")
+                    && let Ok(v) = serde_json::from_str::<serde_json::Value>(data)
+                {
+                    got.push(v["value"]["text"].as_str().unwrap_or_default().to_string());
+                }
+            }
+        }
+    }
+    assert_eq!(got, vec!["v0", "v1", "v2"], "tail must stream only new messages in order");
+}

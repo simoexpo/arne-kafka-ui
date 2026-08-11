@@ -4,6 +4,7 @@ use crate::message::fetch;
 use crate::message::filter::Filter;
 use crate::message::range::{self, PartitionRange};
 use crate::message::search::{self, SearchEvent};
+use crate::message::tail;
 use crate::state::AppState;
 use crate::util::now_ms;
 use axum::extract::{Path, Query, State};
@@ -235,6 +236,20 @@ pub async fn search(
     let stream = ReceiverStream::new(rx).map(move |event: SearchEvent| {
         let _hold = &guard; // move the guard into the stream: dropped on disconnect
         Ok(Event::default().event(event.name()).data(serde_json::to_string(&event).unwrap_or_default()))
+    });
+    Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
+}
+
+pub async fn tail_sse(
+    State(state): State<AppState>,
+    Path((cluster, topic)): Path<(String, String)>,
+) -> Result<Sse<impl Stream<Item = Result<Event, std::convert::Infallible>>>, ApiError> {
+    let handle = state.registry.get(&cluster)?;
+    let (rx, cancel) = tail::run(handle, topic).await?;
+    let guard = CancelOnDrop(cancel);
+    let stream = ReceiverStream::new(rx).map(move |msg| {
+        let _hold = &guard; // move the guard into the stream: dropped on disconnect
+        Ok(Event::default().event("message").data(serde_json::to_string(&msg).unwrap_or_default()))
     });
     Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
 }
