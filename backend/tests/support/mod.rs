@@ -19,17 +19,30 @@ use tower::ServiceExt;
 
 static KAFKA: OnceCell<(ContainerAsync<Kafka>, String)> = OnceCell::const_new();
 
+const KAFKA_CONTAINER_NAME: &str = "betrachtung-test-kafka";
+
+/// The container lives in a `static`, which Rust never drops, so testcontainers'
+/// drop-based cleanup never runs. Remove the container explicitly when the test
+/// process exits — no container may outlive the test run.
+extern "C" fn remove_kafka_container() {
+    let _ = std::process::Command::new("docker")
+        .args(["rm", "-f", KAFKA_CONTAINER_NAME])
+        .output();
+}
+
 pub async fn start_kafka() -> String {
     let (_c, bootstrap) = KAFKA
         .get_or_init(|| async {
-            // Reuse one long-lived, named container across test runs: the static
-            // OnceCell is never dropped, so without reuse every run leaks a container.
+            // Fixed name + reuse: if a previous run was killed before its exit
+            // hook ran, the leftover container is adopted (and reset below)
+            // instead of colliding on the name — residue is bounded at one.
             let container = Kafka::default()
-                .with_container_name("betrachtung-test-kafka")
+                .with_container_name(KAFKA_CONTAINER_NAME)
                 .with_reuse(ReuseDirective::Always)
                 .start()
                 .await
                 .expect("start kafka container (is Docker running?)");
+            unsafe { libc::atexit(remove_kafka_container) };
             let host = container.get_host().await.unwrap();
             let port = container.get_host_port_ipv4(9092).await.unwrap();
             let bootstrap = format!("{host}:{port}");

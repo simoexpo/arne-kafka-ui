@@ -181,6 +181,7 @@ dependencies = [
  "anyhow",
  "axum",
  "http-body-util",
+ "libc",
  "rdkafka",
  "reqwest",
  "serde",
