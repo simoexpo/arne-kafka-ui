@@ -1,3 +1,4 @@
+pub mod avro;
 pub mod decode;
 pub mod schema_registry;
 
