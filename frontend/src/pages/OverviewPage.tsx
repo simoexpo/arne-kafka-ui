@@ -38,7 +38,7 @@ export function OverviewView({ cluster }: { cluster: string }) {
             </dl>
           )}
         </Panel>
-        <Panel title="Brokers" loading={overview.isPending}>
+        <Panel title="Brokers" error={overview.error} loading={overview.isPending}>
           <ul className="space-y-1 font-mono text-sm">
             {overview.data?.brokers.map((b) => (
               <li key={b.id}>

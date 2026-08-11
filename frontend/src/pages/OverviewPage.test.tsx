@@ -43,7 +43,8 @@ describe('OverviewView', () => {
     )
     vi.mocked(client.getTopics).mockResolvedValue({ topics: [], as_of: Date.now() })
     renderWithQuery(<OverviewView cluster="prod" />)
-    expect(await screen.findByText(/kafka_timeout/)).toBeInTheDocument()
+    const errors = await screen.findAllByText(/kafka_timeout/)
+    expect(errors).toHaveLength(2) // both overview panels show error
     expect(screen.getByText('Top topics')).toBeInTheDocument() // sibling panel intact
   })
 })
