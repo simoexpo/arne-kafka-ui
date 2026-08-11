@@ -84,6 +84,7 @@ pub(crate) mod tests {
                     match id {
                         7 => Json(serde_json::json!({"schema": "\"string\""})).into_response(),
                         8 => Json(serde_json::json!({"schema": "syntax = \"proto3\";", "schemaType": "PROTOBUF"})).into_response(),
+                        9 => Json(serde_json::json!({"schema": "{}", "schemaType": "JSON"})).into_response(),
                         _ => axum::http::StatusCode::NOT_FOUND.into_response(),
                     }
                 }

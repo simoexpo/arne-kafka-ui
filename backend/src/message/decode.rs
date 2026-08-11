@@ -51,7 +51,17 @@ pub async fn decode_payload(bytes: Option<&[u8]>, sr: Option<&SchemaRegistry>) -
         SchemaType::Protobuf => proto::decode(&schema.schema, body).map(|text| (Encoding::Protobuf, text)),
         SchemaType::Json => {
             let plain = decode_plain(body);
-            Ok((Encoding::Json, plain.text))
+            // `decode_plain` labels non-JSON bodies Utf8/Bytes; only trust
+            // the registry's declared JSON schema type when the body
+            // actually parsed as JSON, otherwise this would silently stamp
+            // `Encoding::Json` on a payload that plainly isn't.
+            if plain.encoding == Encoding::Json {
+                Ok((Encoding::Json, plain.text))
+            } else {
+                Err(format!(
+                    "schema registry declares schema id {schema_id} as JSON but the payload body is not valid JSON"
+                ))
+            }
         }
     };
     Some(match result {
@@ -127,6 +137,33 @@ mod tests {
     async fn no_header_falls_through_to_plain() {
         let p = decode_payload(Some(b"{\"a\":1}"), None).await.unwrap();
         assert_eq!(p.encoding, Encoding::Json);
+    }
+
+    #[tokio::test]
+    async fn json_schema_type_with_valid_json_body_decodes_as_json() {
+        let sr = SchemaRegistry::new(&crate::message::schema_registry::tests::mock_sr_for_decode().await);
+        let mut bytes = vec![0u8, 0, 0, 0, 9];
+        bytes.extend_from_slice(br#"{"a":1}"#);
+        let p = decode_payload(Some(&bytes), Some(&sr)).await.unwrap();
+        assert_eq!(p.encoding, Encoding::Json);
+        assert_eq!(p.text, r#"{"a":1}"#);
+        assert_eq!(p.schema_id, Some(9));
+    }
+
+    /// I4 regression: the schema registry declares schema id 9 as JSON, but
+    /// the actual payload body is not valid JSON. Stamping `Encoding::Json`
+    /// on it anyway (as `decode_plain` would label it `Utf8`/`Bytes`)
+    /// silently mislabels the payload; it must surface as a decode error.
+    #[tokio::test]
+    async fn json_schema_type_with_invalid_json_body_is_decode_error() {
+        let sr = SchemaRegistry::new(&crate::message::schema_registry::tests::mock_sr_for_decode().await);
+        let mut bytes = vec![0u8, 0, 0, 0, 9];
+        bytes.extend_from_slice(b"not json at all");
+        let p = decode_payload(Some(&bytes), Some(&sr)).await.unwrap();
+        assert_eq!(p.encoding, Encoding::DecodeError);
+        assert_eq!(p.schema_id, Some(9));
+        assert!(p.error.as_ref().unwrap().contains("JSON"), "got: {:?}", p.error);
+        assert!(!p.text.is_empty());
     }
 
     #[tokio::test]
