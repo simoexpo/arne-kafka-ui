@@ -1,8 +1,10 @@
-use super::{ClusterHandle, ADMIN_TIMEOUT};
+use super::{group_consumer, ClusterHandle, ADMIN_TIMEOUT};
 use crate::error::{self, ApiError};
 use crate::util::now_ms;
 use rdkafka::admin::{AdminOptions, ResourceSpecifier};
 use rdkafka::consumer::Consumer;
+use rdkafka::topic_partition_list::TopicPartitionList;
+use rdkafka::Offset;
 use serde::Serialize;
 use std::sync::Arc;
 
@@ -125,4 +127,129 @@ pub async fn topic_detail(handle: Arc<ClusterHandle>, topic: String) -> Result<T
     let partitions = partitions.map_err(|e| ApiError::internal(format!("task join: {e}")))??;
     let configs = configs?;
     Ok(TopicDetail { name: topic, partitions, configs, as_of: now_ms() })
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub struct PartitionLag {
+    pub topic: String,
+    pub partition: i32,
+    pub committed_offset: i64,
+    pub end_offset: i64,
+    pub lag: i64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct GroupSummary {
+    pub group_id: String,
+    pub state: String,
+    pub protocol_type: String,
+    pub member_count: usize,
+    pub total_lag: i64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct GroupList { pub groups: Vec<GroupSummary>, pub as_of: i64 }
+
+#[derive(Debug, Serialize)]
+pub struct MemberInfo { pub member_id: String, pub client_id: String, pub client_host: String }
+
+#[derive(Debug, Serialize)]
+pub struct GroupDetail {
+    pub group_id: String,
+    pub state: String,
+    pub members: Vec<MemberInfo>,
+    pub partitions: Vec<PartitionLag>,
+    pub as_of: i64,
+}
+
+/// Committed offsets fetched WITHOUT joining the group (OffsetFetch only):
+/// a throwaway consumer configured with the group.id never subscribes,
+/// so it cannot trigger a rebalance of the real group.
+pub fn group_lag_blocking(
+    handle: &ClusterHandle,
+    group: &str,
+    topic_filter: Option<&str>,
+) -> Result<Vec<PartitionLag>, ApiError> {
+    let md = handle.consumer()
+        .fetch_metadata(topic_filter, ADMIN_TIMEOUT)
+        .map_err(|e| error::from_kafka(&handle.name, "fetch metadata", &e))?;
+    let mut tpl = TopicPartitionList::new();
+    for t in md.topics() {
+        if let Some(f) = topic_filter { if t.name() != f { continue; } }
+        for p in t.partitions() {
+            tpl.add_partition(t.name(), p.id());
+        }
+    }
+    let gc = group_consumer(&handle.config, group)
+        .map_err(|e| error::from_kafka(&handle.name, "create group consumer", &e))?;
+    let committed = gc.committed_offsets(tpl, ADMIN_TIMEOUT)
+        .map_err(|e| error::from_kafka(&handle.name, "fetch committed offsets", &e))?;
+    let mut out = Vec::new();
+    for e in committed.elements() {
+        if let Offset::Offset(c) = e.offset() {
+            let (_, hi) = handle.consumer()
+                .fetch_watermarks(e.topic(), e.partition(), ADMIN_TIMEOUT)
+                .map_err(|err| error::from_kafka(&handle.name, "fetch watermarks", &err))?;
+            out.push(PartitionLag {
+                topic: e.topic().to_string(), partition: e.partition(),
+                committed_offset: c, end_offset: hi, lag: (hi - c).max(0),
+            });
+        }
+    }
+    out.sort_by(|a, b| (a.topic.clone(), a.partition).cmp(&(b.topic.clone(), b.partition)));
+    Ok(out)
+}
+
+pub async fn list_groups(handle: Arc<ClusterHandle>) -> Result<GroupList, ApiError> {
+    tokio::task::spawn_blocking(move || {
+        let gl = handle.consumer()
+            .fetch_group_list(None, ADMIN_TIMEOUT)
+            .map_err(|e| error::from_kafka(&handle.name, "list groups", &e))?;
+        let mut groups = Vec::new();
+        for g in gl.groups() {
+            let lag = group_lag_blocking(&handle, g.name(), None)?;
+            groups.push(GroupSummary {
+                group_id: g.name().to_string(),
+                state: g.state().to_string(),
+                protocol_type: g.protocol_type().to_string(),
+                member_count: g.members().len(),
+                total_lag: lag.iter().map(|p| p.lag).sum(),
+            });
+        }
+        groups.sort_by(|a, b| a.group_id.cmp(&b.group_id));
+        Ok(GroupList { groups, as_of: now_ms() })
+    })
+    .await
+    .map_err(|e| ApiError::internal(format!("task join: {e}")))?
+}
+
+pub async fn group_detail(handle: Arc<ClusterHandle>, group: String) -> Result<GroupDetail, ApiError> {
+    tokio::task::spawn_blocking(move || {
+        let gl = handle.consumer()
+            .fetch_group_list(Some(&group), ADMIN_TIMEOUT)
+            .map_err(|e| error::from_kafka(&handle.name, "describe group", &e))?;
+        let info = gl.groups().iter().find(|g| g.name() == group);
+        // a group entry with state "Dead" counts as absent
+        let info = info.filter(|i| i.state() != "Dead");
+        let partitions = group_lag_blocking(&handle, &group, None)?;
+        // A group with no broker-side entry AND no committed offsets does not exist.
+        let info = match (info, partitions.is_empty()) {
+            (Some(i), _) => Some(i),
+            (None, false) => None, // empty/expired group that still has offsets
+            (None, true) => return Err(ApiError::group_not_found(&handle.name, &group)),
+        };
+        Ok(GroupDetail {
+            group_id: group.clone(),
+            state: info.map(|i| i.state().to_string()).unwrap_or_else(|| "Empty".into()),
+            members: info.map(|i| i.members().iter().map(|m| MemberInfo {
+                member_id: m.id().to_string(),
+                client_id: m.client_id().to_string(),
+                client_host: m.client_host().to_string(),
+            }).collect()).unwrap_or_default(),
+            partitions,
+            as_of: now_ms(),
+        })
+    })
+    .await
+    .map_err(|e| ApiError::internal(format!("task join: {e}")))?
 }

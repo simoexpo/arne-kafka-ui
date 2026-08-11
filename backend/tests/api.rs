@@ -66,6 +66,40 @@ async fn unknown_topic_detail_is_404() {
 }
 
 #[tokio::test]
+async fn groups_list_and_detail_report_lag() {
+    let bootstrap = start_kafka().await;
+    create_topic(&bootstrap, "lag-topic", 1).await;
+    produce(&bootstrap, "lag-topic", 10).await;
+    consume_and_commit(&bootstrap, "lag-topic", "lag-group", 4).await;
+    let state = state_for(&bootstrap, vec![]);
+
+    let (status, body) = get_json(app(state.clone()), "/api/clusters/test/groups").await;
+    assert_eq!(status, 200);
+    let g = body["groups"].as_array().unwrap().iter()
+        .find(|g| g["group_id"] == "lag-group").expect("group listed");
+    assert_eq!(g["total_lag"], 6); // 10 produced - 4 committed
+
+    let (status, body) = get_json(app(state), "/api/clusters/test/groups/lag-group").await;
+    assert_eq!(status, 200);
+    assert_eq!(body["group_id"], "lag-group");
+    let parts = body["partitions"].as_array().unwrap();
+    assert_eq!(parts.len(), 1);
+    assert_eq!(parts[0]["topic"], "lag-topic");
+    assert_eq!(parts[0]["committed_offset"], 4);
+    assert_eq!(parts[0]["end_offset"], 10);
+    assert_eq!(parts[0]["lag"], 6);
+}
+
+#[tokio::test]
+async fn unknown_group_is_404() {
+    let bootstrap = start_kafka().await;
+    let state = state_for(&bootstrap, vec![]);
+    let (status, body) = get_json(app(state), "/api/clusters/test/groups/ghost-group").await;
+    assert_eq!(status, 404);
+    assert_eq!(body["code"], "group_not_found");
+}
+
+#[tokio::test]
 async fn topics_on_unknown_cluster_is_404() {
     let bootstrap = start_kafka().await;
     let state = state_for(&bootstrap, vec![]);
