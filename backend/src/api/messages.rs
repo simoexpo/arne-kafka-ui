@@ -162,6 +162,36 @@ pub struct SearchParams {
     pub path: Option<String>,
 }
 
+/// Validated once, before any Kafka round-trip — mirrors `Anchor::parse` for
+/// browse — so a malformed `range` (or a missing required param) is rejected
+/// with 400 even against a topic that doesn't exist; param validation must
+/// outrank topic lookup and never costs a broker round trip.
+enum Range {
+    LastN { n: u64 },
+    Offsets { from: i64, to: i64, partition: Option<i32> },
+    Ts { from_ms: i64, to_ms: Option<i64> },
+}
+
+impl Range {
+    fn parse(params: &SearchParams) -> Result<Self, ApiError> {
+        match params.range.as_str() {
+            "last_n" => Ok(Range::LastN {
+                n: params.n.ok_or_else(|| ApiError::bad_request("range=last_n requires n"))?,
+            }),
+            "offsets" => Ok(Range::Offsets {
+                from: params.from.ok_or_else(|| ApiError::bad_request("range=offsets requires from"))?,
+                to: params.to.ok_or_else(|| ApiError::bad_request("range=offsets requires to"))?,
+                partition: params.partition,
+            }),
+            "ts" => Ok(Range::Ts {
+                from_ms: params.from_ms.ok_or_else(|| ApiError::bad_request("range=ts requires from_ms"))?,
+                to_ms: params.to_ms,
+            }),
+            other => Err(ApiError::bad_request(format!("unknown range '{other}'"))),
+        }
+    }
+}
+
 /// Sets the cancel flag when the SSE stream is dropped (client disconnected),
 /// stopping every partition scanner at its next poll iteration — no zombie
 /// scans survive a client that goes away mid-search.
@@ -187,21 +217,17 @@ pub async fn search(
         return Err(ApiError::bad_request(format!("n must be <= {MAX_SEARCH_N}")));
     }
 
+    let range = Range::parse(&params)?;
+
     let ranges = {
         let handle = handle.clone();
         let topic = topic.clone();
-        let range_kind = params.range.clone();
         tokio::task::spawn_blocking(move || -> Result<_, ApiError> {
             let wm = watermarks_blocking(&handle, &topic)?;
-            match range_kind.as_str() {
-                "last_n" => {
-                    let n = params.n.ok_or_else(|| ApiError::bad_request("range=last_n requires n"))?;
-                    Ok(range::latest_ranges(&wm, n))
-                }
-                "offsets" => {
-                    let from = params.from.ok_or_else(|| ApiError::bad_request("range=offsets requires from"))?;
-                    let to = params.to.ok_or_else(|| ApiError::bad_request("range=offsets requires to"))?;
-                    let parts: Vec<i32> = match params.partition {
+            match range {
+                Range::LastN { n } => Ok(range::latest_ranges(&wm, n)),
+                Range::Offsets { from, to, partition } => {
+                    let parts: Vec<i32> = match partition {
                         Some(p) => vec![p],
                         None => wm.iter().map(|&(p, _, _)| p).collect(),
                     };
@@ -209,10 +235,9 @@ pub async fn search(
                     let ends: Vec<(i32, i64)> = parts.iter().map(|&p| (p, to)).collect();
                     Ok(range::window_ranges(&wm, &starts, Some(&ends)))
                 }
-                "ts" => {
-                    let from_ms = params.from_ms.ok_or_else(|| ApiError::bad_request("range=ts requires from_ms"))?;
+                Range::Ts { from_ms, to_ms } => {
                     let starts = ts_starts_blocking(&handle, &topic, &wm, from_ms)?;
-                    let ends = match params.to_ms {
+                    let ends = match to_ms {
                         Some(to_ms) => {
                             let end_starts = ts_starts_blocking(&handle, &topic, &wm, to_ms)?;
                             Some(end_starts.into_iter()
@@ -225,7 +250,6 @@ pub async fn search(
                     };
                     Ok(range::window_ranges(&wm, &starts, ends.as_deref()))
                 }
-                other => Err(ApiError::bad_request(format!("unknown range '{other}'"))),
             }
         }).await.map_err(|e| ApiError::internal(format!("task join: {e}")))??
     };

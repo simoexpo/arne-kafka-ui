@@ -322,6 +322,22 @@ async fn search_bad_filter_is_error_event_or_400() {
     assert_eq!(body["code"], "bad_request");
 }
 
+/// I5 regression: `range` must be validated before any Kafka round trip —
+/// same as browse's `anchor` — so a malformed `range` on a topic that
+/// doesn't even exist is a fast 400, not a 404 (and not a broker round
+/// trip at all).
+#[tokio::test]
+async fn search_bad_range_on_unknown_topic_is_400_not_404() {
+    let bootstrap = start_kafka().await;
+    let state = state_for(&bootstrap, vec![]);
+    let (status, body) = get_json(
+        app(state),
+        "/api/clusters/test/topics/ghost-topic/search?range=sideways&filter=value_contains&q=x",
+    ).await;
+    assert_eq!(status, 400, "body: {body}");
+    assert_eq!(body["code"], "bad_request");
+}
+
 #[tokio::test]
 async fn tail_streams_new_messages() {
     let bootstrap = start_kafka().await;
