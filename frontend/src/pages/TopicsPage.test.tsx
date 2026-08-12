@@ -60,4 +60,16 @@ describe('TopicsView', () => {
     await userEvent.click(screen.getByRole('checkbox', { name: /internal/i }))
     expect(screen.getByText('__consumer_offsets')).toBeInTheDocument()
   })
+
+  it('copies the topic name without navigating when the row copy button is clicked', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined)
+    Object.assign(navigator, { clipboard: { writeText } })
+    vi.mocked(client.getTopics).mockResolvedValue(topics)
+    const { router } = await renderWithRouter(<TopicsView cluster="prod" />, { initialPath: '/c/prod/topics' })
+    await screen.findByText('orders')
+    await userEvent.click(screen.getByRole('button', { name: 'copy orders' }))
+    expect(writeText).toHaveBeenCalledWith('orders')
+    expect(await screen.findByText(/copied/i)).toBeInTheDocument()
+    expect(router.state.location.pathname).toBe('/c/prod/topics')
+  })
 })

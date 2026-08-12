@@ -2,6 +2,7 @@ import { useMemo, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { Link, useParams } from '@tanstack/react-router'
 import { getTopics } from '../api/client'
+import { CopyButton } from '../components/CopyButton'
 import { Panel } from '../components/Panel'
 import { StalenessChip } from '../components/StalenessChip'
 import { formatCount } from '../lib/format'
@@ -50,13 +51,16 @@ export function TopicsView({ cluster }: { cluster: string }) {
             {visible.map((t) => (
               <tr key={t.name} className="border-t border-zinc-100 dark:border-zinc-800">
                 <td className="py-1.5">
-                  <Link
-                    to="/c/$cluster/topics/$topic"
-                    params={{ cluster, topic: t.name }}
-                    className="font-mono text-blue-600 hover:underline dark:text-blue-400"
-                  >
-                    {t.name}
-                  </Link>
+                  <span className="inline-flex items-center gap-1.5">
+                    <Link
+                      to="/c/$cluster/topics/$topic"
+                      params={{ cluster, topic: t.name }}
+                      className="font-mono text-blue-600 hover:underline dark:text-blue-400"
+                    >
+                      {t.name}
+                    </Link>
+                    <CopyButton text={t.name} label={t.name} />
+                  </span>
                 </td>
                 <td>{t.partitions}</td>
                 <td>{t.replication_factor}</td>

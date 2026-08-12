@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { useParams } from '@tanstack/react-router'
 import { getTopicDetail, getThroughput, getTopicConsumers } from '../api/client'
+import { CopyButton } from '../components/CopyButton'
 import { Panel } from '../components/Panel'
 import { StalenessChip } from '../components/StalenessChip'
 import { Sparkline } from '../components/Sparkline'
@@ -23,7 +24,10 @@ export function TopicDetailView({ cluster, topic }: { cluster: string; topic: st
   return (
     <div className="space-y-4">
       <div className="flex items-center gap-3">
-        <h1 className="font-mono text-lg font-semibold">{topic}</h1>
+        <h1 className="flex items-center gap-1.5 font-mono text-lg font-semibold">
+          {topic}
+          <CopyButton text={topic} label={topic} />
+        </h1>
         <StalenessChip asOf={detail.data?.as_of ?? null} />
       </div>
       <div className="flex gap-1 border-b border-zinc-200 dark:border-zinc-800">

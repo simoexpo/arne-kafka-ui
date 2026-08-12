@@ -52,4 +52,14 @@ describe('TopicDetailView', () => {
     expect(await screen.findByText('no messages')).toBeInTheDocument()
     expect(client.getMessages).toHaveBeenCalled()
   })
+
+  it('header has a button to copy the topic name', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined)
+    Object.assign(navigator, { clipboard: { writeText } })
+    vi.mocked(client.getTopicDetail).mockResolvedValue(detail)
+    renderWithQuery(<TopicDetailView cluster="prod" topic="orders" />)
+    await userEvent.click(screen.getByRole('button', { name: 'copy orders' }))
+    expect(writeText).toHaveBeenCalledWith('orders')
+    expect(await screen.findByText(/copied/i)).toBeInTheDocument()
+  })
 })
