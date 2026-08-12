@@ -91,14 +91,24 @@ export function ConsumersTab({ cluster, topic }: { cluster: string; topic: strin
     queryFn: () => getTopicConsumers(cluster, topic),
     refetchInterval: 10_000,
   })
-  const samples = throughput.data?.samples ?? []
+  const allSamples = throughput.data?.samples ?? []
+  const latest = allSamples.at(-1)
+  const windowMinutes = 15
+  const cutoff = latest ? latest.ts_ms - windowMinutes * 60_000 : null
+  const samples = cutoff === null ? allSamples : allSamples.filter((s) => s.ts_ms >= cutoff)
   const current = samples.at(-1)
 
   return (
     <div className="space-y-4">
       <Panel title="Throughput" error={throughput.error} loading={throughput.isPending}>
         <div className="flex items-end gap-4">
-          <Sparkline points={samples.map((s) => ({ x: s.ts_ms, y: s.msgs_per_sec }))} />
+          <div>
+            <Sparkline
+              points={samples.map((s) => ({ x: s.ts_ms, y: s.msgs_per_sec }))}
+              domain={latest ? { min: cutoff as number, max: latest.ts_ms } : undefined}
+            />
+            <p className="mt-1 text-xs text-zinc-500">last {windowMinutes}m</p>
+          </div>
           <div className="text-sm">
             {current
               ? <span className="text-xl font-semibold">{current.msgs_per_sec.toFixed(1)} msg/s</span>

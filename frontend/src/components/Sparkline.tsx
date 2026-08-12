@@ -1,4 +1,10 @@
-export function Sparkline({ points }: { points: { x: number; y: number }[] }) {
+export function Sparkline({
+  points,
+  domain,
+}: {
+  points: { x: number; y: number }[]
+  domain?: { min: number; max: number }
+}) {
   if (points.length === 0) {
     return <p className="text-sm text-zinc-500">no samples yet</p>
   }
@@ -7,8 +13,8 @@ export function Sparkline({ points }: { points: { x: number; y: number }[] }) {
   const pad = 2
   const xs = points.map((p) => p.x)
   const ys = points.map((p) => p.y)
-  const xMin = Math.min(...xs)
-  const xMax = Math.max(...xs)
+  const xMin = domain ? domain.min : Math.min(...xs)
+  const xMax = domain ? domain.max : Math.max(...xs)
   const yMax = Math.max(...ys, 1e-9)
   const sx = (x: number) => (xMax === xMin ? w / 2 : pad + ((x - xMin) / (xMax - xMin)) * (w - 2 * pad))
   const sy = (y: number) => h - pad - (y / yMax) * (h - 2 * pad)
