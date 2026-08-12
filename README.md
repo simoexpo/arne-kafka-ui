@@ -63,6 +63,13 @@ useful for pointing a locally-running Betrachtung at real data without a
 real cluster. Point `config.yaml` at `localhost:9092` (see
 `config.example.yaml`) to use it.
 
+The broker's advertised listener assumes Docker Desktop (macOS/Windows,
+which resolves `host.docker.internal` automatically); on plain Docker
+Engine on Linux, add `extra_hosts: ["host.docker.internal:host-gateway"]`
+to the `kafka` service in `docker-compose.dev.yml`, or use a dual-listener
+setup instead (see
+`docs/superpowers/plans/2026-08-11-messages-ui-and-packaging-followups.md`).
+
 The smoke check expects `just dev` (or the raw backend+vite equivalent)
 already running and drives it with Playwright via `channel: 'chrome'` —
 Google Chrome must be installed locally (no browser binary is downloaded
