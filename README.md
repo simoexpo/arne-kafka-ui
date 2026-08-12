@@ -14,6 +14,10 @@ cluster, and to say when it does not know.
 
 ## Development
 
+```
+cp config.example.yaml config.yaml   # then point it at your cluster(s)
+```
+
 With `just`:
 
 ```
@@ -62,7 +66,8 @@ real cluster. Point `config.yaml` at `localhost:9092` (see
 ## Deployment
 
 Betrachtung ships as a single Docker image with the frontend embedded in
-the backend binary. Mount your config and run:
+the backend binary. Mount your config and run — assuming your config is
+at `./config.yaml`:
 
 ```
 docker run -p 8080:8080 -v $(pwd)/config.yaml:/etc/betrachtung/config.yaml betrachtung:dev
