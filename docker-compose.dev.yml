@@ -1,0 +1,40 @@
+services:
+  kafka:
+    image: apache/kafka:latest
+    ports: ["9092:9092"]
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: INTERNAL://0.0.0.0:19092,CONTROLLER://0.0.0.0:9091,EXTERNAL://0.0.0.0:9092
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:19092,EXTERNAL://localhost:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9091
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+
+  schema-registry:
+    image: confluentinc/cp-schema-registry:7.7.1
+    depends_on: [kafka]
+    ports: ["8081:8081"]
+    environment:
+      SCHEMA_REGISTRY_HOST_NAME: schema-registry
+      SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS: kafka:19092
+      SCHEMA_REGISTRY_LISTENERS: http://0.0.0.0:8081
+
+  demo-producer:
+    image: apache/kafka:latest
+    depends_on: [kafka]
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        sleep 10
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:19092 --create --topic demo-orders --partitions 3 --if-not-exists
+        i=0
+        while true; do
+          i=$$((i+1))
+          echo "order-$$i:{\"order_id\":$$i,\"amount\":$$((i*3)).50}" | \
+            /opt/kafka/bin/kafka-console-producer.sh --bootstrap-server kafka:19092 --topic demo-orders \
+              --property parse.key=true --property key.separator=: >/dev/null
+          sleep 2
+        done
