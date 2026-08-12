@@ -57,7 +57,7 @@ describe('TopicsView', () => {
     expect(screen.queryByText('orders')).not.toBeInTheDocument()
     expect(screen.getByText('payments')).toBeInTheDocument()
     await userEvent.clear(screen.getByPlaceholderText('filter topics…'))
-    await userEvent.click(screen.getByRole('checkbox', { name: /internal/i }))
+    await userEvent.click(screen.getByRole('switch', { name: /internal/i }))
     expect(screen.getByText('__consumer_offsets')).toBeInTheDocument()
   })
 

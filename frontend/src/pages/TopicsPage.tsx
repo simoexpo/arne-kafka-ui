@@ -36,7 +36,22 @@ export function TopicsView({ cluster }: { cluster: string }) {
           className="w-72 rounded border border-zinc-300 bg-transparent px-3 py-1.5 text-sm outline-none focus:border-zinc-500 dark:border-zinc-700"
         />
         <label className="flex items-center gap-2 text-sm text-zinc-500">
-          <input type="checkbox" checked={showInternal} onChange={(e) => setShowInternal(e.target.checked)} />
+          <button
+            type="button"
+            role="switch"
+            aria-checked={showInternal}
+            aria-label="show internal"
+            onClick={() => setShowInternal((v) => !v)}
+            className={`relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors ${
+              showInternal ? 'bg-blue-600 dark:bg-blue-500' : 'bg-zinc-300 dark:bg-zinc-700'
+            }`}
+          >
+            <span
+              className={`inline-block h-3.5 w-3.5 transform rounded-full bg-white transition-transform ${
+                showInternal ? 'translate-x-4' : 'translate-x-0.5'
+              }`}
+            />
+          </button>
           show internal
         </label>
       </div>
