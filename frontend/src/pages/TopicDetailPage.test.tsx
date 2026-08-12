@@ -22,6 +22,8 @@ const detail = {
   configs: [
     { name: 'retention.ms', value: '604800000', is_default: false },
     { name: 'cleanup.policy', value: 'delete', is_default: true },
+    { name: 'retention.bytes', value: '-1', is_default: true },
+    { name: 'max.message.bytes', value: '1048576', is_default: true },
   ],
   as_of: Date.now(),
 }
@@ -37,13 +39,55 @@ describe('TopicDetailView', () => {
     expect(rows[1]).toHaveTextContent('under-replicated') // isr < replicas
   })
 
-  it('config tab lists entries and marks non-defaults', async () => {
+  it('config tab summary shows partitions, cleanup policy, and retention with a human hint', async () => {
     vi.mocked(client.getTopicDetail).mockResolvedValue(detail)
     renderWithQuery(<TopicDetailView cluster="prod" topic="orders" />)
     await userEvent.click(screen.getByRole('button', { name: 'Config' }))
-    expect(await screen.findByText('retention.ms')).toBeInTheDocument()
-    const overridden = screen.getByTestId('config-retention.ms')
-    expect(overridden).toHaveTextContent('overridden')
+    expect(await screen.findByTestId('stat-partitions')).toHaveTextContent('2')
+    expect(screen.getByTestId('stat-cleanup.policy')).toHaveTextContent('delete')
+    expect(screen.getByTestId('stat-retention.ms')).toHaveTextContent('604800000 (7d)')
+    expect(screen.getByTestId('stat-retention.bytes')).toHaveTextContent('∞')
+  })
+
+  it('config tab summary shows a dash when cleanup.policy is absent', async () => {
+    vi.mocked(client.getTopicDetail).mockResolvedValue({
+      ...detail,
+      configs: detail.configs.filter((c) => c.name !== 'cleanup.policy'),
+    })
+    renderWithQuery(<TopicDetailView cluster="prod" topic="orders" />)
+    await userEvent.click(screen.getByRole('button', { name: 'Config' }))
+    expect(await screen.findByTestId('stat-cleanup.policy')).toHaveTextContent('—')
+  })
+
+  it('config tab table shows only overridden entries by default', async () => {
+    vi.mocked(client.getTopicDetail).mockResolvedValue(detail)
+    renderWithQuery(<TopicDetailView cluster="prod" topic="orders" />)
+    await userEvent.click(screen.getByRole('button', { name: 'Config' }))
+    expect(await screen.findByTestId('config-retention.ms')).toHaveTextContent('overridden')
+    expect(screen.queryByTestId('config-cleanup.policy')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('config-all-retention.ms')).not.toBeInTheDocument() // full table collapsed
+  })
+
+  it('config tab shows an empty-state message when nothing is overridden', async () => {
+    vi.mocked(client.getTopicDetail).mockResolvedValue({
+      ...detail,
+      configs: detail.configs.map((c) => ({ ...c, is_default: true })),
+    })
+    renderWithQuery(<TopicDetailView cluster="prod" topic="orders" />)
+    await userEvent.click(screen.getByRole('button', { name: 'Config' }))
+    expect(await screen.findByText('no overrides — all values are broker defaults')).toBeInTheDocument()
+  })
+
+  it('config tab "show all configs" expands the full table with defaults and overrides', async () => {
+    vi.mocked(client.getTopicDetail).mockResolvedValue(detail)
+    renderWithQuery(<TopicDetailView cluster="prod" topic="orders" />)
+    await userEvent.click(screen.getByRole('button', { name: 'Config' }))
+    await screen.findByTestId('config-retention.ms')
+    expect(screen.queryByTestId('config-all-retention.ms')).not.toBeInTheDocument()
+    await userEvent.click(screen.getByRole('switch', { name: 'show all configs' }))
+    expect(await screen.findByTestId('config-all-retention.ms')).toHaveTextContent('overridden')
+    expect(screen.getByTestId('config-all-cleanup.policy')).toHaveTextContent('default')
+    expect(screen.getByTestId('config-all-max.message.bytes')).toHaveTextContent('default')
   })
 
   it('messages tab is shown by default', async () => {

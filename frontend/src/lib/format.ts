@@ -13,3 +13,20 @@ export function formatCount(n: number): string {
   if (n < 1_000_000_000) return `${(n / 1_000_000).toFixed(1)}M`
   return `${(n / 1_000_000_000).toFixed(1)}B`
 }
+
+export function formatRetentionValue(raw: string | null): string {
+  if (raw == null) return '—'
+  if (Number(raw) === -1) return '∞'
+  return raw
+}
+
+export function retentionMsHint(raw: string | null): string | null {
+  if (raw == null) return null
+  const n = Number(raw)
+  if (!Number.isFinite(n) || n <= 0) return null
+  const days = n / 86_400_000
+  if (Number.isInteger(days)) return `${days}d`
+  const hours = n / 3_600_000
+  if (Number.isInteger(hours)) return `${hours}h`
+  return null
+}

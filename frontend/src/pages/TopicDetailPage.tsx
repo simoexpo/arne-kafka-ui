@@ -6,9 +6,9 @@ import { CopyButton } from '../components/CopyButton'
 import { Panel } from '../components/Panel'
 import { StalenessChip } from '../components/StalenessChip'
 import { Sparkline } from '../components/Sparkline'
-import { formatCount } from '../lib/format'
+import { formatCount, formatRetentionValue, retentionMsHint } from '../lib/format'
 import { MessagesTab } from './MessagesTab'
-import type { TopicGroupLag } from '../api/types'
+import type { ConfigEntry, TopicDetail, TopicGroupLag } from '../api/types'
 
 const TABS = ['Messages', 'Partitions', 'Consumers', 'Config'] as const
 type Tab = (typeof TABS)[number]
@@ -74,23 +74,7 @@ export function TopicDetailView({ cluster, topic }: { cluster: string; topic: st
       )}
       {tab === 'Consumers' && <ConsumersTab cluster={cluster} topic={topic} />}
       {tab === 'Config' && (
-        <Panel title="Config" error={detail.error} loading={detail.isPending}>
-          <table className="w-full text-left text-sm">
-            <tbody>
-              {detail.data?.configs.map((c) => (
-                <tr key={c.name} data-testid={`config-${c.name}`} className="border-t border-zinc-100 dark:border-zinc-800">
-                  <td className="py-1 font-mono">{c.name}</td>
-                  <td className="font-mono text-zinc-600 dark:text-zinc-400">{c.value ?? '—'}</td>
-                  <td className="text-right text-xs">
-                    {c.is_default
-                      ? <span className="text-zinc-400">default</span>
-                      : <span className="text-amber-600 dark:text-amber-400">overridden</span>}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </Panel>
+        <ConfigTab data={detail.data} error={detail.error} loading={detail.isPending} />
       )}
     </div>
   )
@@ -169,6 +153,98 @@ function GroupRow({ group }: { group: TopicGroupLag }) {
         </table>
       )}
     </details>
+  )
+}
+
+function ConfigTab({ data, error, loading }: { data?: TopicDetail; error: unknown; loading: boolean }) {
+  const [showAll, setShowAll] = useState(false)
+  const configs = data?.configs ?? []
+  const overridden = configs.filter((c) => !c.is_default)
+  const cleanupPolicy = configs.find((c) => c.name === 'cleanup.policy')
+  const retentionMs = configs.find((c) => c.name === 'retention.ms')
+  const retentionBytes = configs.find((c) => c.name === 'retention.bytes')
+  const retentionMsHintText = retentionMs ? retentionMsHint(retentionMs.value) : null
+
+  return (
+    <Panel title="Config" error={error} loading={loading}>
+      {data && (
+        <div className="space-y-4">
+          <dl className="grid grid-cols-2 gap-4 sm:grid-cols-4">
+            <Stat label="partitions" value={String(data.partitions.length)} />
+            <Stat label="cleanup.policy" value={cleanupPolicy?.value ?? '—'} />
+            <Stat
+              label="retention.ms"
+              value={
+                retentionMs
+                  ? `${formatRetentionValue(retentionMs.value)}${retentionMsHintText ? ` (${retentionMsHintText})` : ''}`
+                  : '—'
+              }
+            />
+            <Stat label="retention.bytes" value={retentionBytes ? formatRetentionValue(retentionBytes.value) : '—'} />
+          </dl>
+          <div>
+            <h3 className="mb-2 text-xs font-medium text-zinc-500">Overridden values</h3>
+            {overridden.length === 0
+              ? <p className="text-sm text-zinc-500">no overrides — all values are broker defaults</p>
+              : <ConfigTable entries={overridden} testPrefix="config" />}
+          </div>
+          <label className="flex items-center gap-2 text-sm text-zinc-500">
+            <button
+              type="button"
+              role="switch"
+              aria-checked={showAll}
+              aria-label="show all configs"
+              onClick={() => setShowAll((v) => !v)}
+              className={`relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors ${
+                showAll ? 'bg-blue-600 dark:bg-blue-500' : 'bg-zinc-300 dark:bg-zinc-700'
+              }`}
+            >
+              <span
+                className={`inline-block h-3.5 w-3.5 transform rounded-full bg-white transition-transform ${
+                  showAll ? 'translate-x-4' : 'translate-x-0.5'
+                }`}
+              />
+            </button>
+            show all configs
+          </label>
+          {showAll && (
+            <div>
+              <h3 className="mb-2 text-xs font-medium text-zinc-500">All configs</h3>
+              <ConfigTable entries={configs} testPrefix="config-all" />
+            </div>
+          )}
+        </div>
+      )}
+    </Panel>
+  )
+}
+
+function ConfigTable({ entries, testPrefix }: { entries: ConfigEntry[]; testPrefix: string }) {
+  return (
+    <table className="w-full text-left text-sm">
+      <tbody>
+        {entries.map((c) => (
+          <tr key={c.name} data-testid={`${testPrefix}-${c.name}`} className="border-t border-zinc-100 dark:border-zinc-800">
+            <td className="py-1 font-mono">{c.name}</td>
+            <td className="font-mono text-zinc-600 dark:text-zinc-400">{c.value ?? '—'}</td>
+            <td className="text-right text-xs">
+              {c.is_default
+                ? <span className="text-zinc-400">default</span>
+                : <span className="text-amber-600 dark:text-amber-400">overridden</span>}
+            </td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  )
+}
+
+function Stat({ label, value }: { label: string; value: string }) {
+  return (
+    <div data-testid={`stat-${label}`}>
+      <dt className="text-xs text-zinc-500">{label}</dt>
+      <dd className="text-xl font-semibold">{value}</dd>
+    </div>
   )
 }
 

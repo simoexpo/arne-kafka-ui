@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { formatAgo, formatCount } from './format'
+import { formatAgo, formatCount, formatRetentionValue, retentionMsHint } from './format'
 
 describe('formatAgo', () => {
   const now = 1_000_000_000
@@ -15,4 +15,18 @@ describe('formatCount', () => {
   it('thousands', () => expect(formatCount(1500)).toBe('1.5k'))
   it('millions', () => expect(formatCount(2_000_000)).toBe('2.0M'))
   it('billions', () => expect(formatCount(3_100_000_000)).toBe('3.1B'))
+})
+
+describe('formatRetentionValue', () => {
+  it('shows a dash for a missing value', () => expect(formatRetentionValue(null)).toBe('—'))
+  it('shows infinity for -1', () => expect(formatRetentionValue('-1')).toBe('∞'))
+  it('shows the raw value otherwise', () => expect(formatRetentionValue('604800000')).toBe('604800000'))
+})
+
+describe('retentionMsHint', () => {
+  it('computes whole days', () => expect(retentionMsHint('604800000')).toBe('7d'))
+  it('computes whole hours when not a whole number of days', () => expect(retentionMsHint('7200000')).toBe('2h'))
+  it('returns null for -1 (infinite retention)', () => expect(retentionMsHint('-1')).toBeNull())
+  it('returns null for a missing value', () => expect(retentionMsHint(null)).toBeNull())
+  it('returns null when not cleanly expressible in days or hours', () => expect(retentionMsHint('1234567')).toBeNull())
 })
