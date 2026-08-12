@@ -1,3 +1,4 @@
+import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { Link, Outlet, useLocation, useParams } from '@tanstack/react-router'
 import { getClusters } from '../api/client'
@@ -90,18 +91,67 @@ function HealthDot({ status }: { status?: ClusterHealth['status'] }) {
   return <span className={`inline-block h-2 w-2 rounded-full ${color}`} />
 }
 
+function SunIcon({ active }: { active: boolean }) {
+  return (
+    <svg
+      data-testid="icon-sun"
+      viewBox="0 0 16 16"
+      width="14"
+      height="14"
+      className={active ? 'text-amber-500' : 'text-zinc-400 dark:text-zinc-600'}
+    >
+      <circle cx="8" cy="8" r="3.2" fill="currentColor" />
+      <g stroke="currentColor" strokeWidth="1.3" strokeLinecap="round">
+        <line x1="8" y1="0.5" x2="8" y2="2.3" />
+        <line x1="8" y1="13.7" x2="8" y2="15.5" />
+        <line x1="0.5" y1="8" x2="2.3" y2="8" />
+        <line x1="13.7" y1="8" x2="15.5" y2="8" />
+        <line x1="2.6" y1="2.6" x2="3.9" y2="3.9" />
+        <line x1="12.1" y1="12.1" x2="13.4" y2="13.4" />
+        <line x1="2.6" y1="13.4" x2="3.9" y2="12.1" />
+        <line x1="12.1" y1="3.9" x2="13.4" y2="2.6" />
+      </g>
+    </svg>
+  )
+}
+
+function MoonIcon({ active }: { active: boolean }) {
+  return (
+    <svg
+      data-testid="icon-moon"
+      viewBox="0 0 16 16"
+      width="14"
+      height="14"
+      className={active ? 'text-indigo-400' : 'text-zinc-400 dark:text-zinc-600'}
+    >
+      <path
+        d="M13.5 10.2A6 6 0 0 1 5.8 2.5a6 6 0 1 0 7.7 7.7Z"
+        fill="currentColor"
+      />
+    </svg>
+  )
+}
+
 export function ThemeToggle() {
+  const [dark, setDark] = useState(() => document.documentElement.classList.contains('dark'))
   return (
     <button
       aria-label="toggle theme"
-      className="rounded border border-zinc-300 px-2 py-1 text-xs text-zinc-600 dark:border-zinc-700 dark:text-zinc-400"
+      data-mode={dark ? 'dark' : 'light'}
+      className="flex items-center gap-1 rounded-full border border-zinc-300 p-1 dark:border-zinc-700"
       onClick={() => {
         const el = document.documentElement
-        const dark = el.classList.toggle('dark')
-        localStorage.theme = dark ? 'dark' : 'light'
+        const isDark = el.classList.toggle('dark')
+        localStorage.theme = isDark ? 'dark' : 'light'
+        setDark(isDark)
       }}
     >
-      theme
+      <span className={`rounded-full p-1 ${!dark ? 'bg-amber-100 dark:bg-amber-500/20' : ''}`}>
+        <SunIcon active={!dark} />
+      </span>
+      <span className={`rounded-full p-1 ${dark ? 'bg-indigo-100 dark:bg-indigo-500/20' : ''}`}>
+        <MoonIcon active={dark} />
+      </span>
     </button>
   )
 }

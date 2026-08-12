@@ -56,4 +56,15 @@ describe('ThemeToggle', () => {
     expect(document.documentElement.classList.contains('dark')).toBe(false)
     expect(localStorage.theme).toBe('light')
   })
+
+  it('renders both sun and moon icons and flips data-mode on click', async () => {
+    document.documentElement.classList.add('dark')
+    renderWithQuery(<ThemeToggle />)
+    const button = screen.getByRole('button', { name: /theme/i })
+    expect(screen.getByTestId('icon-sun')).toBeInTheDocument()
+    expect(screen.getByTestId('icon-moon')).toBeInTheDocument()
+    expect(button).toHaveAttribute('data-mode', 'dark')
+    await userEvent.click(button)
+    expect(button).toHaveAttribute('data-mode', 'light')
+  })
 })
