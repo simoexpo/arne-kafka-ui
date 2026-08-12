@@ -102,6 +102,35 @@ pub fn interpolate(raw: &str, lookup: &dyn Fn(&str) -> Option<String>) -> Result
     Ok(out)
 }
 
+/// Recursively walks a parsed YAML value, interpolating `${VAR}` env references
+/// in every string scalar. Runs AFTER structural parsing so that comments
+/// (already stripped by the YAML parser) can never be interpolated.
+fn interpolate_value(
+    value: serde_yaml::Value,
+    lookup: &dyn Fn(&str) -> Option<String>,
+) -> Result<serde_yaml::Value, ConfigError> {
+    match value {
+        serde_yaml::Value::String(s) => {
+            Ok(serde_yaml::Value::String(interpolate(&s, lookup)?))
+        }
+        serde_yaml::Value::Sequence(seq) => {
+            let items = seq
+                .into_iter()
+                .map(|v| interpolate_value(v, lookup))
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(serde_yaml::Value::Sequence(items))
+        }
+        serde_yaml::Value::Mapping(map) => {
+            let mut out = serde_yaml::Mapping::with_capacity(map.len());
+            for (k, v) in map {
+                out.insert(k, interpolate_value(v, lookup)?);
+            }
+            Ok(serde_yaml::Value::Mapping(out))
+        }
+        other => Ok(other),
+    }
+}
+
 impl Config {
     pub fn validate(&self) -> Result<(), ConfigError> {
         if self.clusters.is_empty() {
@@ -129,8 +158,11 @@ impl Config {
     pub fn load(path: &Path) -> Result<Config, ConfigError> {
         let raw = std::fs::read_to_string(path)
             .map_err(|e| ConfigError::Io(path.display().to_string(), e))?;
-        let interpolated = interpolate(&raw, &|v| std::env::var(v).ok())?;
-        let cfg: Config = serde_yaml::from_str(&interpolated).map_err(|e| ConfigError::Parse(e.to_string()))?;
+        let value: serde_yaml::Value =
+            serde_yaml::from_str(&raw).map_err(|e| ConfigError::Parse(e.to_string()))?;
+        let value = interpolate_value(value, &|v| std::env::var(v).ok())?;
+        let cfg: Config =
+            serde_yaml::from_value(value).map_err(|e| ConfigError::Parse(e.to_string()))?;
         cfg.validate()?;
         Ok(cfg)
     }
@@ -153,11 +185,13 @@ limits: { max_search_matches: 100, sampler_interval_secs: 5 }
 "#;
 
     fn parse(yaml: &str) -> Result<Config, ConfigError> {
-        let interpolated = interpolate(yaml, &|v| {
+        let value: serde_yaml::Value =
+            serde_yaml::from_str(yaml).map_err(|e| ConfigError::Parse(e.to_string()))?;
+        let value = interpolate_value(value, &|v| {
             (v == "TEST_KAFKA_PW").then(|| "s3cret".to_string())
         })?;
-        let cfg: Config = serde_yaml::from_str(&interpolated)
-            .map_err(|e| ConfigError::Parse(e.to_string()))?;
+        let cfg: Config =
+            serde_yaml::from_value(value).map_err(|e| ConfigError::Parse(e.to_string()))?;
         cfg.validate()?;
         Ok(cfg)
     }
@@ -220,5 +254,21 @@ limits: { max_search_matches: 100, sampler_interval_secs: 5 }
         let ok = interpolate("a=${X} b=${Y}", &|v| Some(format!("<{v}>"))).unwrap();
         assert_eq!(ok, "a=<X> b=<Y>");
         assert!(interpolate("bad ${X", &|_| Some("v".into())).is_err());
+    }
+
+    #[test]
+    fn commented_out_interpolation_is_ignored() {
+        let yaml = "clusters:\n  - name: local\n    bootstrap: localhost:9092\n    # sasl: { mechanism: SCRAM-SHA-512, username: app, password: \"${NOPE}\" }\n";
+        // lookup knows nothing: if the comment were interpolated, this would error.
+        let cfg = parse(yaml).unwrap();
+        assert_eq!(cfg.clusters[0].name, "local");
+        assert_eq!(cfg.clusters[0].sasl, None);
+    }
+
+    #[test]
+    fn active_values_still_interpolate() {
+        let cfg = parse(GOOD).unwrap();
+        let sasl = cfg.clusters[0].sasl.as_ref().unwrap();
+        assert_eq!(sasl.password, "s3cret");
     }
 }
