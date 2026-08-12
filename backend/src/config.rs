@@ -144,11 +144,18 @@ fn interpolate_outside_comments(
 /// - A `#` starts a comment when it is outside any quoted string and is
 ///   either at the start of the line or preceded by whitespace (matching
 ///   YAML's own comment rule).
-/// - A `'` or `"` OPENS a quoted string only when it can start a scalar:
-///   the previous non-whitespace character on the line is one of `:` `,`
-///   `[` `{` `-`, or there is none (line start). Otherwise the quote
-///   character is plain-scalar content (e.g. the apostrophe in `alice's`)
-///   and is ignored — it never toggles quote state.
+/// - A `'` or `"` OPENS a quoted string only when it can start a scalar.
+///   `:` and `-` are only structural (mapping/sequence) indicators when
+///   FOLLOWED by whitespace, so a quote may open only when: it is at the
+///   start of the line (ignoring leading whitespace); OR it immediately (no
+///   space) follows `[`, `{`, or `,` (flow collections don't require a space
+///   after these); OR it immediately follows whitespace AND the nearest
+///   non-space character before that whitespace is `:`, `-`, `,`, `[`, `{`
+///   (indicator-then-space-then-quote), or there is none. A quote glued
+///   directly to a preceding `-` or `:` (no space) is plain-scalar content
+///   (e.g. `db-'s-host`, `x:'s-host`) and never opens a string; nor does one
+///   glued to any other non-indicator character (e.g. the apostrophe in
+///   `alice's`).
 /// - Once inside a single-quoted string, `''` is an escaped literal quote
 ///   (the pair is skipped); a lone `'` closes the string.
 /// - Once inside a double-quoted string, `\"` escapes (the pair is
@@ -159,17 +166,18 @@ fn interpolate_outside_comments(
 /// function has no concept of block-scalar context. Acceptable for v1: no
 /// config field uses block scalars.
 fn find_comment_start(line: &str) -> usize {
-    fn can_open_quote(last_non_ws: Option<char>) -> bool {
+    fn can_open_quote(prev_was_space: bool, last_non_ws: Option<char>) -> bool {
         match last_non_ws {
-            None => true,
-            Some(c) => matches!(c, ':' | ',' | '[' | '{' | '-'),
+            None => true, // (a) line start, ignoring leading whitespace
+            Some(c) if !prev_was_space => matches!(c, '[' | '{' | ','), // (b) glued: only flow separators are structural without a space
+            Some(c) => matches!(c, ':' | '-' | ',' | '[' | '{'), // (c) indicator-then-space-then-quote
         }
     }
 
     let mut in_single = false;
     let mut in_double = false;
     let mut prev_was_space = true; // start-of-line counts as preceded by whitespace
-    let mut last_non_ws: Option<char> = None; // last non-whitespace char seen, for quote-open rule
+    let mut last_non_ws: Option<char> = None; // nearest non-whitespace char seen, for quote-open rule
     let mut chars = line.char_indices().peekable();
     while let Some((i, ch)) = chars.next() {
         if in_single {
@@ -190,8 +198,8 @@ fn find_comment_start(line: &str) -> usize {
             }
         } else {
             match ch {
-                '\'' if can_open_quote(last_non_ws) => in_single = true,
-                '"' if can_open_quote(last_non_ws) => in_double = true,
+                '\'' if can_open_quote(prev_was_space, last_non_ws) => in_single = true,
+                '"' if can_open_quote(prev_was_space, last_non_ws) => in_double = true,
                 '#' if prev_was_space => return i,
                 _ => {}
             }
@@ -377,5 +385,36 @@ limits: { max_search_matches: 100, sampler_interval_secs: 5 }
         // lookup knows nothing (not even NOPE): if that happened, this would error.
         let cfg = parse(yaml).unwrap();
         assert_eq!(cfg.clusters[0].bootstrap, "alice's-host:9092");
+    }
+
+    #[test]
+    fn hyphen_glued_quote_is_scalar_content() {
+        // `-` is only a structural (sequence/flow) indicator when followed by
+        // whitespace. Glued directly to a quote (no space), it's plain-scalar
+        // text, so the quote must NOT open a string here.
+        let yaml = "clusters:\n  - name: a\n    bootstrap: db-'s-host:9092 # uses ${NOPE}\n";
+        let cfg = parse(yaml).unwrap();
+        assert_eq!(cfg.clusters[0].bootstrap, "db-'s-host:9092");
+    }
+
+    #[test]
+    fn colon_glued_quote_is_scalar_content() {
+        // Same rule for `:` — only structural when followed by whitespace.
+        let yaml = "clusters:\n  - name: a\n    bootstrap: x:'s-host:9092 # uses ${NOPE}\n";
+        let cfg = parse(yaml).unwrap();
+        assert_eq!(cfg.clusters[0].bootstrap, "x:'s-host:9092");
+    }
+
+    #[test]
+    fn quotes_after_flow_separators_still_open() {
+        // Positive guard: flow collections don't require a space after `[`,
+        // `{`, or `,`, so a quote glued directly to one of those must still
+        // open a string, and `${VAR}` inside it must still interpolate.
+        let yaml = "sasl: { mechanism: 'PLAIN', username: 'u' }\ntags: ['${TEST_KAFKA_PW}','b']\n";
+        let out = interpolate_outside_comments(yaml, &|v| {
+            (v == "TEST_KAFKA_PW").then(|| "s3cret".to_string())
+        })
+        .unwrap();
+        assert!(out.contains("['s3cret','b']"), "got: {out}");
     }
 }
