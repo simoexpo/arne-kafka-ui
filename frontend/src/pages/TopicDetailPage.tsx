@@ -47,7 +47,7 @@ export function TopicDetailView({ cluster, topic }: { cluster: string; topic: st
       </div>
       {tab === 'Messages' && <MessagesTab cluster={cluster} topic={topic} />}
       {tab === 'Partitions' && (
-        <Panel title="Partitions" error={detail.error} loading={detail.isPending}>
+        <Panel error={detail.error} loading={detail.isPending}>
           <table className="w-full text-left text-sm">
             <thead className="text-xs text-zinc-500">
               <tr><th className="py-1">id</th><th>leader</th><th>replicas</th><th>ISR</th><th>start</th><th>end</th><th>health</th></tr>
@@ -166,7 +166,7 @@ function ConfigTab({ data, error, loading }: { data?: TopicDetail; error: unknow
   const retentionMsHintText = retentionMs ? retentionMsHint(retentionMs.value) : null
 
   return (
-    <Panel title="Config" error={error} loading={loading}>
+    <Panel error={error} loading={loading}>
       {data && (
         <div className="space-y-4">
           <dl className="grid grid-cols-2 gap-4 sm:grid-cols-4">

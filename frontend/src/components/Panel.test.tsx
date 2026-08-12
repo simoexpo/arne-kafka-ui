@@ -26,4 +26,9 @@ describe('Panel', () => {
     render(<Panel title="X" error={new Error('network down')}>c</Panel>)
     expect(screen.getByText(/network down/)).toBeInTheDocument()
   })
+  it('renders no heading when title is omitted', () => {
+    render(<Panel>content here</Panel>)
+    expect(screen.getByText('content here')).toBeInTheDocument()
+    expect(screen.queryByRole('heading')).not.toBeInTheDocument()
+  })
 })
