@@ -63,6 +63,11 @@ useful for pointing a locally-running Betrachtung at real data without a
 real cluster. Point `config.yaml` at `localhost:9092` (see
 `config.example.yaml`) to use it.
 
+The smoke check expects `just dev` (or the raw backend+vite equivalent)
+already running and drives it with Playwright via `channel: 'chrome'` —
+Google Chrome must be installed locally (no browser binary is downloaded
+by `npm install`).
+
 ## Deployment
 
 Betrachtung ships as a single Docker image with the frontend embedded in
