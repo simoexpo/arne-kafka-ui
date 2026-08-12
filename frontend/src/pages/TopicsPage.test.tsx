@@ -61,6 +61,13 @@ describe('TopicsView', () => {
     expect(screen.getByText('__consumer_offsets')).toBeInTheDocument()
   })
 
+  it('RF column header explains replication factor via a tooltip', async () => {
+    vi.mocked(client.getTopics).mockResolvedValue(topics)
+    await renderWithRouter(<TopicsView cluster="prod" />)
+    await screen.findByText('orders')
+    expect(screen.getByText('RF')).toHaveAttribute('title', 'replication factor')
+  })
+
   it('copies the topic name without navigating when the row copy button is clicked', async () => {
     const writeText = vi.fn().mockResolvedValue(undefined)
     Object.assign(navigator, { clipboard: { writeText } })

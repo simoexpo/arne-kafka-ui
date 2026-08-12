@@ -59,7 +59,9 @@ export function TopicsView({ cluster }: { cluster: string }) {
         <table className="w-full text-left text-sm">
           <thead className="text-xs text-zinc-500">
             <tr>
-              <th className="py-1">name</th><th>partitions</th><th>RF</th><th>messages</th><th>size</th>
+              <th className="py-1">name</th><th>partitions</th>
+              <th><abbr title="replication factor" className="cursor-help underline decoration-dotted">RF</abbr></th>
+              <th>messages</th><th>size</th>
             </tr>
           </thead>
           <tbody>
