@@ -102,33 +102,57 @@ pub fn interpolate(raw: &str, lookup: &dyn Fn(&str) -> Option<String>) -> Result
     Ok(out)
 }
 
-/// Recursively walks a parsed YAML value, interpolating `${VAR}` env references
-/// in every string scalar. Runs AFTER structural parsing so that comments
-/// (already stripped by the YAML parser) can never be interpolated.
-fn interpolate_value(
-    value: serde_yaml::Value,
+/// Interpolates `${VAR}` env references in raw YAML text, WITHOUT touching
+/// YAML comments — so a commented-out line referencing an unset env var
+/// (e.g. `# password: "${KAFKA_PASSWORD}"`) never fails config load, and the
+/// spec's canonical unquoted-flow-scalar syntax (`password: ${VAR}` inside a
+/// `{ ... }` flow mapping) still works, since we interpolate before parsing.
+///
+/// Processes the text line by line. Within each line, a `#` starts a YAML
+/// comment when it is NOT inside a quoted string and is either at the start
+/// of the line or preceded by whitespace (matching YAML's own comment rule).
+/// Everything before that `#` is interpolated via `interpolate()`; the `#`
+/// and the rest of the line are appended verbatim.
+///
+/// Known limitation: block scalars (`|` / `>`) whose content contains an
+/// unquoted ` #` will not have text after that `#` interpolated, since this
+/// function has no concept of block-scalar context — it only tracks quotes.
+/// Acceptable for v1: no config field uses block scalars.
+fn interpolate_outside_comments(
+    raw: &str,
     lookup: &dyn Fn(&str) -> Option<String>,
-) -> Result<serde_yaml::Value, ConfigError> {
-    match value {
-        serde_yaml::Value::String(s) => {
-            Ok(serde_yaml::Value::String(interpolate(&s, lookup)?))
+) -> Result<String, ConfigError> {
+    let mut out = String::with_capacity(raw.len());
+    let mut lines = raw.split('\n').peekable();
+    while let Some(line) = lines.next() {
+        let comment_start = find_comment_start(line);
+        let (code, comment) = line.split_at(comment_start);
+        out.push_str(&interpolate(code, lookup)?);
+        out.push_str(comment);
+        if lines.peek().is_some() {
+            out.push('\n');
         }
-        serde_yaml::Value::Sequence(seq) => {
-            let items = seq
-                .into_iter()
-                .map(|v| interpolate_value(v, lookup))
-                .collect::<Result<Vec<_>, _>>()?;
-            Ok(serde_yaml::Value::Sequence(items))
-        }
-        serde_yaml::Value::Mapping(map) => {
-            let mut out = serde_yaml::Mapping::with_capacity(map.len());
-            for (k, v) in map {
-                out.insert(k, interpolate_value(v, lookup)?);
-            }
-            Ok(serde_yaml::Value::Mapping(out))
-        }
-        other => Ok(other),
     }
+    Ok(out)
+}
+
+/// Finds the byte offset of the `#` that starts a YAML comment in `line`, or
+/// `line.len()` if there is none. Tracks single-/double-quote state so a `#`
+/// inside a quoted string is never mistaken for a comment marker.
+fn find_comment_start(line: &str) -> usize {
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut prev_was_space = true; // start-of-line counts as preceded by whitespace
+    for (i, ch) in line.char_indices() {
+        match ch {
+            '\'' if !in_double => in_single = !in_single,
+            '"' if !in_single => in_double = !in_double,
+            '#' if !in_single && !in_double && prev_was_space => return i,
+            _ => {}
+        }
+        prev_was_space = ch.is_whitespace();
+    }
+    line.len()
 }
 
 impl Config {
@@ -158,11 +182,8 @@ impl Config {
     pub fn load(path: &Path) -> Result<Config, ConfigError> {
         let raw = std::fs::read_to_string(path)
             .map_err(|e| ConfigError::Io(path.display().to_string(), e))?;
-        let value: serde_yaml::Value =
-            serde_yaml::from_str(&raw).map_err(|e| ConfigError::Parse(e.to_string()))?;
-        let value = interpolate_value(value, &|v| std::env::var(v).ok())?;
-        let cfg: Config =
-            serde_yaml::from_value(value).map_err(|e| ConfigError::Parse(e.to_string()))?;
+        let interpolated = interpolate_outside_comments(&raw, &|v| std::env::var(v).ok())?;
+        let cfg: Config = serde_yaml::from_str(&interpolated).map_err(|e| ConfigError::Parse(e.to_string()))?;
         cfg.validate()?;
         Ok(cfg)
     }
@@ -185,13 +206,11 @@ limits: { max_search_matches: 100, sampler_interval_secs: 5 }
 "#;
 
     fn parse(yaml: &str) -> Result<Config, ConfigError> {
-        let value: serde_yaml::Value =
-            serde_yaml::from_str(yaml).map_err(|e| ConfigError::Parse(e.to_string()))?;
-        let value = interpolate_value(value, &|v| {
+        let interpolated = interpolate_outside_comments(yaml, &|v| {
             (v == "TEST_KAFKA_PW").then(|| "s3cret".to_string())
         })?;
-        let cfg: Config =
-            serde_yaml::from_value(value).map_err(|e| ConfigError::Parse(e.to_string()))?;
+        let cfg: Config = serde_yaml::from_str(&interpolated)
+            .map_err(|e| ConfigError::Parse(e.to_string()))?;
         cfg.validate()?;
         Ok(cfg)
     }
@@ -270,5 +289,33 @@ limits: { max_search_matches: 100, sampler_interval_secs: 5 }
         let cfg = parse(GOOD).unwrap();
         let sasl = cfg.clusters[0].sasl.as_ref().unwrap();
         assert_eq!(sasl.password, "s3cret");
+    }
+
+    #[test]
+    fn unquoted_var_in_flow_mapping_interpolates() {
+        // Spec's canonical syntax (design spec line ~166): unquoted ${VAR} inside
+        // a flow mapping. This must remain valid, since `{`/`}` are YAML flow
+        // indicators and become invalid syntax if left unquoted-but-unsubstituted.
+        let yaml = "clusters:\n  - name: prod\n    bootstrap: broker1:9092\n    sasl: { mechanism: SCRAM-SHA-512, username: app, password: ${TEST_KAFKA_PW} }\n";
+        let cfg = parse(yaml).unwrap();
+        let sasl = cfg.clusters[0].sasl.as_ref().unwrap();
+        assert_eq!(sasl.password, "s3cret");
+    }
+
+    #[test]
+    fn hash_inside_quoted_value_still_interpolates() {
+        let yaml = "clusters:\n  - name: a\n    bootstrap: x\n    sasl: { mechanism: PLAIN, username: u, password: \"ab#${TEST_KAFKA_PW}\" }\n";
+        let cfg = parse(yaml).unwrap();
+        let sasl = cfg.clusters[0].sasl.as_ref().unwrap();
+        assert_eq!(sasl.password, "ab#s3cret");
+    }
+
+    #[test]
+    fn trailing_comment_after_value_ignored() {
+        let yaml = "clusters:\n  - name: a\n    bootstrap: x:9092  # uses ${NOPE}\n";
+        // lookup knows nothing (not even NOPE): if the trailing comment were
+        // interpolated, this would error.
+        let cfg = parse(yaml).unwrap();
+        assert_eq!(cfg.clusters[0].bootstrap, "x:9092");
     }
 }
