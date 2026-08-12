@@ -2,6 +2,7 @@ mod support;
 
 use betrachtung::api::app;
 use support::*;
+use tower::ServiceExt;
 
 #[tokio::test]
 async fn clusters_endpoint_reports_health_per_cluster() {
@@ -425,4 +426,17 @@ async fn confluent_framed_message_without_registry_surfaces_as_decode_error_ever
     assert_eq!(m["value"]["encoding"], "decode_error", "search must surface the decode failure too: {m:?}");
     assert!(m["value"]["error"].as_str().is_some_and(|e| !e.is_empty()), "expected a non-empty error: {m:?}");
     assert!(m["value"]["text"].as_str().is_some_and(|t| !t.is_empty()), "expected base64 raw bytes: {m:?}");
+}
+
+#[tokio::test]
+async fn spa_fallback_serves_html_for_unknown_paths() {
+    let bootstrap = start_kafka().await;
+    let state = state_for(&bootstrap, vec![]);
+    let res = app(state)
+        .oneshot(axum::http::Request::builder().uri("/c/local/topics").body(axum::body::Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(res.status(), 200);
+    let ct = res.headers().get("content-type").unwrap().to_str().unwrap().to_string();
+    assert!(ct.starts_with("text/html"), "got content-type {ct}");
 }

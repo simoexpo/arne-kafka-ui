@@ -1,6 +1,7 @@
 pub mod clusters;
 pub mod groups;
 pub mod messages;
+pub mod static_files;
 pub mod topics;
 
 use crate::state::AppState;
@@ -20,6 +21,7 @@ pub fn app(state: AppState) -> Router {
         .route("/api/clusters/{cluster}/topics/{topic}/tail", get(messages::tail_sse))
         .route("/api/clusters/{cluster}/groups", get(groups::list))
         .route("/api/clusters/{cluster}/groups/{group}", get(groups::detail))
+        .fallback(get(static_files::spa_fallback))
         .with_state(state)
 }
 
