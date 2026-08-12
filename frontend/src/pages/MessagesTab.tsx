@@ -32,6 +32,11 @@ export function MessagesTab({ cluster, topic }: { cluster: string; topic: string
   const [tsMs, setTsMs] = useState('')
   const [limit, setLimit] = useState('50')
   const [anchor, setAnchor] = useState<BrowseAnchor>({ anchor: 'latest', limit: 50 })
+  // Bumped on every explicit Load (including tail's error-freeze exit path,
+  // which also calls `load()`) so the query key changes even when the
+  // anchor is structurally identical to the last one — an unchanged anchor
+  // must still trigger a real refetch, not a silent no-op re-render.
+  const [loadCount, setLoadCount] = useState(0)
   const [tailBuffer, setTailBuffer] = useState<MessageOut[]>([])
   const [tailError, setTailError] = useState<{ text: string; kind: 'error' | 'transport' } | null>(null)
   const tailHandle = useRef<{ close: () => void } | null>(null)
@@ -49,7 +54,7 @@ export function MessagesTab({ cluster, topic }: { cluster: string; topic: string
   const searchHandle = useRef<{ close: () => void } | null>(null)
 
   const messages = useQuery({
-    queryKey: ['messages', cluster, topic, anchor],
+    queryKey: ['messages', cluster, topic, anchor, loadCount],
     queryFn: ({ signal }) => getMessages(cluster, topic, anchor, signal),
   })
 
@@ -72,6 +77,7 @@ export function MessagesTab({ cluster, topic }: { cluster: string; topic: string
     setTailError(null)
     setSearchState(initialSearchState)
     setMode('browse')
+    setLoadCount((c) => c + 1)
     const lim = Math.min(Number(limit) || 50, 500)
     if (anchorKind === 'latest') setAnchor({ anchor: 'latest', limit: lim })
     else if (anchorKind === 'offset') setAnchor({ anchor: 'offset', partition: Number(partition) || 0, offset: Number(offset) || 0, limit: lim })

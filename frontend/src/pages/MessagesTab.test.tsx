@@ -41,6 +41,16 @@ describe('MessagesTab browse', () => {
     expect(last.slice(0, 3)).toEqual(['prod', 'orders', { anchor: 'offset', partition: 0, offset: 5, limit: 50 }])
   })
 
+  it('refetches on Load even when anchor params are unchanged', async () => {
+    vi.mocked(client.getMessages).mockResolvedValue(page)
+    renderWithQuery(<MessagesTab cluster="prod" topic="orders" />)
+    await screen.findByText('p0·9')
+    const callsAfterInitialLoad = vi.mocked(client.getMessages).mock.calls.length
+    await userEvent.click(screen.getByRole('button', { name: 'Load' }))
+    await screen.findByText('p0·9')
+    expect(vi.mocked(client.getMessages).mock.calls.length).toBe(callsAfterInitialLoad + 1)
+  })
+
   it('renders api errors in the panel', async () => {
     vi.mocked(client.getMessages).mockRejectedValue(
       new client.ApiError(404, 'topic_not_found', "topic 'x' does not exist", 'prod', false),
