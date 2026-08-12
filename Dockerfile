@@ -16,7 +16,7 @@ RUN cd backend && cargo build --release
 
 FROM debian:bookworm-slim
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends libcurl4 ca-certificates \
+    && apt-get install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 RUN useradd --system --uid 10001 betrachtung
 COPY --from=backend /build/backend/target/release/betrachtung /usr/local/bin/betrachtung
