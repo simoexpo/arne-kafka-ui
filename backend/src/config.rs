@@ -137,20 +137,69 @@ fn interpolate_outside_comments(
 }
 
 /// Finds the byte offset of the `#` that starts a YAML comment in `line`, or
-/// `line.len()` if there is none. Tracks single-/double-quote state so a `#`
-/// inside a quoted string is never mistaken for a comment marker.
+/// `line.len()` if there is none.
+///
+/// This is a pragmatic approximation of YAML tokenization, sufficient for
+/// config files — not a full YAML lexer. Rules:
+/// - A `#` starts a comment when it is outside any quoted string and is
+///   either at the start of the line or preceded by whitespace (matching
+///   YAML's own comment rule).
+/// - A `'` or `"` OPENS a quoted string only when it can start a scalar:
+///   the previous non-whitespace character on the line is one of `:` `,`
+///   `[` `{` `-`, or there is none (line start). Otherwise the quote
+///   character is plain-scalar content (e.g. the apostrophe in `alice's`)
+///   and is ignored — it never toggles quote state.
+/// - Once inside a single-quoted string, `''` is an escaped literal quote
+///   (the pair is skipped); a lone `'` closes the string.
+/// - Once inside a double-quoted string, `\"` escapes (the pair is
+///   skipped); an unescaped `"` closes the string.
+///
+/// Known limitation: block scalars (`|` / `>`) whose content contains an
+/// unquoted ` #` will not have text after that `#` interpolated, since this
+/// function has no concept of block-scalar context. Acceptable for v1: no
+/// config field uses block scalars.
 fn find_comment_start(line: &str) -> usize {
+    fn can_open_quote(last_non_ws: Option<char>) -> bool {
+        match last_non_ws {
+            None => true,
+            Some(c) => matches!(c, ':' | ',' | '[' | '{' | '-'),
+        }
+    }
+
     let mut in_single = false;
     let mut in_double = false;
     let mut prev_was_space = true; // start-of-line counts as preceded by whitespace
-    for (i, ch) in line.char_indices() {
-        match ch {
-            '\'' if !in_double => in_single = !in_single,
-            '"' if !in_single => in_double = !in_double,
-            '#' if !in_single && !in_double && prev_was_space => return i,
-            _ => {}
+    let mut last_non_ws: Option<char> = None; // last non-whitespace char seen, for quote-open rule
+    let mut chars = line.char_indices().peekable();
+    while let Some((i, ch)) = chars.next() {
+        if in_single {
+            if ch == '\'' {
+                if matches!(chars.peek(), Some((_, '\''))) {
+                    chars.next(); // escaped '' — stays inside the string
+                } else {
+                    in_single = false;
+                }
+            }
+        } else if in_double {
+            if ch == '\\' {
+                if chars.peek().is_some() {
+                    chars.next(); // escaped char — skip it
+                }
+            } else if ch == '"' {
+                in_double = false;
+            }
+        } else {
+            match ch {
+                '\'' if can_open_quote(last_non_ws) => in_single = true,
+                '"' if can_open_quote(last_non_ws) => in_double = true,
+                '#' if prev_was_space => return i,
+                _ => {}
+            }
         }
         prev_was_space = ch.is_whitespace();
+        if !ch.is_whitespace() {
+            last_non_ws = Some(ch);
+        }
     }
     line.len()
 }
@@ -317,5 +366,16 @@ limits: { max_search_matches: 100, sampler_interval_secs: 5 }
         // interpolated, this would error.
         let cfg = parse(yaml).unwrap();
         assert_eq!(cfg.clusters[0].bootstrap, "x:9092");
+    }
+
+    #[test]
+    fn apostrophe_in_plain_scalar_does_not_break_comment_detection() {
+        let yaml = "clusters:\n  - name: a\n    bootstrap: alice's-host:9092  # uses ${NOPE}\n";
+        // A bare apostrophe inside an unquoted plain scalar is valid YAML and must
+        // not be mistaken for the start of a single-quoted string — otherwise the
+        // real trailing comment gets treated as in-quote code and interpolated.
+        // lookup knows nothing (not even NOPE): if that happened, this would error.
+        let cfg = parse(yaml).unwrap();
+        assert_eq!(cfg.clusters[0].bootstrap, "alice's-host:9092");
     }
 }
