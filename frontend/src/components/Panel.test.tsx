@@ -58,9 +58,16 @@ describe('Panel', () => {
     expect(screen.getByText(/Kafka unreachable/)).toBeInTheDocument()
     expect(screen.getByText(/'playground'/)).toBeInTheDocument()
   })
-  it('full error block shows the backend-unreachable headline for a plain network Error', () => {
+  it('full error block shows connection-lost wording and a retry hint for a plain network Error', () => {
     render(<Panel title="Brokers" error={new Error('Failed to fetch')}>content</Panel>)
-    expect(screen.getByText(/Betrachtung backend unreachable/)).toBeInTheDocument()
+    expect(screen.getByText(/Connection to Betrachtung lost/)).toBeInTheDocument()
+    expect(screen.getByText(/retrying automatically/)).toBeInTheDocument()
+  })
+  it('compact banner shows connection-lost wording and a retry hint too', () => {
+    render(<Panel title="Brokers" error={new Error('Failed to fetch')} hasData>content</Panel>)
+    const banner = screen.getByTestId('panel-error-banner')
+    expect(banner).toHaveTextContent('Connection to Betrachtung lost')
+    expect(banner).toHaveTextContent(/retrying automatically/)
   })
   it('full error block shows no scary headline for an app-level resource error', () => {
     const err = new ApiError(404, 'topic_not_found', "topic 'x' does not exist", 'prod', false)
@@ -81,5 +88,14 @@ describe('Panel', () => {
     const banner = screen.getByTestId('panel-error-banner')
     expect(banner).not.toHaveTextContent(/unreachable/i)
     expect(banner).toHaveTextContent('topic_not_found')
+  })
+  it('detail line is visually subdued for a connection-lost error — it is diagnostics, not the message', () => {
+    render(<Panel title="Brokers" error={new Error('Failed to fetch')}>content</Panel>)
+    expect(screen.getByTestId('panel-error-detail').className).toMatch(/text-zinc-500/)
+  })
+  it('detail line stays normal weight for a kafka error — it IS the primary message', () => {
+    const err = new ApiError(504, 'kafka_timeout', 'fetch metadata timed out', 'prod', true)
+    render(<Panel title="Brokers" error={err}>content</Panel>)
+    expect(screen.getByTestId('panel-error-detail').className).not.toMatch(/text-zinc-500/)
   })
 })

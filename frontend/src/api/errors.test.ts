@@ -18,20 +18,25 @@ describe('describeError', () => {
     expect(describeError(err).headline).toBe('Kafka unreachable')
   })
 
-  it('a plain network Error is a backend failure', () => {
+  it('a plain network Error is a connection-lost failure with a retry hint', () => {
     expect(describeError(new Error('Failed to fetch'))).toEqual({
       kind: 'backend',
-      headline: 'Betrachtung backend unreachable',
+      headline: 'Connection to Betrachtung lost',
+      hint: 'retrying automatically — the server may be restarting or unreachable from your network',
     })
   })
 
-  it('the 15s request timeout error is a backend failure', () => {
+  it('the 15s request timeout error is a connection-lost failure', () => {
     expect(describeError(new Error('request timed out after 15s')).kind).toBe('backend')
   })
 
-  it('an ApiError with an http_5xx fallback code is a backend failure', () => {
+  it('an ApiError with an http_5xx fallback code is a connection-lost failure', () => {
     const err = new ApiError(502, 'http_502', 'request failed with status 502', null, true)
-    expect(describeError(err)).toEqual({ kind: 'backend', headline: 'Betrachtung backend unreachable' })
+    expect(describeError(err)).toEqual({
+      kind: 'backend',
+      headline: 'Connection to Betrachtung lost',
+      hint: 'retrying automatically — the server may be restarting or unreachable from your network',
+    })
   })
 
   it('other ApiError codes are app-level resource errors with no scary headline', () => {

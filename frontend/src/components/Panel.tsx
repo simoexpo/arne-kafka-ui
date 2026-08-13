@@ -25,12 +25,21 @@ function PanelError({ error }: { error: unknown }) {
   const message = error instanceof Error ? error.message : String(error)
   const code = error instanceof ApiError ? error.code : 'error'
   const retriable = error instanceof ApiError && error.retriable
-  const { headline } = describeError(error)
+  const { kind, headline, hint } = describeError(error)
+  // Connection-lost is diagnostics, not the message the user should read
+  // first — the code/message line is subdued so the headline + hint carry
+  // the story instead.
+  const subdued = kind === 'backend'
   return (
     <div className="rounded-md border border-red-300 bg-red-50 p-3 text-sm dark:border-red-900 dark:bg-red-950">
       {headline && <p className="mb-1 font-semibold text-red-900 dark:text-red-200">{headline}</p>}
-      <span className="font-mono text-red-700 dark:text-red-400">{code}</span>
-      <p className="mt-1 text-red-800 dark:text-red-300">{message}</p>
+      {hint && <p className="mb-2 text-xs text-red-700/80 dark:text-red-400/80">{hint}</p>}
+      <div data-testid="panel-error-detail" className={subdued ? 'text-zinc-500 dark:text-zinc-500' : undefined}>
+        <span className={`font-mono ${subdued ? 'text-zinc-500 dark:text-zinc-500' : 'text-red-700 dark:text-red-400'}`}>
+          {code}
+        </span>
+        <p className={`mt-1 ${subdued ? 'text-zinc-500 dark:text-zinc-500' : 'text-red-800 dark:text-red-300'}`}>{message}</p>
+      </div>
       {retriable && <p className="mt-1 text-xs text-red-600 dark:text-red-500">retriable — data may recover on its own</p>}
     </div>
   )
@@ -42,14 +51,21 @@ function PanelError({ error }: { error: unknown }) {
 function PanelErrorBanner({ error }: { error: unknown }) {
   const message = error instanceof Error ? error.message : String(error)
   const code = error instanceof ApiError ? error.code : 'error'
-  const { headline } = describeError(error)
+  const { kind, headline, hint } = describeError(error)
+  const subdued = kind === 'backend'
   return (
     <div
       data-testid="panel-error-banner"
       className="mb-3 border-l-2 border-red-500 bg-red-50 px-2 py-1 text-xs text-red-800 dark:border-red-400 dark:bg-red-950 dark:text-red-300"
     >
       {headline && <p className="font-semibold">⚠ {headline}</p>}
-      <p><span className="font-mono text-red-700 dark:text-red-400">{code}</span> {message}</p>
+      {hint && <p className="text-red-700/80 dark:text-red-400/80">{hint}</p>}
+      <p data-testid="panel-error-detail">
+        <span className={`font-mono ${subdued ? 'text-zinc-500 dark:text-zinc-500' : 'text-red-700 dark:text-red-400'}`}>
+          {code}
+        </span>{' '}
+        <span className={subdued ? 'text-zinc-500 dark:text-zinc-500' : undefined}>{message}</span>
+      </p>
     </div>
   )
 }
