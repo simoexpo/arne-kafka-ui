@@ -560,15 +560,15 @@ async fn timeline_back_ties_are_lossless_and_not_falsely_exhausted() {
 /// o2@300] (non-monotonic: offset 0 has the *highest* timestamp), p1 =
 /// [o0@100, o1@100], forward limit 3 from beginning.
 ///
-/// The old cursor formula (advance to the emitted set's own min/max offset)
-/// assumed the emitted subset of a partition's window is always a
-/// prefix/suffix by offset — false here, since o0 sorts last (highest
-/// timestamp) despite being the lowest offset. The fix anchors on what was
-/// *dropped*, which can legitimately cause a partition to re-offer an
-/// already-emitted record on a later page (accepted: the frontend dedups on
-/// `(partition, offset)`). What must never happen is a *lost* record: the
-/// SET of (partition, offset) emitted across pages must cover all 5, even
-/// though the exact list may contain a duplicate.
+/// Originally (round 1) this asserted only that the SET of (partition,
+/// offset) covered all 5 — round 1's dropped-offset cursor formula could
+/// legitimately re-offer an already-emitted record on a later page (bounded
+/// overlap was an accepted tradeoff then). Fix round 2 replaced truncation
+/// with contiguous selection, which provably never re-offers an
+/// already-taken offset (each partition's next window always starts
+/// exactly where its last taking left off) — so this is now tightened to
+/// assert zero duplicates as well: every (partition, offset) appears
+/// exactly once across all pages, not just "at least once".
 #[tokio::test]
 async fn timeline_forward_nonmonotonic_timestamps_are_lossless() {
     let bootstrap = start_kafka().await;
@@ -580,7 +580,7 @@ async fn timeline_forward_nonmonotonic_timestamps_are_lossless() {
     produce_at(&bootstrap, "tl-nonmono-topic", 1, "k", "p1o1", 100).await; // p1 offset 1 (tied with o0)
     let state = state_for(&bootstrap, vec![]);
 
-    let mut seen: std::collections::HashSet<(i64, i64)> = std::collections::HashSet::new();
+    let mut seen: Vec<(i64, i64)> = Vec::new();
     let mut cursor: Option<String> = None;
     let mut exhausted = false;
     for _ in 0..10 {
@@ -592,7 +592,7 @@ async fn timeline_forward_nonmonotonic_timestamps_are_lossless() {
         let events = collect_sse(app(state.clone()), &path, 200).await;
         for (name, m) in &events {
             if name == "match" {
-                seen.insert((m["partition"].as_i64().unwrap(), m["offset"].as_i64().unwrap()));
+                seen.push((m["partition"].as_i64().unwrap(), m["offset"].as_i64().unwrap()));
             }
         }
         let (_, end) = events.iter().find(|(n, _)| n == "page_end").unwrap().clone();
@@ -601,9 +601,126 @@ async fn timeline_forward_nonmonotonic_timestamps_are_lossless() {
         if exhausted { break; }
     }
     assert!(exhausted, "must reach exhaustion within the safety bound, not loop forever");
+    let seen_set: std::collections::HashSet<(i64, i64)> = seen.iter().copied().collect();
+    assert_eq!(seen.len(), seen_set.len(), "fix round 2: contiguous selection must never re-offer an already-taken record: {seen:?}");
     let expected: std::collections::HashSet<(i64, i64)> =
         [(0i64, 0i64), (0, 1), (0, 2), (1, 0), (1, 1)].into_iter().collect();
-    assert_eq!(seen, expected, "every (partition, offset) must be covered across pages, even with non-monotonic timestamps (dup re-emission is fine, loss is not)");
+    assert_eq!(seen_set, expected, "every (partition, offset) must be covered across pages, even with non-monotonic timestamps");
+}
+
+/// Fix round 2, N1 (reviewer's probe H, Back direction — exact
+/// construction): p0 = [o0@900, o1@100], p1 = [o0@800, o1@200], back
+/// limit 2.
+///
+/// Round 1's cursor formula anchored on the *dropped* offsets:
+/// `Back` new position = `max(dropped) + 1`. Here, for `Back`, the
+/// position-adjacent offset in p0's window is o1 (the window's top,
+/// highest offset) — but o1 has the lowest timestamp of all 4 records, so
+/// it loses every global-timestamp comparison and is *always* the one
+/// truncated away. That makes it the *only* dropped offset for p0 every
+/// single page: `max({1}) + 1 == 2 == p0's old position`, forever — a
+/// byte-identical, non-exhausted cursor (N1's livelock), reproduced here
+/// deterministically (no real broker slowness needed, unlike the N3 short-
+/// read case).
+///
+/// Fix round 2's contiguous selection can't reproduce this: p0's position
+/// only ever moves by however many of its own contiguous records were
+/// actually taken (0 here, since p1 wins every comparison until it's
+/// exhausted) — so p0's cursor stays at 2 for exactly one page (correct:
+/// nothing was skipped, nothing lost), then p1's stream empties and p0
+/// takes its turn on page 2, reaching true exhaustion. All 4 records must
+/// be served, cursors must strictly advance (never repeat), and — since
+/// contiguous selection never overlaps — with zero duplicates.
+#[tokio::test]
+async fn timeline_back_position_adjacent_drop_does_not_livelock() {
+    let bootstrap = start_kafka().await;
+    create_topic(&bootstrap, "tl-n1-back-topic", 2).await;
+    produce_at(&bootstrap, "tl-n1-back-topic", 0, "k", "p0o0", 900).await;
+    produce_at(&bootstrap, "tl-n1-back-topic", 0, "k", "p0o1", 100).await;
+    produce_at(&bootstrap, "tl-n1-back-topic", 1, "k", "p1o0", 800).await;
+    produce_at(&bootstrap, "tl-n1-back-topic", 1, "k", "p1o1", 200).await;
+    let state = state_for(&bootstrap, vec![]);
+
+    let mut seen: Vec<(i64, i64)> = Vec::new();
+    let mut seen_cursors: Vec<String> = Vec::new();
+    let mut cursor: Option<String> = None;
+    let mut exhausted = false;
+    for _ in 0..5 {
+        let path = match &cursor {
+            None => "/api/clusters/test/topics/tl-n1-back-topic/timeline?direction=back&limit=2&anchor=latest".to_string(),
+            Some(c) => format!("/api/clusters/test/topics/tl-n1-back-topic/timeline?direction=back&limit=2&cursor={}", urlencoding::encode(c)),
+        };
+        let events = collect_sse(app(state.clone()), &path, 200).await;
+        for (name, m) in &events {
+            if name == "match" {
+                seen.push((m["partition"].as_i64().unwrap(), m["offset"].as_i64().unwrap()));
+            }
+        }
+        let (_, end) = events.iter().find(|(n, _)| n == "page_end").unwrap().clone();
+        exhausted = end["exhausted"].as_bool().unwrap();
+        let next_cursor = end["cursor"].as_str().map(str::to_string);
+        if let Some(c) = &next_cursor {
+            assert!(!seen_cursors.contains(c), "cursor must strictly advance, never repeat (N1 livelock): {seen_cursors:?} then {c}");
+            seen_cursors.push(c.clone());
+        }
+        cursor = next_cursor;
+        if exhausted { break; }
+    }
+    assert!(exhausted, "must reach exhaustion within the safety bound, not livelock");
+    let seen_set: std::collections::HashSet<(i64, i64)> = seen.iter().copied().collect();
+    assert_eq!(seen.len(), seen_set.len(), "contiguous selection must never duplicate: {seen:?}");
+    let expected: std::collections::HashSet<(i64, i64)> =
+        [(0i64, 0i64), (0, 1), (1, 0), (1, 1)].into_iter().collect();
+    assert_eq!(seen_set, expected, "every record must be served, with no losses");
+}
+
+/// Fix round 2, N1 (reviewer's probe I, Forward direction — mirrors probe H
+/// above): same data, forward from beginning, limit 2. The livelock is
+/// symmetric: p0's position-adjacent offset for `Forward` is o0 (the
+/// window's bottom), which has the *highest* timestamp of all 4 — so it
+/// also loses every comparison and was, under round 1, the sole "dropped"
+/// offset every page, making `min(dropped) == p0's old position` forever.
+#[tokio::test]
+async fn timeline_forward_position_adjacent_drop_does_not_livelock() {
+    let bootstrap = start_kafka().await;
+    create_topic(&bootstrap, "tl-n1-fwd-topic", 2).await;
+    produce_at(&bootstrap, "tl-n1-fwd-topic", 0, "k", "p0o0", 900).await;
+    produce_at(&bootstrap, "tl-n1-fwd-topic", 0, "k", "p0o1", 100).await;
+    produce_at(&bootstrap, "tl-n1-fwd-topic", 1, "k", "p1o0", 800).await;
+    produce_at(&bootstrap, "tl-n1-fwd-topic", 1, "k", "p1o1", 200).await;
+    let state = state_for(&bootstrap, vec![]);
+
+    let mut seen: Vec<(i64, i64)> = Vec::new();
+    let mut seen_cursors: Vec<String> = Vec::new();
+    let mut cursor: Option<String> = None;
+    let mut exhausted = false;
+    for _ in 0..5 {
+        let path = match &cursor {
+            None => "/api/clusters/test/topics/tl-n1-fwd-topic/timeline?direction=forward&limit=2&anchor=beginning".to_string(),
+            Some(c) => format!("/api/clusters/test/topics/tl-n1-fwd-topic/timeline?direction=forward&limit=2&cursor={}", urlencoding::encode(c)),
+        };
+        let events = collect_sse(app(state.clone()), &path, 200).await;
+        for (name, m) in &events {
+            if name == "match" {
+                seen.push((m["partition"].as_i64().unwrap(), m["offset"].as_i64().unwrap()));
+            }
+        }
+        let (_, end) = events.iter().find(|(n, _)| n == "page_end").unwrap().clone();
+        exhausted = end["exhausted"].as_bool().unwrap();
+        let next_cursor = end["cursor"].as_str().map(str::to_string);
+        if let Some(c) = &next_cursor {
+            assert!(!seen_cursors.contains(c), "cursor must strictly advance, never repeat (N1 livelock): {seen_cursors:?} then {c}");
+            seen_cursors.push(c.clone());
+        }
+        cursor = next_cursor;
+        if exhausted { break; }
+    }
+    assert!(exhausted, "must reach exhaustion within the safety bound, not livelock");
+    let seen_set: std::collections::HashSet<(i64, i64)> = seen.iter().copied().collect();
+    assert_eq!(seen.len(), seen_set.len(), "contiguous selection must never duplicate: {seen:?}");
+    let expected: std::collections::HashSet<(i64, i64)> =
+        [(0i64, 0i64), (0, 1), (1, 0), (1, 1)].into_iter().collect();
+    assert_eq!(seen_set, expected, "every record must be served, with no losses");
 }
 
 /// Fix round 1, I1: a cursor's own `direction` must match the request's

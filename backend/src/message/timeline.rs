@@ -17,8 +17,8 @@ use super::range::{self, PartitionRange};
 use super::MessageOut;
 use crate::cluster::ClusterHandle;
 use crate::error::ApiError;
-use std::collections::{HashMap, HashSet};
-use std::sync::atomic::AtomicBool;
+use std::collections::{HashMap, VecDeque};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
@@ -141,20 +141,29 @@ pub fn page_windows(
 /// returning the new positions and whether every partition has reached the
 /// true topic edge in `direction`.
 ///
-/// Fix round 1 (see task-1 report): the original 3-argument signature
-/// (`positions`, `windows`, `direction`) could not distinguish "clamped by
-/// the watermark" from "given a full `span`-sized page, more data beyond"
-/// using only the consumed windows — the shipped proxy for that was a
-/// tautology (`window.len() <= max(all window lens)` is true of every
-/// window, including the widest one, unconditionally), so it reported
-/// `exhausted: true` on every page. `watermarks` is now passed explicitly
-/// and the edge test is exact: for `Back`, a partition is at its edge once
-/// its new position equals that partition's low watermark; for `Forward`,
-/// once it equals the high watermark. A partition absent from `windows`
-/// (its window was empty — `page_windows` only omits a partition when its
-/// position is already sitting at that edge) is at its edge by definition,
-/// with its position left unchanged. `exhausted` is true iff every
-/// partition is at its edge.
+/// Amended during Task 1's own review round (see task-1-report.md's "Fix
+/// round 1" section — predating, and unrelated to, this file's *own* later
+/// Task 2 fix rounds referenced elsewhere in this module): the original
+/// 3-argument signature (`positions`, `windows`, `direction`) could not
+/// distinguish "clamped by the watermark" from "given a full `span`-sized
+/// page, more data beyond" using only the consumed windows — the shipped
+/// proxy for that was a tautology (`window.len() <= max(all window lens)`
+/// is true of every window, including the widest one, unconditionally), so
+/// it reported `exhausted: true` on every page. `watermarks` is now passed
+/// explicitly and the edge test is exact: for `Back`, a partition is at its
+/// edge once its new position equals that partition's low watermark; for
+/// `Forward`, once it equals the high watermark. A partition absent from
+/// `windows` (its window was empty — `page_windows` only omits a partition
+/// when its position is already sitting at that edge) is at its edge by
+/// definition, with its position left unchanged. `exhausted` is true iff
+/// every partition is at its edge.
+///
+/// Note: `run_page` (below) no longer calls this function directly as of
+/// Task 2 fix round 2 — its contiguous-selection cursor math (`pos ±
+/// taken_count`) is simple enough to compute inline, and doing so avoids
+/// re-deriving positions from a synthetic `windows` list. `advance` remains
+/// here as tested, independent public API (nothing about it was wrong; it
+/// just stopped being the right tool for `run_page`'s new algorithm).
 pub fn advance(
     positions: &[(i32, i64)],
     windows: &[range::PartitionRange],
@@ -241,70 +250,144 @@ fn clamp_positions(positions: &[(i32, i64)], watermarks: &[(i32, i64, i64)]) -> 
         .collect()
 }
 
-/// A page "stalled" if it had real windows to scan (Kafka reported data
-/// there when watermarks were fetched) but emitted nothing at all and no
-/// partition's position moved.
+/// The offset, within a partition's window `w`, that sits immediately
+/// adjacent to the position this page started from — the very first record
+/// `run_page`'s contiguous selection would consume from that partition.
 ///
-/// Fix round 1, C4 (progress guarantee): ordinarily this can't happen —
-/// non-empty windows mean at least one partition has records, so at least
-/// one gets emitted and/or advances. The one case it doesn't hold is a race
-/// against compaction or retention between the watermark fetch and the
-/// scan: every offset `page_windows` expected to exist has since vanished.
-/// Handing back `page_end` with an unchanged cursor there would make the
-/// client loop forever — identical cursor, `exhausted: false`, no new data,
-/// ever. That must surface as a terminal `error` instead.
-fn page_stalled(
-    windows: &[PartitionRange],
-    emitted_count: usize,
-    positions: &[(i32, i64)],
-    new_positions: &[(i32, i64)],
-) -> bool {
-    !windows.is_empty() && emitted_count == 0 && new_positions == positions
+/// For `Back`, the position is the window's *exclusive upper bound*
+/// (`w.end`), so the adjacent record is the highest offset in the window,
+/// `w.end - 1` — the *top* of the window. For `Forward`, the position is
+/// the window's *inclusive lower bound* (`w.start`), so the adjacent record
+/// is `w.start` itself — the *bottom*. This is what fix round 2's N3
+/// short-read check (see `run_page`'s doc comment) tests for.
+fn adjacent_offset(w: &PartitionRange, direction: Direction) -> i64 {
+    match direction {
+        Direction::Back => w.end - 1,
+        Direction::Forward => w.start,
+    }
+}
+
+/// True if `candidate` should be selected over `current_best` as the next
+/// record taken in `run_page`'s k-way merge (see its doc comment): `Back`
+/// prefers the higher timestamp, `Forward` the lower. Ties break by
+/// partition ascending, then — per the design — offset in the direction's
+/// own sense (`Back`: higher wins; `Forward`: lower wins). In practice a
+/// partition-level tie can't arise within one merge step (each partition
+/// contributes at most one candidate at a time, so equal partition already
+/// means it's the same stream), but the offset tie-break is kept for a
+/// fully deterministic order and to mirror the same convention used
+/// elsewhere (e.g. the final display sort below).
+fn merge_prefers(direction: Direction, candidate: &RawRecord, current_best: &RawRecord) -> bool {
+    let (ct, bt) = (candidate.timestamp_ms.unwrap_or(i64::MIN), current_best.timestamp_ms.unwrap_or(i64::MIN));
+    let ts_favors_candidate = match direction {
+        Direction::Back => ct.cmp(&bt).is_gt(),
+        Direction::Forward => ct.cmp(&bt).is_lt(),
+    };
+    if ct != bt {
+        return ts_favors_candidate;
+    }
+    match candidate.partition.cmp(&current_best.partition) {
+        std::cmp::Ordering::Less => true,
+        std::cmp::Ordering::Greater => false,
+        std::cmp::Ordering::Equal => match direction {
+            Direction::Back => candidate.offset > current_best.offset,
+            Direction::Forward => candidate.offset < current_best.offset,
+        },
+    }
+}
+
+/// Fix round 2, N3 + N2: a page "made no progress" if it had real windows
+/// to scan (Kafka reported data there when watermarks were fetched) but
+/// contiguous selection took nothing at all, and the scan wasn't cancelled.
+///
+/// This replaces round 1's `page_stalled`, which the round-2 review
+/// correctly identified as dead/wrong: it treated "records were emitted but
+/// the cursor didn't move" as fine (not stalled) — but that exact
+/// combination *was* N1's livelock signature (a partition's position could
+/// stay byte-identical across a page that nonetheless emitted records from
+/// *other* partitions), so the old guard could never fire on the case it
+/// was meant to catch. The new condition doesn't look at position movement
+/// at all — with contiguous selection, "nothing taken" and "no partition
+/// advanced" are one and the same thing by construction (see `run_page`),
+/// so checking `taken` directly is both simpler and actually correct. The
+/// realistic trigger is a short-read (fetch's internal deadline, or a
+/// compaction/retention race) leaving every partition's position-adjacent
+/// offset missing in the same page. Handing back `page_end` with an
+/// unadvanced, non-exhausted cursor there would loop the client forever;
+/// this must surface as a terminal `error` instead.
+fn page_made_no_progress(windows_non_empty: bool, taken_is_empty: bool, cancelled: bool) -> bool {
+    windows_non_empty && taken_is_empty && !cancelled
 }
 
 /// Runs one unfiltered timeline page (`filter: None` — the only path this
 /// task implements; a filtered page is Task 4's job and reports an explicit
 /// `error` rather than silently behaving like an unfiltered scan).
 ///
-/// Unfiltered semantics: `span = limit` per partition (no budget-driven
-/// scanning needed — every window record is a candidate, so there's nothing
-/// to keep scanning past), scan every window, decode, merge-sort globally by
-/// `(timestamp_ms, partition, offset)` (desc for `Back`, asc for `Forward`),
-/// then truncate to `limit` keeping the records nearest the position (the
-/// front of that sorted order).
+/// Fix round 2 replaced the previous (round 1) approach — fetch every
+/// window, globally merge-sort by timestamp, truncate to `limit`, then
+/// derive a cursor from whatever got dropped — with **contiguous
+/// selection**, because that approach was structurally unable to guarantee
+/// both "never lose a record" and "always advance" at the same time (round
+/// 1's fix-round report calls this out honestly; the round-2 review found
+/// the concrete failure, N1: whenever a partition's *position-adjacent*
+/// offset happened to be the one truncation dropped, the dropped-offset
+/// cursor formula recomputed that partition's *old* position exactly —
+/// `max(dropped) + 1 == old position` — a byte-identical, non-exhausted
+/// cursor returned forever, in both directions).
 ///
-/// The cursor must advance only past what was *actually emitted*, not past
-/// the full requested window — and (fix round 1) it must do so in a way
-/// that survives non-monotonic (producer-stamped) timestamps, not just
-/// simple truncation.
+/// The fix: each partition can only ever contribute a **contiguous prefix**
+/// of its window, walked strictly outward from the position, so a
+/// partition's own progress and "how much of its window got used" are
+/// literally the same number — there is no dropped/emitted-extremes
+/// distinction left to get wrong.
 ///
-/// Fix round 1, C1: within an equal-timestamp tie in one partition, `Back`
-/// breaks ties by offset *descending* — the higher offset is the one
-/// actually nearer the position (later in the partition, whatever its
-/// timestamp says), so it must be the one kept when truncation has to
-/// choose. The original ascending tie-break could keep a lower offset over
-/// a higher one from the same partition/timestamp, which fed directly into
-/// C2 (falsely reporting a partial page as exhausted) once combined with
-/// the old emitted-extremes cursor formula.
-///
-/// Fix round 1, C3: that old formula — new position = the emitted set's own
-/// min (`Back`)/max+1 (`Forward`) offset per partition — assumed the
-/// emitted subset of a partition's window is always a clean prefix/suffix
-/// by offset. Non-monotonic timestamps break that assumption: a record can
-/// sort to the far end of the global merge (and get truncated away) while
-/// sitting at a *low* offset in its partition, with a *higher*-offset,
-/// same-or-later-timestamp sibling from the same partition making the cut.
-/// Advancing to the emitted set's own extreme would then silently step past
-/// the dropped low-offset record forever. The fix anchors the new position
-/// on what was *dropped* from each partition's window instead of what was
-/// emitted: `Back` position = `max(dropped) + 1` (or `window.start` if
-/// nothing was dropped); `Forward` position = `min(dropped)` (or
-/// `window.end` if nothing was dropped). This is safe by construction — the
-/// new position always excludes every dropped offset — at the cost of
-/// bounded overlap: a partition that still has a dropped record pending can
-/// re-offer an already-emitted sibling on a later page. That's an accepted
-/// trade (the frontend already dedups on `(partition, offset)`; the product
-/// charter forbids losing records, not repeating one at a page boundary).
+/// 1. Per partition, order its fetched window records *adjacent-first*:
+///    `Back` sorts offset descending (nearest-to-position first, since the
+///    position is the window's upper bound); `Forward` sorts offset
+///    ascending (nearest-to-position first, since the position is the
+///    window's lower bound — this is simply the records' natural fetch
+///    order).
+/// 2. **N3 short-read guard**: `fetch_ranges_blocking` has its own internal
+///    deadline and can return a partial window if Kafka is slow. Because it
+///    always scans a window low-to-high regardless of `direction`, a
+///    partial `Back` fetch is missing exactly the *high* (position-adjacent)
+///    end — the most dangerous place to be missing data, since that's
+///    where contiguous selection starts. So: if a partition's fetched
+///    records don't include its `adjacent_offset` (see that function), its
+///    entire window is discarded for this page — it contributes nothing,
+///    and (critically) its position does **not** advance, rather than
+///    silently treating whatever partial, possibly-non-adjacent data did
+///    arrive as if it were the start of the window.
+/// 3. **k-way merge**: repeatedly compare the current head (next
+///    unconsumed, adjacent-most record) of every partition's stream and
+///    take the one `merge_prefers` (best timestamp for the direction; see
+///    its doc comment for the tie-break), advancing only that partition's
+///    stream — until `limit` records are taken or every stream is empty.
+///    Each partition's taken count is therefore exactly the length of the
+///    contiguous prefix consumed from its window.
+/// 4. **Cursor**: trivial and exact — `Back` position becomes `old - taken`,
+///    `Forward` becomes `old + taken`, per partition (0 taken ⇒ position
+///    unchanged, which is always safe: nothing was consumed, so there's
+///    nothing to skip past). This can never reproduce N1: a partition's
+///    position moves if and only if something was actually taken from it,
+///    and by exactly that amount — no separate "did truncation touch the
+///    adjacent offset" computation exists to disagree with reality. It also
+///    eliminates overlap entirely (round 1 accepted *bounded* overlap as a
+///    tradeoff; contiguous prefixes never need to re-offer an
+///    already-taken offset, since the next page's window starts exactly
+///    where this one's taking left off).
+/// 5. The taken set (already ≤ `limit`, already loss-free) is then sorted
+///    into **display** order — `(timestamp_ms, partition, offset)`, desc/asc
+///    to match `direction` — before decoding and emitting; the merge's
+///    *selection* order can differ from display order under non-monotonic
+///    timestamps (a partition's next contiguous record isn't always the
+///    next-best timestamp globally), which is exactly the page-boundary
+///    "fuzz" the design doc already licenses.
+/// 6. **N2/N3 progress guarantee** (`page_made_no_progress`): if a page had
+///    real windows to scan but selection took nothing at all (every
+///    partition hit the N3 short-read guard) and the scan wasn't cancelled,
+///    that's reported as a terminal `error`, never a `page_end` with an
+///    unadvanced, non-exhausted cursor.
 #[allow(clippy::too_many_arguments)] // mirrors search.rs's `drive_partition`
 pub fn run_page(
     handle: Arc<ClusterHandle>,
@@ -364,7 +447,7 @@ pub fn run_page(
             }).await
         };
 
-        let (mut records, windows) = match result {
+        let (records, windows) = match result {
             Ok(Ok(pair)) => pair,
             Ok(Err(e)) => {
                 let _ = tx.send(e.into()).await;
@@ -376,74 +459,102 @@ pub fn run_page(
             }
         };
 
-        // I2: sort + truncate the raw, undecoded records first — only the
-        // page that's actually emitted gets decoded (which can be
-        // expensive: schema lookups, Avro/Protobuf parsing), not every
-        // candidate across every partition's full window.
+        // Group fetched records by partition, ascending by offset (their
+        // natural fetch order — `fetch_ranges_blocking` scans low-to-high
+        // per partition regardless of `direction`; sorting explicitly here
+        // is a cheap defensive guarantee, not a load-bearing assumption).
+        let mut by_partition: HashMap<i32, Vec<RawRecord>> = HashMap::new();
+        for r in records {
+            by_partition.entry(r.partition).or_default().push(r);
+        }
+        for v in by_partition.values_mut() {
+            v.sort_by_key(|r| r.offset);
+        }
+
+        // Step 1 + 2: build each partition's adjacent-first stream, or an
+        // empty one if the N3 short-read guard trips.
+        let mut streams: HashMap<i32, VecDeque<RawRecord>> = HashMap::new();
+        for w in &windows {
+            let fetched = by_partition.remove(&w.partition).unwrap_or_default();
+            let has_adjacent = fetched.iter().any(|r| r.offset == adjacent_offset(w, direction));
+            let ordered: VecDeque<RawRecord> = if has_adjacent {
+                match direction {
+                    Direction::Back => fetched.into_iter().rev().collect(),
+                    Direction::Forward => fetched.into_iter().collect(),
+                }
+            } else {
+                VecDeque::new()
+            };
+            streams.insert(w.partition, ordered);
+        }
+
+        // Step 3: k-way merge, taking at most `limit` records total.
+        let mut taken: Vec<RawRecord> = Vec::new();
+        let mut taken_count: HashMap<i32, i64> = HashMap::new();
+        while taken.len() < limit {
+            let mut best: Option<i32> = None;
+            for w in &windows {
+                let p = w.partition;
+                let Some(candidate) = streams.get(&p).and_then(VecDeque::front) else { continue };
+                best = match best {
+                    None => Some(p),
+                    Some(bp) => {
+                        let current_best = streams[&bp].front().expect("bp came from a non-empty front() above");
+                        if merge_prefers(direction, candidate, current_best) { Some(p) } else { Some(bp) }
+                    }
+                };
+            }
+            let Some(p) = best else { break };
+            let rec = streams.get_mut(&p).expect("p was just selected from streams").pop_front().expect("p's front() was Some above");
+            *taken_count.entry(p).or_insert(0) += 1;
+            taken.push(rec);
+        }
+
+        // Step 4: trivial, exact cursor math.
+        let new_positions: Vec<(i32, i64)> = positions
+            .iter()
+            .map(|&(p, pos)| {
+                let n = taken_count.get(&p).copied().unwrap_or(0);
+                match direction {
+                    Direction::Back => (p, pos - n),
+                    Direction::Forward => (p, pos + n),
+                }
+            })
+            .collect();
+
+        // Step 6: progress guarantee — before computing/sending anything
+        // else, so a stalled page never reaches the normal page_end path.
+        if page_made_no_progress(!windows.is_empty(), taken.is_empty(), cancelled.load(Ordering::SeqCst)) {
+            let _ = tx.send(ApiError::kafka(
+                &handle.name,
+                "page made no progress: broker returned no records for non-empty windows",
+            ).into()).await;
+            return;
+        }
+
+        let exhausted = new_positions.iter().all(|&(p, pos)| {
+            watermarks.iter().find(|(wp, _, _)| *wp == p).is_some_and(|&(_, lo, hi)| match direction {
+                Direction::Back => pos == lo,
+                Direction::Forward => pos == hi,
+            })
+        });
+        let cursor = if exhausted { None } else { Some(Cursor { direction, positions: new_positions }.encode()) };
+
+        // Step 5: display order, then decode only the taken (≤ limit) set.
         match direction {
-            Direction::Back => records.sort_by(|a, b| {
+            Direction::Back => taken.sort_by(|a, b| {
                 b.timestamp_ms.unwrap_or(i64::MIN).cmp(&a.timestamp_ms.unwrap_or(i64::MIN))
                     .then(a.partition.cmp(&b.partition))
-                    .then(b.offset.cmp(&a.offset)) // C1: offset DESC within a tie
+                    .then(b.offset.cmp(&a.offset))
             }),
-            Direction::Forward => records.sort_by(|a, b| {
+            Direction::Forward => taken.sort_by(|a, b| {
                 a.timestamp_ms.unwrap_or(i64::MIN).cmp(&b.timestamp_ms.unwrap_or(i64::MIN))
                     .then(a.partition.cmp(&b.partition))
                     .then(a.offset.cmp(&b.offset))
             }),
         }
 
-        // Every offset actually fetched per partition, captured *before*
-        // truncation — the "window" that C3's dropped-offset formula below
-        // is computed against.
-        let mut fetched_by_partition: HashMap<i32, Vec<i64>> = HashMap::new();
-        for r in &records {
-            fetched_by_partition.entry(r.partition).or_default().push(r.offset);
-        }
-
-        records.truncate(limit);
-
-        let mut emitted_by_partition: HashMap<i32, HashSet<i64>> = HashMap::new();
-        for r in &records {
-            emitted_by_partition.entry(r.partition).or_default().insert(r.offset);
-        }
-
-        // C3: anchor the new position on what was *dropped*, not on the
-        // emitted extremes (see the doc comment above `run_page`).
-        let empty_offsets: Vec<i64> = Vec::new();
-        let empty_emitted: HashSet<i64> = HashSet::new();
-        let cursor_windows: Vec<PartitionRange> = windows
-            .iter()
-            .map(|w| {
-                let fetched = fetched_by_partition.get(&w.partition).unwrap_or(&empty_offsets);
-                let emitted = emitted_by_partition.get(&w.partition).unwrap_or(&empty_emitted);
-                let dropped: Vec<i64> = fetched.iter().copied().filter(|o| !emitted.contains(o)).collect();
-                let pos = match direction {
-                    Direction::Back => dropped.iter().max().map_or(w.start, |m| m + 1),
-                    Direction::Forward => dropped.iter().min().copied().unwrap_or(w.end),
-                };
-                PartitionRange { partition: w.partition, start: pos, end: pos }
-            })
-            .collect();
-
-        let (new_positions, exhausted) = advance(&positions, &cursor_windows, &watermarks, direction);
-
-        // C4 progress guarantee: never hand back an identical,
-        // non-exhausted cursor (see the doc comment on `page_stalled`).
-        if page_stalled(&windows, records.len(), &positions, &new_positions) {
-            let _ = tx.send(TimelineEvent::Error {
-                code: "no_progress".into(),
-                message: "page produced no records and could not advance past its window \
-                          (likely a compaction or retention race)".into(),
-                cluster: Some(handle.name.clone()),
-                retriable: true,
-            }).await;
-            return;
-        }
-
-        let cursor = if exhausted { None } else { Some(Cursor { direction, positions: new_positions }.encode()) };
-
-        let decoded = fetch::to_message_out(records, handle.schema_registry.as_deref()).await;
+        let decoded = fetch::to_message_out(taken, handle.schema_registry.as_deref()).await;
         for m in decoded {
             if tx.send(TimelineEvent::Match(Box::new(m))).await.is_err() {
                 return; // client disconnected: no point sending page_end
@@ -573,42 +684,72 @@ mod tests {
         assert_eq!(clamp_positions(&positions, wm), positions);
     }
 
-    /// Fix round 1, C4 (progress guarantee, second half): a page whose
-    /// windows were non-empty but which emitted nothing and advanced no
-    /// position must be recognized as stalled — this is the "identical
-    /// cursor forever" case the reviewer flagged (realistically triggered by
-    /// a compaction/retention race between the watermark fetch and the
-    /// scan). Exercised here as a pure predicate since reproducing an actual
-    /// compaction race deterministically against a real broker isn't
-    /// practical; `run_page` wires this in directly (see its `page_stalled`
-    /// call).
-    #[test]
-    fn page_stalled_detects_no_emitted_records_and_no_advance() {
-        let windows = vec![range::PartitionRange { partition: 0, start: 0, end: 5 }];
-        let positions = vec![(0, 5)];
-        let new_positions = vec![(0, 5)]; // unchanged
-        assert!(page_stalled(&windows, 0, &positions, &new_positions));
+    fn raw(partition: i32, offset: i64, ts: Option<i64>) -> RawRecord {
+        RawRecord { partition, offset, timestamp_ms: ts, key: None, value: Some(b"x".to_vec()), headers: vec![] }
     }
 
     #[test]
-    fn page_stalled_is_false_when_records_were_emitted() {
-        let windows = vec![range::PartitionRange { partition: 0, start: 0, end: 5 }];
-        let positions = vec![(0, 5)];
-        let new_positions = vec![(0, 5)]; // unchanged, but records *were* emitted
-        assert!(!page_stalled(&windows, 3, &positions, &new_positions));
+    fn adjacent_offset_back_is_top_of_window() {
+        let w = range::PartitionRange { partition: 0, start: 5, end: 10 };
+        assert_eq!(adjacent_offset(&w, Direction::Back), 9);
     }
 
     #[test]
-    fn page_stalled_is_false_when_position_advanced() {
-        let windows = vec![range::PartitionRange { partition: 0, start: 0, end: 5 }];
-        let positions = vec![(0, 5)];
-        let new_positions = vec![(0, 2)]; // advanced, even with 0 emitted
-        assert!(!page_stalled(&windows, 0, &positions, &new_positions));
+    fn adjacent_offset_forward_is_bottom_of_window() {
+        let w = range::PartitionRange { partition: 0, start: 5, end: 10 };
+        assert_eq!(adjacent_offset(&w, Direction::Forward), 5);
     }
 
     #[test]
-    fn page_stalled_is_false_when_no_windows_were_requested() {
+    fn merge_prefers_back_picks_higher_timestamp() {
+        let newer = raw(0, 1, Some(300));
+        let older = raw(1, 1, Some(200));
+        assert!(merge_prefers(Direction::Back, &newer, &older));
+        assert!(!merge_prefers(Direction::Back, &older, &newer));
+    }
+
+    #[test]
+    fn merge_prefers_forward_picks_lower_timestamp() {
+        let older = raw(0, 1, Some(200));
+        let newer = raw(1, 1, Some(300));
+        assert!(merge_prefers(Direction::Forward, &older, &newer));
+        assert!(!merge_prefers(Direction::Forward, &newer, &older));
+    }
+
+    #[test]
+    fn merge_prefers_ties_break_by_offset_per_direction() {
+        // Same partition, same timestamp: only one of these two records can
+        // ever be a merge candidate at once in practice (see `merge_prefers`'s
+        // doc comment), but the tie-break must still be well-defined.
+        let higher_offset = raw(0, 5, Some(100));
+        let lower_offset = raw(0, 3, Some(100));
+        assert!(merge_prefers(Direction::Back, &higher_offset, &lower_offset), "Back prefers the higher offset on a tie");
+        assert!(merge_prefers(Direction::Forward, &lower_offset, &higher_offset), "Forward prefers the lower offset on a tie");
+    }
+
+    /// Fix round 2, N2/N3 (replaces round 1's dead/wrong `page_stalled`):
+    /// non-empty windows, nothing taken, not cancelled ⇒ a real "no
+    /// progress" condition that must surface as an error.
+    #[test]
+    fn page_made_no_progress_true_when_windows_nonempty_and_nothing_taken() {
+        assert!(page_made_no_progress(true, true, false));
+    }
+
+    #[test]
+    fn page_made_no_progress_false_when_something_was_taken() {
+        assert!(!page_made_no_progress(true, false, false));
+    }
+
+    #[test]
+    fn page_made_no_progress_false_when_no_windows_were_requested() {
         // Already fully at the edge: nothing to scan, not a stall.
-        assert!(!page_stalled(&[], 0, &[(0, 0)], &[(0, 0)]));
+        assert!(!page_made_no_progress(false, true, false));
+    }
+
+    #[test]
+    fn page_made_no_progress_false_when_cancelled() {
+        // A client disconnect mid-scan can legitimately leave nothing taken;
+        // that's not a broker anomaly and must not be reported as one.
+        assert!(!page_made_no_progress(true, true, true));
     }
 }
