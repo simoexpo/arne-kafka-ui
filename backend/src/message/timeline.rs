@@ -126,49 +126,48 @@ pub fn page_windows(
 }
 
 /// Advances `positions` past the given `windows` (the page just consumed),
-/// returning the new positions and whether the topic's edge was reached in
-/// `direction`.
+/// returning the new positions and whether every partition has reached the
+/// true topic edge in `direction`.
 ///
-/// A partition with no entry in `windows` had zero room to begin with —
-/// `page_windows` only omits a partition when its position was *already*
-/// sitting at the low (Back) or high (Forward) watermark, so that
-/// partition's position is unambiguously at the edge and is left
-/// unchanged.
-///
-/// For a partition that *does* have a window, whether it was clamped by
-/// the watermark (edge reached) or simply given a full `span`-sized page
-/// (more data may remain beyond it) isn't recoverable from `windows` alone
-/// — that distinction needs either the original `span` or the watermarks
-/// themselves, and this function's signature (matching the brief/tests)
-/// receives neither. As the best available proxy: `page_windows` applies
-/// one uniform `span` across every partition in a single call, so a
-/// partition whose window is shorter than the batch's widest window must
-/// have been clamped by its watermark. The partition(s) tied for the
-/// widest window are, strictly speaking, undetermined by this function
-/// alone (see task-1 report for this as a flagged concern) — they're
-/// treated as also having hit the edge, which is the direction that fails
-/// safe: a caller that later re-derives exhaustion from fresh watermarks
-/// (as the real SSE handler will) simply sees more data on the next
-/// request rather than this function silently hiding any.
+/// Fix round 1 (see task-1 report): the original 3-argument signature
+/// (`positions`, `windows`, `direction`) could not distinguish "clamped by
+/// the watermark" from "given a full `span`-sized page, more data beyond"
+/// using only the consumed windows — the shipped proxy for that was a
+/// tautology (`window.len() <= max(all window lens)` is true of every
+/// window, including the widest one, unconditionally), so it reported
+/// `exhausted: true` on every page. `watermarks` is now passed explicitly
+/// and the edge test is exact: for `Back`, a partition is at its edge once
+/// its new position equals that partition's low watermark; for `Forward`,
+/// once it equals the high watermark. A partition absent from `windows`
+/// (its window was empty — `page_windows` only omits a partition when its
+/// position is already sitting at that edge) is at its edge by definition,
+/// with its position left unchanged. `exhausted` is true iff every
+/// partition is at its edge.
 pub fn advance(
     positions: &[(i32, i64)],
     windows: &[range::PartitionRange],
+    watermarks: &[(i32, i64, i64)],
     direction: Direction,
 ) -> (Vec<(i32, i64)>, bool) {
-    let find = |p: i32| windows.iter().find(|w| w.partition == p);
+    let find_window = |p: i32| windows.iter().find(|w| w.partition == p);
+    let find_watermark = |p: i32| watermarks.iter().find(|(wp, _, _)| *wp == p);
 
-    let new_positions = positions
+    let new_positions: Vec<(i32, i64)> = positions
         .iter()
-        .map(|&(p, pos)| match find(p) {
+        .map(|&(p, pos)| match find_window(p) {
             Some(w) => (p, match direction { Direction::Back => w.start, Direction::Forward => w.end }),
             None => (p, pos),
         })
         .collect();
 
-    let widest = windows.iter().map(|w| (w.end - w.start) as u64).max();
-    let exhausted = positions.iter().all(|&(p, _)| match find(p) {
-        None => true,
-        Some(w) => widest.is_none_or(|m| (w.end - w.start) as u64 <= m),
+    let exhausted = new_positions.iter().all(|&(p, pos)| match find_watermark(p) {
+        Some(&(_, lo, hi)) => match direction {
+            Direction::Back => pos == lo,
+            Direction::Forward => pos == hi,
+        },
+        // No watermark on record for this partition: nothing to compare
+        // against, so it can't be asserted at an edge.
+        None => false,
     });
 
     (new_positions, exhausted)
@@ -222,7 +221,7 @@ mod tests {
     #[test]
     fn advance_back_moves_down_and_detects_exhaustion() {
         let w = page_windows(&[(0, 60), (1, 5)], WM, Direction::Back, 100);
-        let (p, exhausted) = advance(&[(0, 60), (1, 5)], &w, Direction::Back);
+        let (p, exhausted) = advance(&[(0, 60), (1, 5)], &w, WM, Direction::Back);
         assert_eq!(p, vec![(0, 10), (1, 0)]);
         assert!(exhausted); // both hit low watermark
     }
@@ -230,8 +229,33 @@ mod tests {
     #[test]
     fn advance_forward_detects_edge_against_high() {
         let w = page_windows(&[(0, 100), (1, 5)], WM, Direction::Forward, 50);
-        let (p, exhausted) = advance(&[(0, 100), (1, 5)], &w, Direction::Forward);
+        let (p, exhausted) = advance(&[(0, 100), (1, 5)], &w, WM, Direction::Forward);
         assert_eq!(p, vec![(0, 110), (1, 5)]);
         assert!(exhausted);
+    }
+
+    #[test]
+    fn first_page_of_deep_partition_is_not_exhausted() {
+        let wm: &[(i32, i64, i64)] = &[(0, 0, 1_000_000)];
+        let positions = initial_positions(wm, &Anchor::Latest);
+        let w = page_windows(&positions, wm, Direction::Back, 100);
+        let (p, exhausted) = advance(&positions, &w, wm, Direction::Back);
+        assert_eq!(p, vec![(0, 999_900)]);
+        assert!(!exhausted);
+    }
+
+    #[test]
+    fn imbalanced_partitions_exhaust_independently() {
+        let wm: &[(i32, i64, i64)] = &[(0, 0, 1000), (1, 0, 5)];
+        let positions = initial_positions(wm, &Anchor::Latest);
+        let w = page_windows(&positions, wm, Direction::Back, 100);
+        let (p, exhausted) = advance(&positions, &w, wm, Direction::Back);
+        assert_eq!(p, vec![(0, 900), (1, 0)]);
+        assert!(!exhausted); // partition 0 still has plenty of room left
+
+        let w2 = page_windows(&p, wm, Direction::Back, 1000);
+        let (p2, exhausted2) = advance(&p, &w2, wm, Direction::Back);
+        assert_eq!(p2, vec![(0, 0), (1, 0)]);
+        assert!(exhausted2); // both partitions now at their low watermark
     }
 }
