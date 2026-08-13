@@ -1,0 +1,199 @@
+import { act, renderHook } from '@testing-library/react'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { FakeEventSource } from '../../test/fake-event-source'
+import { useTimelinePage } from './useTimelinePage'
+import type { MessageOut } from '../../api/types'
+
+beforeEach(() => FakeEventSource.install())
+afterEach(() => FakeEventSource.uninstall())
+
+const mk = (offset: number): MessageOut => ({
+  partition: 0,
+  offset,
+  timestamp_ms: 100 + offset,
+  key: null,
+  value: { encoding: 'utf8', text: `v${offset}`, schema_id: null, error: null },
+  headers: [],
+})
+
+describe('useTimelinePage', () => {
+  it('builds the request url from loadPage params', () => {
+    const { result } = renderHook(() => useTimelinePage('prod', 'orders'))
+    act(() => {
+      result.current.loadPage({ direction: 'back', limit: 100, anchor: 'latest' }, vi.fn())
+    })
+    expect(FakeEventSource.instances[0].url).toBe(
+      '/api/clusters/prod/topics/orders/timeline?direction=back&limit=100&anchor=latest',
+    )
+    expect(result.current.state.loading).toBe(true)
+  })
+
+  it('delivers matches to onMatches at page_end when under the batch threshold', () => {
+    const { result } = renderHook(() => useTimelinePage('prod', 'orders'))
+    const onMatches = vi.fn()
+    act(() => {
+      result.current.loadPage({ direction: 'back', limit: 100, anchor: 'latest' }, onMatches)
+    })
+    const es = FakeEventSource.instances[0]
+    act(() => {
+      es.emit('match', mk(1))
+      es.emit('match', mk(2))
+    })
+    expect(onMatches).not.toHaveBeenCalled()
+    act(() => {
+      es.emit('page_end', { cursor: 'c', exhausted: false })
+    })
+    expect(onMatches).toHaveBeenCalledTimes(1)
+    expect(onMatches.mock.calls[0][0].map((m: MessageOut) => m.offset)).toEqual([1, 2])
+    expect(result.current.state.loading).toBe(false)
+  })
+
+  it('flushes automatically at 25 matches, and again at page_end for the remainder', () => {
+    const { result } = renderHook(() => useTimelinePage('prod', 'orders'))
+    const onMatches = vi.fn()
+    act(() => {
+      result.current.loadPage({ direction: 'back', limit: 100, anchor: 'latest' }, onMatches)
+    })
+    const es = FakeEventSource.instances[0]
+    act(() => {
+      for (let i = 0; i < 30; i++) es.emit('match', mk(i))
+    })
+    expect(onMatches).toHaveBeenCalledTimes(1)
+    expect(onMatches.mock.calls[0][0]).toHaveLength(25)
+    act(() => {
+      es.emit('page_end', { cursor: 'c', exhausted: false })
+    })
+    expect(onMatches).toHaveBeenCalledTimes(2)
+    expect(onMatches.mock.calls[1][0]).toHaveLength(5)
+  })
+
+  it('page_end updates the direction-matching cursor and exhausted flag', () => {
+    const { result } = renderHook(() => useTimelinePage('prod', 'orders'))
+    act(() => {
+      result.current.loadPage({ direction: 'back', limit: 100, anchor: 'latest' }, vi.fn())
+    })
+    act(() => {
+      FakeEventSource.instances[0].emit('page_end', { cursor: 'c-back', exhausted: false })
+    })
+    expect(result.current.cursors.back).toBe('c-back')
+    expect(result.current.cursors.forward).toBeNull()
+    expect(result.current.state.exhausted.back).toBe(false)
+    expect(result.current.state.exhausted.forward).toBe(false)
+  })
+
+  it('a forward page_end never touches the back cursor/exhausted flag', () => {
+    const { result } = renderHook(() => useTimelinePage('prod', 'orders'))
+    act(() => {
+      result.current.loadPage({ direction: 'forward', limit: 100, anchor: 'beginning' }, vi.fn())
+    })
+    act(() => {
+      FakeEventSource.instances[0].emit('page_end', { cursor: 'c-fwd', exhausted: false })
+    })
+    expect(result.current.cursors.forward).toBe('c-fwd')
+    expect(result.current.cursors.back).toBeNull()
+    expect(result.current.state.exhausted.forward).toBe(false)
+    expect(result.current.state.exhausted.back).toBe(false)
+  })
+
+  it('an empty page with a non-null cursor delivers zero matches, no error, and leaves exhausted false', () => {
+    const { result } = renderHook(() => useTimelinePage('prod', 'orders'))
+    const onMatches = vi.fn()
+    act(() => {
+      result.current.loadPage({ direction: 'forward', limit: 100, cursor: 'c0' }, onMatches)
+    })
+    act(() => {
+      FakeEventSource.instances[0].emit('page_end', { cursor: 'c1', exhausted: false })
+    })
+    expect(result.current.cursors.forward).toBe('c1')
+    expect(result.current.state.exhausted.forward).toBe(false)
+    expect(result.current.state.error).toBeNull()
+    // Never called with matches, but the page resolved cleanly (no crash,
+    // no inferred end-of-data from the absence of onMatches calls).
+    expect(onMatches).not.toHaveBeenCalled()
+  })
+
+  it('exhausted: true with a null cursor is the only end-of-data signal', () => {
+    const { result } = renderHook(() => useTimelinePage('prod', 'orders'))
+    act(() => {
+      result.current.loadPage({ direction: 'forward', limit: 100, anchor: 'beginning' }, vi.fn())
+    })
+    act(() => {
+      FakeEventSource.instances[0].emit('page_end', { cursor: null, exhausted: true })
+    })
+    expect(result.current.cursors.forward).toBeNull()
+    expect(result.current.state.exhausted.forward).toBe(true)
+  })
+
+  it('a new loadPage closes the previous in-flight stream', () => {
+    const { result } = renderHook(() => useTimelinePage('prod', 'orders'))
+    act(() => {
+      result.current.loadPage({ direction: 'back', limit: 100, anchor: 'latest' }, vi.fn())
+    })
+    const first = FakeEventSource.instances[0]
+    act(() => {
+      result.current.loadPage({ direction: 'forward', limit: 100, anchor: 'beginning' }, vi.fn())
+    })
+    expect(first.closed).toBe(true)
+    expect(FakeEventSource.instances[1].closed).toBe(false)
+  })
+
+  it('closes the stream after page_end (terminal)', () => {
+    const { result } = renderHook(() => useTimelinePage('prod', 'orders'))
+    act(() => {
+      result.current.loadPage({ direction: 'back', limit: 100, anchor: 'latest' }, vi.fn())
+    })
+    act(() => {
+      FakeEventSource.instances[0].emit('page_end', { cursor: 'c', exhausted: false })
+    })
+    expect(FakeEventSource.instances.at(-1)!.closed).toBe(true)
+  })
+
+  it('closes the stream after error (terminal) and surfaces the error message', () => {
+    const { result } = renderHook(() => useTimelinePage('prod', 'orders'))
+    act(() => {
+      result.current.loadPage({ direction: 'back', limit: 100, anchor: 'latest' }, vi.fn())
+    })
+    act(() => {
+      FakeEventSource.instances[0].emit('error', {
+        code: 'kafka_error',
+        message: 'boom',
+        cluster: 'prod',
+        retriable: true,
+      })
+    })
+    expect(FakeEventSource.instances.at(-1)!.closed).toBe(true)
+    expect(result.current.state.error).toBe('boom')
+    expect(result.current.state.loading).toBe(false)
+  })
+
+  it('reports progress updates', () => {
+    const { result } = renderHook(() => useTimelinePage('prod', 'orders'))
+    act(() => {
+      result.current.loadPage({ direction: 'back', limit: 100, anchor: 'latest' }, vi.fn())
+    })
+    act(() => {
+      FakeEventSource.instances[0].emit('progress', { scanned: 10, matches: 2, budget: 250000 })
+    })
+    expect(result.current.state.progress).toEqual({ scanned: 10, matches: 2, budget: 250000 })
+  })
+
+  it('cancel() closes the in-flight stream', () => {
+    const { result } = renderHook(() => useTimelinePage('prod', 'orders'))
+    act(() => {
+      result.current.loadPage({ direction: 'back', limit: 100, anchor: 'latest' }, vi.fn())
+    })
+    act(() => {
+      result.current.cancel()
+    })
+    expect(FakeEventSource.instances[0].closed).toBe(true)
+  })
+
+  it('unmount cleans up any in-flight stream', () => {
+    const { result, unmount } = renderHook(() => useTimelinePage('prod', 'orders'))
+    act(() => {
+      result.current.loadPage({ direction: 'back', limit: 100, anchor: 'latest' }, vi.fn())
+    })
+    unmount()
+    expect(FakeEventSource.instances[0].closed).toBe(true)
+  })
+})
