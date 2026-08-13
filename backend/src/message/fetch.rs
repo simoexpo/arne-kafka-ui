@@ -8,7 +8,7 @@ use rdkafka::consumer::{BaseConsumer, Consumer};
 use rdkafka::message::{Headers, Message};
 use rdkafka::topic_partition_list::TopicPartitionList;
 use rdkafka::Offset;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
@@ -48,19 +48,47 @@ pub fn watermarks_blocking(handle: &ClusterHandle, topic: &str) -> Result<Vec<(i
     Ok(wm)
 }
 
+/// Result of a bounded Kafka fetch: the records actually delivered, plus
+/// which requested partitions were scanned to *completion* — i.e. the poll
+/// loop reached that partition's target offset or `PartitionEOF`, as
+/// opposed to stopping early because of this function's own deadline or
+/// `cap`.
+///
+/// Fix round 3, N4: this distinction matters because Kafka topics
+/// legitimately have offset holes that carry no message at all —
+/// transaction control records (a committed transaction's own commit
+/// marker consumes a real offset, typically the last one before the
+/// partition's high watermark), aborted-transaction ranges, and compacted
+/// tombstones. A partition marked complete here had its *entire* requested
+/// range scanned, so any offsets in that range absent from `records` are
+/// confirmed, legitimate holes — never mistaken for data that might still
+/// be sitting behind a slow poll. A partition *not* marked complete
+/// stopped for an unknown reason (deadline, `cap`, cancellation) and its
+/// gaps (if any) cannot be trusted the same way.
+#[derive(Debug)]
+pub struct FetchOutcome {
+    pub records: Vec<RawRecord>,
+    pub complete: HashSet<i32>,
+}
+
 pub fn fetch_ranges_blocking(
     cfg: &ClusterConfig,
     topic: &str,
     ranges: &[PartitionRange],
     cap: usize,
     cancelled: &AtomicBool,
-) -> Result<Vec<RawRecord>, ApiError> {
-    // Ranges with start >= end have nothing to fetch (e.g. offset beyond the
-    // high watermark) — drop them before assigning so the poll loop's `done`
-    // map only tracks partitions that can actually terminate.
+) -> Result<FetchOutcome, ApiError> {
+    // A partition whose requested range is already empty (start >= end —
+    // e.g. an offset beyond the high watermark) has nothing to fetch and is
+    // trivially complete: there's no ambiguity about what's in an empty
+    // range.
+    let trivially_complete: HashSet<i32> = ranges.iter().filter(|r| r.start >= r.end).map(|r| r.partition).collect();
+    // Ranges with start >= end have nothing to fetch — drop them before
+    // assigning so the poll loop's `done` map only tracks partitions that
+    // can actually terminate.
     let ranges: Vec<PartitionRange> = ranges.iter().filter(|r| r.start < r.end).cloned().collect();
     if ranges.is_empty() {
-        return Ok(Vec::new());
+        return Ok(FetchOutcome { records: Vec::new(), complete: trivially_complete });
     }
     // librdkafka's consumer machinery requires a group.id even for pure
     // assign()-based fetches with no group management involved; each fetch
@@ -126,7 +154,9 @@ pub fn fetch_ranges_blocking(
             Some(Err(_)) | None => {} // transient; deadline bounds us
         }
     }
-    Ok(out)
+    let mut complete: HashSet<i32> = done.into_iter().filter(|&(_, d)| d).map(|(p, _)| p).collect();
+    complete.extend(trivially_complete);
+    Ok(FetchOutcome { records: out, complete })
 }
 
 pub async fn to_message_out(records: Vec<RawRecord>, sr: Option<&SchemaRegistry>) -> Vec<MessageOut> {

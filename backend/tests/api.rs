@@ -771,6 +771,81 @@ async fn timeline_bad_params_on_unknown_cluster_is_400_not_404() {
     assert_eq!(body["code"], "bad_request");
 }
 
+/// Fix round 3, N4 + N6 (reviewer's exact reproduction): a real Kafka
+/// transactional producer commits `count` records to a single-partition
+/// topic. The commit leaves a legitimate offset hole (the transaction's own
+/// control record, never delivered by `poll()`) at the offset immediately
+/// below the high watermark — a perfectly healthy topic, zero broker
+/// slowness, zero compaction.
+///
+/// Before this fix, `back`/`latest` on this topic terminated in a
+/// `kafka_error` with zero rows (round 2's N3 short-read guard mistook the
+/// hole at the position-adjacent offset for a short read on *every*
+/// partition, tripping the "no progress" guard), and `forward`/`beginning`
+/// returned all the records but with `exhausted: false` (round 2's
+/// count-based cursor math, N6, landed 1 offset short of the true low/high
+/// watermark because it subtracted a record *count* across a range that
+/// actually spanned one more offset than that — the hole).
+///
+/// N4 (fetch completeness) and N6 (offset-exact cursor math) fixed together:
+/// a fully-scanned (complete) partition's holes are trusted as legitimate,
+/// and the cursor advances to the exact min/max *offset* actually taken,
+/// not a record count — so a single page correctly reaches `exhausted:
+/// true` with no error, in both directions.
+#[tokio::test]
+async fn timeline_transactional_commit_hole_is_not_a_short_read() {
+    let bootstrap = start_kafka().await;
+    create_topic(&bootstrap, "tl-txn-topic", 1).await;
+    produce_transactional(&bootstrap, "tl-txn-topic", 4).await;
+    let state = state_for(&bootstrap, vec![]);
+
+    let back = collect_sse(app(state.clone()), "/api/clusters/test/topics/tl-txn-topic/timeline?direction=back&limit=10&anchor=latest", 200).await;
+    assert!(back.iter().all(|(n, _)| n != "error"), "back must not error on a legitimate transaction-commit hole: {back:?}");
+    let back_matches: Vec<_> = back.iter().filter(|(n, _)| n == "match").collect();
+    assert_eq!(back_matches.len(), 4, "back: {back:?}");
+    let (_, back_end) = back.iter().find(|(n, _)| n == "page_end").expect("page_end present").clone();
+    assert_eq!(back_end["exhausted"], true, "back: {back_end}");
+    assert!(back_end["cursor"].is_null());
+
+    let forward = collect_sse(app(state), "/api/clusters/test/topics/tl-txn-topic/timeline?direction=forward&limit=10&anchor=beginning", 200).await;
+    assert!(forward.iter().all(|(n, _)| n != "error"), "forward must not error on a legitimate transaction-commit hole: {forward:?}");
+    let forward_matches: Vec<_> = forward.iter().filter(|(n, _)| n == "match").collect();
+    assert_eq!(forward_matches.len(), 4, "forward: {forward:?}");
+    let (_, forward_end) = forward.iter().find(|(n, _)| n == "page_end").expect("page_end present").clone();
+    assert_eq!(forward_end["exhausted"], true, "forward: {forward_end}");
+    assert!(forward_end["cursor"].is_null());
+}
+
+/// Fix round 3, N5: a cursor decoded to positions `[(0, 0), (99, 5)]`
+/// against a 1-partition topic (no watermark entry for partition 99) must
+/// behave as if positions were just `[(0, 0)]` — the unknown partition is
+/// dropped, not carried through forever with nothing to clamp or exhaust it
+/// against (which, before this fix, could keep the page's overall
+/// `exhausted` stuck at `false` even once the real partition finished).
+#[tokio::test]
+async fn timeline_cursor_with_unknown_partition_terminates_properly() {
+    let bootstrap = start_kafka().await;
+    create_topic(&bootstrap, "tl-unknown-partition-topic", 1).await;
+    produce(&bootstrap, "tl-unknown-partition-topic", 3).await;
+    let state = state_for(&bootstrap, vec![]);
+
+    let cursor = betrachtung::message::timeline::Cursor {
+        direction: betrachtung::message::timeline::Direction::Forward,
+        positions: vec![(0, 0), (99, 5)],
+    }.encode();
+    let events = collect_sse(
+        app(state),
+        &format!("/api/clusters/test/topics/tl-unknown-partition-topic/timeline?direction=forward&limit=10&cursor={}", urlencoding::encode(&cursor)),
+        200,
+    ).await;
+    assert!(events.iter().all(|(n, _)| n != "error"), "unknown partition in cursor must not error: {events:?}");
+    let matches: Vec<_> = events.iter().filter(|(n, _)| n == "match").collect();
+    assert_eq!(matches.len(), 3, "events: {events:?}");
+    let (_, end) = events.iter().find(|(n, _)| n == "page_end").expect("page_end present").clone();
+    assert_eq!(end["exhausted"], true, "must terminate properly, not get stuck on the phantom partition: {end}");
+    assert!(end["cursor"].is_null());
+}
+
 #[tokio::test]
 async fn spa_fallback_serves_html_for_unknown_paths() {
     let bootstrap = start_kafka().await;

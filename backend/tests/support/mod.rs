@@ -7,7 +7,7 @@ use betrachtung::state::AppState;
 use http_body_util::BodyExt;
 use rdkafka::admin::{AdminClient, AdminOptions, NewTopic, TopicReplication};
 use rdkafka::consumer::{BaseConsumer, CommitMode, Consumer};
-use rdkafka::producer::{FutureProducer, FutureRecord};
+use rdkafka::producer::{FutureProducer, FutureRecord, Producer};
 use rdkafka::ClientConfig;
 use std::sync::Arc;
 use std::time::Duration;
@@ -37,6 +37,15 @@ pub async fn start_kafka() -> String {
             // hook ran, the leftover container is adopted (and reset below)
             // instead of colliding on the name — residue is bounded at one.
             let container = Kafka::default()
+                // The image only defaults `KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR`
+                // to 1 for this single-broker cluster; the transaction
+                // coordinator's own internal topic (`__transaction_state`)
+                // still defaults to replication factor 3 and min-ISR 2,
+                // which a 1-broker cluster can never satisfy — without these,
+                // `init_transactions` (used by `produce_transactional`, fix
+                // round 3's N4 test) hangs/times out forever, not transiently.
+                .with_env_var("KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR", "1")
+                .with_env_var("KAFKA_TRANSACTION_STATE_LOG_MIN_ISR", "1")
                 .with_container_name(KAFKA_CONTAINER_NAME)
                 .with_reuse(ReuseDirective::Always)
                 .start()
@@ -257,6 +266,64 @@ pub async fn produce_at(bootstrap: &str, topic: &str, partition: i32, key: &str,
         )
         .await
         .unwrap();
+}
+
+/// Produces `count` messages (keys/values `k0`/`v0` .. ) to `topic` inside
+/// one committed Kafka transaction.
+///
+/// Fix round 3, N4: this reproduces a real, healthy-topic offset hole with
+/// zero broker slowness or compaction involved — a committed transaction's
+/// own commit *control record* consumes a real offset in the partition
+/// (typically the one immediately below the high watermark) but is never
+/// delivered to a consumer's `poll()` as an application message. A
+/// same-partition topic produced this way has exactly `count` real records
+/// at offsets `0..count`, plus one hole at offset `count` (the control
+/// record) — the high watermark is `count + 1`, not `count`.
+///
+/// Each call uses a fresh, process-and-time-unique `transactional.id`: Kafka
+/// requires transactional producers to have a stable id, and reusing one
+/// across the container's reused lifetime (see `start_kafka`'s reuse
+/// comment) risks fencing a still-open transaction from a previous run.
+pub async fn produce_transactional(bootstrap: &str, topic: &str, count: usize) {
+    let unique = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+    let txn_id = format!("betrachtung-test-txn-{}-{unique}", std::process::id());
+    let mut cc = client(bootstrap);
+    cc.set("transactional.id", &txn_id);
+    let producer: FutureProducer = cc.create().unwrap();
+    // The transaction coordinator (backed by the internal
+    // `__transaction_state` topic) can still be electing/loading right after
+    // a fresh init or a burst of prior transactional activity in the reused
+    // container; librdkafka reports that as a retriable transaction error
+    // ("retry call to resume"), not a real failure — so retry `init_transactions`
+    // for a bit instead of treating the first timeout as fatal.
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        match producer.init_transactions(Duration::from_secs(10)) {
+            Ok(()) => break,
+            Err(rdkafka::error::KafkaError::Transaction(e)) if e.is_retriable() && std::time::Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(500));
+            }
+            Err(e) => panic!("init_transactions failed: {e}"),
+        }
+    }
+    producer.begin_transaction().unwrap();
+    for i in 0..count {
+        let key = format!("k{i}");
+        let value = format!("v{i}");
+        producer
+            .send(FutureRecord::to(topic).key(&key).payload(&value), Duration::from_secs(10))
+            .await
+            .unwrap();
+    }
+    loop {
+        match producer.commit_transaction(Duration::from_secs(10)) {
+            Ok(()) => break,
+            Err(rdkafka::error::KafkaError::Transaction(e)) if e.is_retriable() && std::time::Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(500));
+            }
+            Err(e) => panic!("commit_transaction failed: {e}"),
+        }
+    }
 }
 
 pub async fn produce(bootstrap: &str, topic: &str, count: usize) {

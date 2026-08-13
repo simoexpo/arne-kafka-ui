@@ -113,6 +113,9 @@ pub async fn browse(
         }).await.map_err(|e| ApiError::internal(format!("task join: {e}")))??
     };
 
+    // browse() doesn't need per-partition completeness (fix round 3's
+    // `FetchOutcome::complete` — that distinction only matters to
+    // `timeline::run_page`'s cursor math), just the records themselves.
     let records = {
         let cfg = handle.config.clone();
         let topic = topic.clone();
@@ -122,7 +125,7 @@ pub async fn browse(
             // concept (unlike the SSE endpoints' `CancelOnDrop`), so it
             // always passes a flag that's never set.
             fetch::fetch_ranges_blocking(&cfg, &topic, &ranges, (limit as usize) * ranges.len().max(1), &AtomicBool::new(false))
-        }).await.map_err(|e| ApiError::internal(format!("task join: {e}")))??
+        }).await.map_err(|e| ApiError::internal(format!("task join: {e}")))??.records
     };
 
     let mut messages = fetch::to_message_out(records, handle.schema_registry.as_deref()).await;
