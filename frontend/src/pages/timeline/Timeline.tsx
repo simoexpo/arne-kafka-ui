@@ -126,9 +126,23 @@ export function Timeline({ cluster, topic }: { cluster: string; topic: string })
   }, [])
 
   const runPage = useCallback(
-    (direction: Direction, params: TimelinePageParams, opts: { resetIteration: boolean }) => {
-      if (opts.resetIteration) {
-        iterationRef.current = 0
+    (
+      direction: Direction,
+      params: TimelinePageParams,
+      // resetIteration: restarts the auto-continue cap counter (every fresh
+      // page request needs this — a load-older click, a jump, or the
+      // continue-scan button all get a new run at the cap). resetGesture:
+      // zeroes the running scanned/matches totals; defaults to
+      // resetIteration's value, EXCEPT continueScan explicitly passes
+      // `false` — clicking "continue" resumes the SAME gesture the cap
+      // interrupted, so the totals the user already saw must keep growing,
+      // never snap back to 0. Every other resetIteration:true call site
+      // (mount, applyFilter, loadOlder/loadNewer, jumps) is a genuinely NEW
+      // gesture and resets both together.
+      opts: { resetIteration: boolean; resetGesture?: boolean },
+    ) => {
+      if (opts.resetIteration) iterationRef.current = 0
+      if (opts.resetGesture ?? opts.resetIteration) {
         gestureScannedRef.current = 0
         gestureMatchesRef.current = 0
       }
@@ -419,7 +433,12 @@ export function Timeline({ cluster, topic }: { cluster: string; topic: string })
     if (continueDirection === null) return
     const cursor = cursors[continueDirection]
     if (cursor === null) return
-    runPage(continueDirection, withFilter({ direction: continueDirection, limit: PAGE_LIMIT, cursor }), { resetIteration: true })
+    // resetGesture: false — continuing past the cap is the SAME gesture,
+    // not a new one; only the cap counter itself restarts.
+    runPage(continueDirection, withFilter({ direction: continueDirection, limit: PAGE_LIMIT, cursor }), {
+      resetIteration: true,
+      resetGesture: false,
+    })
   }
 
   const showLoadOlder = cursors.back !== null && !state.exhausted.back

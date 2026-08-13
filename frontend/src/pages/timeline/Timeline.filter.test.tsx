@@ -207,4 +207,98 @@ describe('Timeline filter box', () => {
     const last = FakeEventSource.instances.at(-1)!
     expect(last.url).toBe('/api/clusters/prod/topics/orders/timeline?direction=back&limit=100&anchor=latest')
   })
+
+  it('clicking continue after the cap preserves prior gesture totals and adds to them, never restarting from zero', async () => {
+    mockTail()
+    await mountAndSettleInitial()
+
+    typeFilter('value:needle')
+    await settle()
+
+    let totalScanned = 0
+    for (let i = 0; i < 25; i++) {
+      const idx = FakeEventSource.instances.length - 1
+      totalScanned += 50
+      await emit(idx, 'progress', { scanned: 50, matches: 0, budget: 250000 })
+      await emit(idx, 'page_end', { cursor: `c${i + 1}`, exhausted: false })
+      if (screen.queryByTestId('continue-scan')) break
+    }
+    const btn = screen.getByTestId('continue-scan')
+    expect(btn).toHaveTextContent(`scanned ${totalScanned} records · 0 matches — continue`)
+
+    fireEvent.click(btn)
+    // Immediately after clicking continue (before any new progress arrives)
+    // the running total must still reflect everything scanned before the
+    // click — it must NOT have been reset back to 0.
+    expect(screen.getByText(`scanned ${totalScanned} · 0 matches`)).toBeInTheDocument()
+
+    const idx2 = FakeEventSource.instances.length - 1
+    await emit(idx2, 'progress', { scanned: 30, matches: 0, budget: 250000 })
+    expect(screen.getByText(`scanned ${totalScanned + 30} · 0 matches`)).toBeInTheDocument()
+  })
+
+  it('withFilter merges the active filter onto load-older requests and jumps, and drops it after clearing', async () => {
+    mockTail()
+    await mountAndSettleInitial()
+
+    typeFilter('user.id=42')
+    await settle()
+    const filteredIdx = FakeEventSource.instances.length - 1
+    await emit(filteredIdx, 'match', mk(9))
+    await emit(filteredIdx, 'page_end', { cursor: 'c1', exhausted: false })
+
+    fireEvent.click(screen.getByTestId('load-older'))
+    expect(FakeEventSource.instances.at(-1)!.url).toBe(
+      '/api/clusters/prod/topics/orders/timeline?direction=back&limit=100&cursor=c1&filter=json_eq&q=42&path=user.id',
+    )
+    const olderIdx = FakeEventSource.instances.length - 1
+    await emit(olderIdx, 'page_end', { cursor: 'c2', exhausted: false })
+
+    fireEvent.click(screen.getByTestId('jump-now'))
+    expect(FakeEventSource.instances.at(-1)!.url).toBe(
+      '/api/clusters/prod/topics/orders/timeline?direction=back&limit=100&anchor=latest&filter=json_eq&q=42&path=user.id',
+    )
+    const jumpIdx = FakeEventSource.instances.length - 1
+    await emit(jumpIdx, 'page_end', { cursor: 'c3', exhausted: false })
+
+    // Clearing the filter drops it from every subsequent request too.
+    typeFilter('')
+    await settle()
+    const clearedIdx = FakeEventSource.instances.length - 1
+    await emit(clearedIdx, 'match', mk(1))
+    await emit(clearedIdx, 'page_end', { cursor: 'c4', exhausted: false })
+
+    fireEvent.click(screen.getByTestId('load-older'))
+    expect(FakeEventSource.instances.at(-1)!.url).toBe(
+      '/api/clusters/prod/topics/orders/timeline?direction=back&limit=100&cursor=c4',
+    )
+  })
+
+  it('after jumping to beginning, a settled filter change re-anchors forward/beginning', async () => {
+    mockTail()
+    await mountAndSettleInitial()
+
+    fireEvent.click(screen.getByTestId('jump-beginning'))
+    const beginIdx = FakeEventSource.instances.length - 1
+    await emit(beginIdx, 'page_end', { cursor: 'c-fwd', exhausted: false })
+
+    typeFilter('value:zzz')
+    await settle()
+
+    expect(FakeEventSource.instances.at(-1)!.url).toBe(
+      '/api/clusters/prod/topics/orders/timeline?direction=forward&limit=100&anchor=beginning&filter=value_contains&q=zzz',
+    )
+  })
+
+  it('unmounting mid-debounce issues no request once timers advance', async () => {
+    mockTail()
+    const { unmount } = render(<Timeline cluster="prod" topic="orders" />)
+    await emit(0, 'page_end', { cursor: null, exhausted: true })
+
+    const before = FakeEventSource.instances.length
+    typeFilter('abc')
+    unmount()
+    await settle()
+    expect(FakeEventSource.instances).toHaveLength(before)
+  })
 })
