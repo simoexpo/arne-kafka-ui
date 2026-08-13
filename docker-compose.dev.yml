@@ -46,6 +46,9 @@ services:
         /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:19092 --create --if-not-exists --topic demo-orders --partitions 3 --config cleanup.policy=delete
         /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:19092 --create --if-not-exists --topic demo-users --partitions 3 --config cleanup.policy=compact
         /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:19092 --create --if-not-exists --topic demo-audit --partitions 2 --config cleanup.policy=compact,delete
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:19092 --create --if-not-exists --topic sr-json --partitions 1 --config cleanup.policy=delete
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:19092 --create --if-not-exists --topic sr-avro --partitions 2 --config cleanup.policy=delete
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:19092 --create --if-not-exists --topic sr-proto --partitions 2 --config cleanup.policy=delete
         i=0
         while true; do
           i=$$((i+1))
@@ -88,4 +91,37 @@ services:
             /opt/kafka/bin/kafka-console-producer.sh --bootstrap-server kafka2:19092 --topic demo-audit \
               --property parse.key=true --property key.separator=: >/dev/null
           sleep 2
+        done
+
+  demo-producer-sr:
+    image: confluentinc/cp-schema-registry:7.7.1
+    depends_on: [kafka, schema-registry]
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        attempt=0
+        while ! curl -sf http://schema-registry:8081/subjects >/dev/null 2>&1; do
+          attempt=$$((attempt+1))
+          if [ $$attempt -ge 30 ]; then
+            echo "schema-registry not reachable after $$attempt attempts, proceeding anyway"
+            break
+          fi
+          sleep 2
+        done
+        i=0
+        while true; do
+          i=$$((i+1))
+          { for n in 1 2 3 4; do echo "{\"id\":$$((i*10+n)),\"item\":\"widget-$$((i*10+n))\"}"; done; } | \
+            kafka-avro-console-producer --bootstrap-server kafka:19092 --topic sr-avro \
+              --property schema.registry.url=http://schema-registry:8081 \
+              --property value.schema='{"type":"record","name":"Order","fields":[{"name":"id","type":"long"},{"name":"item","type":"string"}]}'
+          { for n in 1 2 3 4; do echo "{\"id\":$$((i*10+n)),\"name\":\"event-$$((i*10+n))\"}"; done; } | \
+            kafka-protobuf-console-producer --bootstrap-server kafka:19092 --topic sr-proto \
+              --property schema.registry.url=http://schema-registry:8081 \
+              --property value.schema='syntax = "proto3"; message Event { int64 id = 1; string name = 2; }'
+          { for n in 1 2 3 4; do echo "{\"id\":$$((i*10+n)),\"status\":\"open\"}"; done; } | \
+            kafka-json-schema-console-producer --bootstrap-server kafka:19092 --topic sr-json \
+              --property schema.registry.url=http://schema-registry:8081 \
+              --property value.schema='{"type":"object","properties":{"id":{"type":"integer"},"status":{"type":"string"}}}'
+          sleep 15
         done
