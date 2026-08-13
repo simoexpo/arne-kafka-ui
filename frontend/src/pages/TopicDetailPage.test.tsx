@@ -92,6 +92,51 @@ describe('TopicDetailView', () => {
     expect(screen.getByTestId('config-all-max.message.bytes')).toHaveTextContent('default')
   })
 
+  it('config tab filter box is hidden until "show all configs" is on', async () => {
+    vi.mocked(client.getTopicDetail).mockResolvedValue(detail)
+    renderWithQuery(<TopicDetailView cluster="prod" topic="orders" />)
+    await userEvent.click(screen.getByRole('button', { name: 'Config' }))
+    await screen.findByTestId('config-retention.ms')
+    expect(screen.queryByLabelText('filter configs')).not.toBeInTheDocument()
+    await userEvent.click(screen.getByRole('switch', { name: 'show all configs' }))
+    expect(await screen.findByPlaceholderText('filter configs…')).toBeInTheDocument()
+  })
+
+  it('config tab filter box narrows the full table to matching names', async () => {
+    vi.mocked(client.getTopicDetail).mockResolvedValue(detail)
+    renderWithQuery(<TopicDetailView cluster="prod" topic="orders" />)
+    await userEvent.click(screen.getByRole('button', { name: 'Config' }))
+    await userEvent.click(screen.getByRole('switch', { name: 'show all configs' }))
+    await userEvent.type(await screen.findByLabelText('filter configs'), 'retention')
+    expect(screen.getByTestId('config-all-retention.ms')).toBeInTheDocument()
+    expect(screen.getByTestId('config-all-retention.bytes')).toBeInTheDocument()
+    expect(screen.queryByTestId('config-all-cleanup.policy')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('config-all-max.message.bytes')).not.toBeInTheDocument()
+  })
+
+  it('config tab filter box shows a message when nothing matches', async () => {
+    vi.mocked(client.getTopicDetail).mockResolvedValue(detail)
+    renderWithQuery(<TopicDetailView cluster="prod" topic="orders" />)
+    await userEvent.click(screen.getByRole('button', { name: 'Config' }))
+    await userEvent.click(screen.getByRole('switch', { name: 'show all configs' }))
+    await userEvent.type(await screen.findByLabelText('filter configs'), 'zzz-nope')
+    expect(await screen.findByText('no matching configs')).toBeInTheDocument()
+    expect(screen.queryByTestId('config-all-retention.ms')).not.toBeInTheDocument()
+  })
+
+  it('config tab filter box resets when the switch is turned off and back on', async () => {
+    vi.mocked(client.getTopicDetail).mockResolvedValue(detail)
+    renderWithQuery(<TopicDetailView cluster="prod" topic="orders" />)
+    await userEvent.click(screen.getByRole('button', { name: 'Config' }))
+    const toggle = screen.getByRole('switch', { name: 'show all configs' })
+    await userEvent.click(toggle)
+    await userEvent.type(await screen.findByLabelText('filter configs'), 'retention')
+    await userEvent.click(toggle) // off
+    await userEvent.click(toggle) // on again
+    expect(await screen.findByLabelText('filter configs')).toHaveValue('')
+    expect(screen.getByTestId('config-all-cleanup.policy')).toBeInTheDocument()
+  })
+
   it('messages tab is shown by default', async () => {
     vi.mocked(client.getTopicDetail).mockResolvedValue(detail)
     renderWithQuery(<TopicDetailView cluster="prod" topic="orders" />)

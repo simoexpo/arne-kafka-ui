@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useMemo, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { useParams } from '@tanstack/react-router'
 import { getTopicDetail, getThroughput, getTopicConsumers } from '../api/client'
@@ -168,8 +168,13 @@ function GroupRow({ group }: { group: TopicGroupLag }) {
 
 function ConfigTab({ data, error, loading }: { data?: TopicDetail; error: unknown; loading: boolean }) {
   const [showAll, setShowAll] = useState(false)
+  const [filter, setFilter] = useState('')
   const configs = data?.configs ?? []
   const overridden = configs.filter((c) => !c.is_default)
+  const filteredConfigs = useMemo(() => {
+    const q = filter.trim().toLowerCase()
+    return q === '' ? configs : configs.filter((c) => c.name.toLowerCase().includes(q))
+  }, [configs, filter])
   const cleanupPolicy = configs.find((c) => c.name === 'cleanup.policy')
   const retentionMs = configs.find((c) => c.name === 'retention.ms')
   const retentionBytes = configs.find((c) => c.name === 'retention.bytes')
@@ -204,7 +209,10 @@ function ConfigTab({ data, error, loading }: { data?: TopicDetail; error: unknow
               role="switch"
               aria-checked={showAll}
               aria-label="show all configs"
-              onClick={() => setShowAll((v) => !v)}
+              onClick={() => {
+                setShowAll((v) => !v)
+                setFilter('')
+              }}
               className={`relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors ${
                 showAll ? 'bg-blue-600 dark:bg-blue-500' : 'bg-zinc-300 dark:bg-zinc-700'
               }`}
@@ -219,8 +227,19 @@ function ConfigTab({ data, error, loading }: { data?: TopicDetail; error: unknow
           </label>
           {showAll && (
             <div>
-              <h3 className="mb-2 text-xs font-medium text-zinc-500">All configs</h3>
-              <ConfigTable entries={configs} testPrefix="config-all" />
+              <div className="mb-2 flex items-center justify-between">
+                <h3 className="text-xs font-medium text-zinc-500">All configs</h3>
+                <input
+                  value={filter}
+                  onChange={(e) => setFilter(e.target.value)}
+                  placeholder="filter configs…"
+                  aria-label="filter configs"
+                  className="w-56 rounded border border-zinc-300 bg-transparent px-3 py-1.5 text-sm outline-none focus:border-zinc-500 dark:border-zinc-700"
+                />
+              </div>
+              {filteredConfigs.length === 0
+                ? <p className="text-sm text-zinc-500">no matching configs</p>
+                : <ConfigTable entries={filteredConfigs} testPrefix="config-all" />}
             </div>
           )}
         </div>
