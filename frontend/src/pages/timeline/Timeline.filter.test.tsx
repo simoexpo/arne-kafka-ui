@@ -55,6 +55,26 @@ function typeFilter(text: string) {
   fireEvent.change(screen.getByLabelText('filter messages'), { target: { value: text } })
 }
 
+// jsdom reports scrollHeight/clientHeight as 0 (no real layout) — stubbing
+// both lets the scroll-triggered-continue test below construct a "near the
+// bottom" scroll position. Mirrors the identical helpers in Timeline.test.tsx.
+function stubScrollHeight(value: number) {
+  const original = Object.getOwnPropertyDescriptor(Element.prototype, 'scrollHeight')
+  Object.defineProperty(Element.prototype, 'scrollHeight', { configurable: true, get: () => value })
+  return () => {
+    if (original) Object.defineProperty(Element.prototype, 'scrollHeight', original)
+    else delete (Element.prototype as unknown as Record<string, unknown>).scrollHeight
+  }
+}
+function stubClientHeight(value: number) {
+  const original = Object.getOwnPropertyDescriptor(Element.prototype, 'clientHeight')
+  Object.defineProperty(Element.prototype, 'clientHeight', { configurable: true, get: () => value })
+  return () => {
+    if (original) Object.defineProperty(Element.prototype, 'clientHeight', original)
+    else delete (Element.prototype as unknown as Record<string, unknown>).clientHeight
+  }
+}
+
 async function settle(ms = 500) {
   await act(async () => {
     vi.advanceTimersByTime(ms)
@@ -258,6 +278,37 @@ describe('Timeline filter box', () => {
     const idx2 = FakeEventSource.instances.length - 1
     await emit(idx2, 'progress', { scanned: 30, matches: 0, budget: 250000 })
     expect(screen.getByText(`scanned ${totalScanned + 30} · 0 matches`)).toBeInTheDocument()
+  })
+
+  it('scrolling near the bottom while the continue affordance is showing continues the gesture (preserves totals), not a silent reset', async () => {
+    mockTail()
+    await mountAndSettleInitial()
+
+    typeFilter('value:needle')
+    await settle()
+    const idx = FakeEventSource.instances.length - 1
+    await emit(idx, 'match', mk(9))
+    await emit(idx, 'progress', { scanned: 5000, matches: 1, budget: 5000 })
+    // I2's partial-match budget stop: 1 match, cursor non-null, not
+    // exhausted -> continue-scan shows instead of load-older.
+    await emit(idx, 'page_end', { cursor: 'c1', exhausted: false })
+    expect(screen.getByTestId('continue-scan')).toHaveTextContent('scanned 5000 records · 1 matches — continue')
+
+    const restoreScrollHeight = stubScrollHeight(810)
+    const restoreClientHeight = stubClientHeight(600)
+    try {
+      fireEvent.scroll(screen.getByTestId('timeline-scroll'), { target: { scrollTop: 200 } })
+    } finally {
+      restoreScrollHeight()
+      restoreClientHeight()
+    }
+
+    // The scroll-triggered continuation must be the SAME gesture — totals
+    // must still reflect what was scanned before it, exactly like clicking
+    // the button does ("clicking continue after the cap preserves prior
+    // gesture totals"). A naive scroll-triggered `loadOlder()` would instead
+    // start a fresh gesture and reset the totals to 0.
+    expect(screen.getByText('scanned 5000 · 1 matches')).toBeInTheDocument()
   })
 
   it('withFilter merges the active filter onto load-older requests and jumps, and drops it after clearing', async () => {

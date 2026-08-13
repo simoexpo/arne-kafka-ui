@@ -31,6 +31,12 @@ const BUFFER_CAP = 500
 // Scroll offset below which the viewport counts as "pinned to top" —
 // roughly half a row, per the design spec's threshold.
 const TOP_PIN_THRESHOLD = 20
+// How close to the bottom (in px of unscrolled remaining distance) counts as
+// "reached the last row" for the bottom-sentinel scroll-triggered
+// pagination (spec: "scroll down -> next 100 older"). Same order of
+// magnitude as TOP_PIN_THRESHOLD, kept as its own named constant since it
+// guards a different feature (load-older, not live-pause).
+const BOTTOM_PIN_THRESHOLD = 20
 
 type Direction = 'back' | 'forward'
 // 'none': live inserts straight into the store. 'auto': paused by scrolling
@@ -343,25 +349,6 @@ export function Timeline({ cluster, topic }: { cluster: string; topic: string })
 
   const rows = storeRef.current.rows()
 
-  // Wired directly onto MessageList's real scroll element (scroll events
-  // don't bubble, so this can't live on a wrapper). Scrolling off the top
-  // auto-pauses (only from 'none' — 'auto'/'explicit' are already paused).
-  // Returning to the top auto-flushes + resumes, but ONLY if the pause was
-  // automatic: an explicit pause overrides top-pinning entirely.
-  const handleScroll = (scrollTop: number) => {
-    const pinnedTop = scrollTop < TOP_PIN_THRESHOLD
-    if (pinnedTop) {
-      if (pauseReasonRef.current === 'auto') {
-        flushBuffer()
-        pauseReasonRef.current = 'none'
-        bump()
-      }
-    } else if (pauseReasonRef.current === 'none') {
-      pauseReasonRef.current = 'auto'
-      bump()
-    }
-  }
-
   // Clicking the "▲ n new" pill always flushes; it only resumes when the
   // pause was automatic — an explicit pause stays paused (the pill just
   // clears what had built up so far).
@@ -446,6 +433,55 @@ export function Timeline({ cluster, topic }: { cluster: string; topic: string })
     if (cursors.forward === null) return
     runPage('forward', withFilter({ direction: 'forward', limit: PAGE_LIMIT, cursor: cursors.forward }), { resetIteration: true })
   }
+
+  // Wired directly onto MessageList's real scroll element (scroll events
+  // don't bubble, so this can't live on a wrapper). Scrolling off the top
+  // auto-pauses (only from 'none' — 'auto'/'explicit' are already paused).
+  // Returning to the top auto-flushes + resumes, but ONLY if the pause was
+  // automatic: an explicit pause overrides top-pinning entirely.
+  //
+  // Also the scroll-triggered pagination sentinels (spec: "scroll down ->
+  // next 100 older"): a bottom-sentinel reaching the last row loads the next
+  // older page automatically, mirroring the load-older button's own guards
+  // (a non-null back cursor, not already exhausted, not already loading —
+  // `loadOlder`/`loadNewer` already no-op on a null cursor, so the loading
+  // guard is the only one that needs restating here). The symmetric top
+  // edge only ever matters once a beginning-jump has opened a forward
+  // cursor (that's the only time `load-newer` is ever shown) — reusing the
+  // same top-pin check that already drives live-pause auto-resume. The
+  // manual load-older/load-newer buttons remain as a fallback affordance and
+  // the only way jsdom-driven tests can trigger paging (jsdom never
+  // actually scrolls).
+  //
+  // When the continue affordance (I2's partial-match budget stop, or the
+  // iteration-cap stop) is showing for a direction, the sentinel must drive
+  // `continueScan()` instead of `loadOlder`/`loadNewer` directly — those
+  // reset the gesture (resetGesture defaults to resetIteration:true), which
+  // would silently drop the running scanned/matches totals the continue
+  // affordance is displaying, exactly the "silent stop" I2 exists to avoid.
+  const handleScroll = (scrollTop: number, scrollHeight: number, clientHeight: number) => {
+    const pinnedTop = scrollTop < TOP_PIN_THRESHOLD
+    if (pinnedTop) {
+      if (pauseReasonRef.current === 'auto') {
+        flushBuffer()
+        pauseReasonRef.current = 'none'
+        bump()
+      }
+      if (cursors.forward !== null && !state.exhausted.forward && !state.loading) {
+        if (continueDirection === 'forward') continueScan()
+        else loadNewer()
+      }
+    } else if (pauseReasonRef.current === 'none') {
+      pauseReasonRef.current = 'auto'
+      bump()
+    }
+    const nearBottom = scrollHeight - (scrollTop + clientHeight) < BOTTOM_PIN_THRESHOLD
+    if (nearBottom && cursors.back !== null && !state.exhausted.back && !state.loading) {
+      if (continueDirection === 'back') continueScan()
+      else loadOlder()
+    }
+  }
+
   // Cancels the in-flight filtered page (leaving already-loaded rows
   // intact) without letting the empty-page auto-continue effect
   // immediately relaunch another page: clearing pendingDirectionRef BEFORE

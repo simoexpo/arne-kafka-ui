@@ -18,11 +18,13 @@ export const MessageList = forwardRef<
   {
     messages: readonly MessageOut[]
     // Forwarded directly onto the real scrolling element (not a wrapper) —
-    // scroll events don't bubble, so Timeline's top-pin detection needs the
-    // handler on the exact element the virtualizer scrolls. In real browsers
-    // this is `parentRef`'s scrollTop; jsdom tests drive it via
-    // `fireEvent.scroll` on this same element (found via its data-testid).
-    onScroll?: (scrollTop: number) => void
+    // scroll events don't bubble, so Timeline's top-pin/bottom-sentinel
+    // detection needs the handler on the exact element the virtualizer
+    // scrolls. In real browsers this is `parentRef`'s scrollTop/scrollHeight/
+    // clientHeight; jsdom tests drive it via `fireEvent.scroll` on this same
+    // element (found via its data-testid), stubbing scrollHeight/clientHeight
+    // since jsdom never actually lays anything out.
+    onScroll?: (scrollTop: number, scrollHeight: number, clientHeight: number) => void
   }
 >(function MessageList({ messages, onScroll }, ref) {
   const parentRef = useRef<HTMLDivElement>(null)
@@ -51,7 +53,7 @@ export const MessageList = forwardRef<
     <div
       ref={parentRef}
       data-testid="timeline-scroll"
-      onScroll={(e) => onScroll?.(e.currentTarget.scrollTop)}
+      onScroll={(e) => onScroll?.(e.currentTarget.scrollTop, e.currentTarget.scrollHeight, e.currentTarget.clientHeight)}
       className="max-h-[32rem] overflow-auto"
     >
       <div style={{ height: virtualizer.getTotalSize(), position: 'relative' }}>
