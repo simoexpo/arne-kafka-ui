@@ -3,8 +3,10 @@ import { formatAgo, formatCount, formatRetentionValue, retentionMsHint } from '.
 
 describe('formatAgo', () => {
   const now = 1_000_000_000
-  it('sub-2s is "just now"', () => expect(formatAgo(now - 1500, now)).toBe('just now'))
-  it('seconds', () => expect(formatAgo(now - 3_000, now)).toBe('3s ago'))
+  it('sub-12s is "just now"', () => expect(formatAgo(now - 1500, now)).toBe('just now'))
+  it('3s is still "just now"', () => expect(formatAgo(now - 3_000, now)).toBe('just now'))
+  it('10s is still "just now"', () => expect(formatAgo(now - 10_000, now)).toBe('just now'))
+  it('13s ago', () => expect(formatAgo(now - 13_000, now)).toBe('13s ago'))
   it('minutes', () => expect(formatAgo(now - 120_000, now)).toBe('2m ago'))
   it('hours', () => expect(formatAgo(now - 3_600_000, now)).toBe('1h ago'))
   it('days', () => expect(formatAgo(now - 172_800_000, now)).toBe('2d ago'))
