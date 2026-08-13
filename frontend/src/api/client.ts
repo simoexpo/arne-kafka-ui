@@ -1,5 +1,5 @@
 import type {
-  BrowseAnchor, ClustersResponse, GroupDetail, GroupList, MessagesPage, Overview,
+  ClustersResponse, GroupDetail, GroupList, Overview,
   Throughput, TopicConsumers, TopicDetail, TopicList,
 } from './types'
 
@@ -64,10 +64,3 @@ export const getTopicConsumers = (c: string, t: string, signal?: AbortSignal) =>
 export const getThroughput = (c: string, t: string, signal?: AbortSignal) => fetchJson<Throughput>(`/api/clusters/${enc(c)}/topics/${enc(t)}/throughput`, signal)
 export const getGroups = (c: string, signal?: AbortSignal) => fetchJson<GroupList>(`/api/clusters/${enc(c)}/groups`, signal)
 export const getGroupDetail = (c: string, g: string, signal?: AbortSignal) => fetchJson<GroupDetail>(`/api/clusters/${enc(c)}/groups/${enc(g)}`, signal)
-
-export const getMessages = (c: string, t: string, a: BrowseAnchor, signal?: AbortSignal) => {
-  const qs = new URLSearchParams(
-    Object.entries(a).map(([k, v]) => [k, String(v)]),
-  )
-  return fetchJson<MessagesPage>(`/api/clusters/${enc(c)}/topics/${enc(t)}/messages?${qs}`, signal)
-}

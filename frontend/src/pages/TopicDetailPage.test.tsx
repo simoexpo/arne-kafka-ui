@@ -1,7 +1,8 @@
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { renderWithQuery } from '../test/utils'
+import { FakeEventSource } from '../test/fake-event-source'
 import { TopicDetailView } from './TopicDetailPage'
 import * as client from '../api/client'
 
@@ -10,8 +11,15 @@ vi.mock('../api/client', async (importOriginal) => ({
   getTopicDetail: vi.fn(),
   getTopicConsumers: vi.fn().mockResolvedValue({ topic: 'orders', groups: [], as_of: 0 }),
   getThroughput: vi.fn().mockResolvedValue({ topic: 'orders', samples: [], as_of: null }),
-  getMessages: vi.fn().mockResolvedValue({ messages: [], as_of: 0 }),
 }))
+
+// The default tab is Messages, which mounts a Timeline that opens a real
+// EventSource on render (timeline page load + live tail) — every test here
+// renders TopicDetailView regardless of which tab it then interacts with, so
+// FakeEventSource must be installed even for Partitions/Consumers/Config-only
+// tests.
+beforeEach(() => FakeEventSource.install())
+afterEach(() => FakeEventSource.uninstall())
 
 const detail = {
   name: 'orders',
@@ -185,8 +193,9 @@ describe('TopicDetailView', () => {
   it('messages tab is shown by default', async () => {
     vi.mocked(client.getTopicDetail).mockResolvedValue(detail)
     renderWithQuery(<TopicDetailView cluster="prod" topic="orders" />)
-    expect(await screen.findByText('no messages')).toBeInTheDocument()
-    expect(client.getMessages).toHaveBeenCalled()
+    expect(FakeEventSource.instances[0].url).toBe(
+      '/api/clusters/prod/topics/orders/timeline?direction=back&limit=100&anchor=latest',
+    )
   })
 
   it('header has a button to copy the topic name', async () => {

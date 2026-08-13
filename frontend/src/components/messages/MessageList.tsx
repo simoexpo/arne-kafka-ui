@@ -3,7 +3,7 @@ import { useVirtualizer } from '@tanstack/react-virtual'
 import type { MessageOut } from '../../api/types'
 import { MessageRow } from './MessageRow'
 
-export function MessageList({ messages }: { messages: MessageOut[] }) {
+export function MessageList({ messages }: { messages: readonly MessageOut[] }) {
   const parentRef = useRef<HTMLDivElement>(null)
   const virtualizer = useVirtualizer({
     count: messages.length,

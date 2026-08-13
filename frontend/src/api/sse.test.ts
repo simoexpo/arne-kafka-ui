@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { FakeEventSource } from '../test/fake-event-source'
-import { searchTopic, tailTopic, timelinePage } from './sse'
+import { tailTopic, timelinePage } from './sse'
 
 beforeEach(() => FakeEventSource.install())
 afterEach(() => FakeEventSource.uninstall())
@@ -25,27 +25,6 @@ describe('tailTopic', () => {
     tailTopic('prod', 't', { onMessage: vi.fn(), onError: vi.fn(), onTransportError })
     FakeEventSource.instances[0].fireTransportError()
     expect(onTransportError).toHaveBeenCalled()
-  })
-})
-
-describe('searchTopic', () => {
-  it('builds the query string and dispatches all event kinds', () => {
-    const h = { onProgress: vi.fn(), onMatch: vi.fn(), onDone: vi.fn(), onError: vi.fn(), onTransportError: vi.fn() }
-    searchTopic('prod', 't', { range: 'last_n', n: 500 }, { filter: 'json_eq', q: '42', path: 'user.id' }, h)
-    const es = FakeEventSource.instances[0]
-    expect(es.url).toBe('/api/clusters/prod/topics/t/search?range=last_n&n=500&filter=json_eq&q=42&path=user.id')
-    es.emit('progress', { scanned: 10, total: 500, matches: 1 })
-    expect(h.onProgress).toHaveBeenCalledWith({ scanned: 10, total: 500, matches: 1 })
-    es.emit('match', { partition: 1, offset: 3, timestamp_ms: 9, key: null, value: null, headers: [] })
-    expect(h.onMatch).toHaveBeenCalledWith(expect.objectContaining({ partition: 1 }))
-    es.emit('done', { reason: 'complete' })
-    expect(h.onDone).toHaveBeenCalledWith('complete')
-  })
-
-  it('encodes offsets range with optional partition', () => {
-    const h = { onProgress: vi.fn(), onMatch: vi.fn(), onDone: vi.fn(), onError: vi.fn(), onTransportError: vi.fn() }
-    searchTopic('c', 't', { range: 'offsets', from: 5, to: 20, partition: 2 }, { filter: 'key_eq', q: 'k' }, h)
-    expect(FakeEventSource.instances[0].url).toBe('/api/clusters/c/topics/t/search?range=offsets&from=5&to=20&partition=2&filter=key_eq&q=k')
   })
 })
 
