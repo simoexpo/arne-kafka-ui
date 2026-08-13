@@ -57,17 +57,21 @@ docker compose -f docker-compose.dev.yml down -v   # to tear down
 node scripts/smoke.mjs
 ```
 
-The playground brings up a local Kafka broker, schema registry, and a demo
-producer that continuously writes JSON messages to a `demo-orders` topic —
-useful for pointing a locally-running Betrachtung at real data without a
-real cluster. Point `config.yaml` at `localhost:9092` (see
-`config.example.yaml`) to use it.
+The playground brings up two independent local Kafka brokers (ports 9092
+and 9093), a schema registry pointed at the first cluster, and a demo
+producer per cluster continuously writing JSON messages to three topics —
+`demo-orders` (`cleanup.policy=delete`), `demo-users`
+(`cleanup.policy=compact`), and `demo-audit`
+(`cleanup.policy=compact,delete`) — useful for pointing a locally-running
+Betrachtung at real data without a real cluster. Point `config.yaml` at
+`localhost:9092` and/or `localhost:9093` (see `config.example.yaml`) to use
+it.
 
-The broker's advertised listener assumes Docker Desktop (macOS/Windows,
+Each broker's advertised listener assumes Docker Desktop (macOS/Windows,
 which resolves `host.docker.internal` automatically); on plain Docker
 Engine on Linux, add `extra_hosts: ["host.docker.internal:host-gateway"]`
-to the `kafka` service in `docker-compose.dev.yml`, or use a dual-listener
-setup instead (see
+to the `kafka` and `kafka2` services in `docker-compose.dev.yml`, or use a
+dual-listener setup instead (see
 `docs/superpowers/plans/2026-08-11-messages-ui-and-packaging-followups.md`).
 
 The smoke check expects `just dev` (or the raw backend+vite equivalent)

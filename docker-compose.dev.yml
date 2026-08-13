@@ -13,6 +13,20 @@ services:
       KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
 
+  kafka2:
+    image: apache/kafka:latest
+    ports: ["9093:9093"]
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: INTERNAL://0.0.0.0:19092,CONTROLLER://0.0.0.0:9091,EXTERNAL://0.0.0.0:9093
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka2:19092,EXTERNAL://host.docker.internal:9093
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka2:9091
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+
   schema-registry:
     image: confluentinc/cp-schema-registry:7.7.1
     depends_on: [kafka]
@@ -29,12 +43,49 @@ services:
     command:
       - |
         sleep 10
-        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:19092 --create --topic demo-orders --partitions 3 --if-not-exists
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:19092 --create --if-not-exists --topic demo-orders --partitions 3 --config cleanup.policy=delete
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:19092 --create --if-not-exists --topic demo-users --partitions 3 --config cleanup.policy=compact
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:19092 --create --if-not-exists --topic demo-audit --partitions 2 --config cleanup.policy=compact,delete
         i=0
         while true; do
           i=$$((i+1))
           echo "order-$$i:{\"order_id\":$$i,\"amount\":$$((i*3)).50}" | \
             /opt/kafka/bin/kafka-console-producer.sh --bootstrap-server kafka:19092 --topic demo-orders \
+              --property parse.key=true --property key.separator=: >/dev/null
+          u=$$(( (i % 5) + 1 ))
+          echo "user-$$u:{\"user_id\":$$u,\"seq\":$$i}" | \
+            /opt/kafka/bin/kafka-console-producer.sh --bootstrap-server kafka:19092 --topic demo-users \
+              --property parse.key=true --property key.separator=: >/dev/null
+          a=$$((i % 10))
+          echo "audit-$$a:{\"audit_id\":$$a,\"seq\":$$i}" | \
+            /opt/kafka/bin/kafka-console-producer.sh --bootstrap-server kafka:19092 --topic demo-audit \
+              --property parse.key=true --property key.separator=: >/dev/null
+          sleep 2
+        done
+
+  demo-producer2:
+    image: apache/kafka:latest
+    depends_on: [kafka2]
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        sleep 10
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka2:19092 --create --if-not-exists --topic demo-orders --partitions 3 --config cleanup.policy=delete
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka2:19092 --create --if-not-exists --topic demo-users --partitions 3 --config cleanup.policy=compact
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka2:19092 --create --if-not-exists --topic demo-audit --partitions 2 --config cleanup.policy=compact,delete
+        i=0
+        while true; do
+          i=$$((i+1))
+          echo "order-$$i:{\"order_id\":$$i,\"amount\":$$((i*3)).50}" | \
+            /opt/kafka/bin/kafka-console-producer.sh --bootstrap-server kafka2:19092 --topic demo-orders \
+              --property parse.key=true --property key.separator=: >/dev/null
+          u=$$(( (i % 5) + 1 ))
+          echo "user-$$u:{\"user_id\":$$u,\"seq\":$$i}" | \
+            /opt/kafka/bin/kafka-console-producer.sh --bootstrap-server kafka2:19092 --topic demo-users \
+              --property parse.key=true --property key.separator=: >/dev/null
+          a=$$((i % 10))
+          echo "audit-$$a:{\"audit_id\":$$a,\"seq\":$$i}" | \
+            /opt/kafka/bin/kafka-console-producer.sh --bootstrap-server kafka2:19092 --topic demo-audit \
               --property parse.key=true --property key.separator=: >/dev/null
           sleep 2
         done
