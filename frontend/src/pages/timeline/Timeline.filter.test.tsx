@@ -192,6 +192,29 @@ describe('Timeline filter box', () => {
     expect(btn).toHaveTextContent(`scanned ${totalScanned} records · 0 matches — continue`)
   })
 
+  it('a filtered page that finds some matches but stops short of a full page (budget spent) shows the continue affordance, not a silent load-older', async () => {
+    mockTail()
+    await mountAndSettleInitial()
+
+    typeFilter('value:needle')
+    await settle()
+    const idx = FakeEventSource.instances.length - 1
+    await emit(idx, 'match', mk(1))
+    await emit(idx, 'match', mk(2))
+    await emit(idx, 'progress', { scanned: 5000, matches: 2, budget: 5000 })
+    // Budget spent partway through, not the true topic edge: non-null
+    // cursor, exhausted:false — same contract as the zero-match case, just
+    // with 1..99 matches this time.
+    await emit(idx, 'page_end', { cursor: 'c1', exhausted: false })
+
+    // The real matches must still render — the affordance is additive, not
+    // a replacement for the page's own results.
+    expect(screen.getByText('p0·1')).toBeInTheDocument()
+    expect(screen.getByText('p0·2')).toBeInTheDocument()
+    const btn = screen.getByTestId('continue-scan')
+    expect(btn).toHaveTextContent('scanned 5000 records · 2 matches — continue')
+  })
+
   it('clearing the filter (×) reloads unfiltered', async () => {
     mockTail()
     await mountAndSettleInitial()
@@ -247,7 +270,11 @@ describe('Timeline filter box', () => {
     await emit(filteredIdx, 'match', mk(9))
     await emit(filteredIdx, 'page_end', { cursor: 'c1', exhausted: false })
 
-    fireEvent.click(screen.getByTestId('load-older'))
+    // A filtered page with 1 match (fewer than a full page) and a non-null,
+    // non-exhausted cursor is the I2 partial-match budget-stop case: the
+    // continue affordance shows instead of a plain load-older, but clicking
+    // it drives the exact same withFilter-merged request.
+    fireEvent.click(screen.getByTestId('continue-scan'))
     expect(FakeEventSource.instances.at(-1)!.url).toBe(
       '/api/clusters/prod/topics/orders/timeline?direction=back&limit=100&cursor=c1&filter=json_eq&q=42&path=user.id',
     )

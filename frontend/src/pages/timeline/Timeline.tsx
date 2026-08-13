@@ -69,6 +69,14 @@ export function Timeline({ cluster, topic }: { cluster: string; topic: string })
 
   const pendingDirectionRef = useRef<Direction | null>(null)
   const matchedRef = useRef(false)
+  // Count of matches delivered by the CURRENT page only (reset at the start
+  // of every runPage call, incremented as batches flush) — used to detect a
+  // filtered page that stopped short of a full page (budget spent before
+  // `PAGE_LIMIT` matches were found). Deliberately independent of
+  // `state.progress.matches`: that field only updates when a `progress`
+  // event actually arrives, which a short/fast page need not send before
+  // `page_end`, whereas every delivered match always reaches this ref.
+  const pageMatchesRef = useRef(0)
   const iterationRef = useRef(0)
   const wasLoadingRef = useRef(false)
   const [continueDirection, setContinueDirection] = useState<Direction | null>(null)
@@ -147,10 +155,12 @@ export function Timeline({ cluster, topic }: { cluster: string; topic: string })
         gestureMatchesRef.current = 0
       }
       matchedRef.current = false
+      pageMatchesRef.current = 0
       pendingDirectionRef.current = direction
       setContinueDirection(null)
       loadPage(params, (msgs: MessageOut[]) => {
         matchedRef.current = true
+        pageMatchesRef.current += msgs.length
         storeRef.current.insert(msgs, direction)
         bump()
       })
@@ -233,7 +243,6 @@ export function Timeline({ cluster, topic }: { cluster: string; topic: string })
     const direction = pendingDirectionRef.current
     if (direction === null) return
     pendingDirectionRef.current = null
-    if (matchedRef.current) return
     if (state.error) return
     if (state.exhausted[direction]) return
     const cursor = cursors[direction]
@@ -242,13 +251,31 @@ export function Timeline({ cluster, topic }: { cluster: string; topic: string })
     // running total BEFORE deciding whether to loop or cap — a filtered
     // scan's progress resets per page, so without this the cap
     // affordance/progress row would understate how much was actually
-    // scanned across every auto-continued page in this gesture. This is the
-    // ONLY place gestureScannedRef/MatchesRef are incremented, and only
-    // ever with a page that has already ended — see the render-time
-    // formula, which adds the CURRENT in-flight page's progress
-    // separately (and only while still loading) to avoid double-counting.
+    // scanned across every auto-continued page in this gesture. Folded
+    // unconditionally (not just on a zero-match page): a page that found
+    // *some* matches but stopped short of a full page (budget spent) must
+    // not have its scanned/matches total silently dropped either — see the
+    // matchedRef branch below. This is the ONLY place gestureScannedRef/
+    // MatchesRef are incremented, and only ever with a page that has already
+    // ended — see the render-time formula, which adds the CURRENT in-flight
+    // page's progress separately (and only while still loading) to avoid
+    // double-counting.
     gestureScannedRef.current += state.progress?.scanned ?? 0
     gestureMatchesRef.current += state.progress?.matches ?? 0
+    if (matchedRef.current) {
+      // A page that filled all the way to PAGE_LIMIT is a normal, complete
+      // page — the existing load-older/load-newer button already covers
+      // continuing from there. One that matched *something* but stopped
+      // short of a full page (the scan budget ran out before finding
+      // PAGE_LIMIT matches, cursor non-null, not exhausted) must say so and
+      // offer to continue rather than end quietly (spec: no silent stops) —
+      // but must NOT auto-continue on its own, since the user already has
+      // real matches to look at.
+      if (activeFilterApiRef.current !== null && pageMatchesRef.current < PAGE_LIMIT) {
+        setContinueDirection(direction)
+      }
+      return
+    }
     if (iterationRef.current >= ITERATION_CAP) {
       setContinueDirection(direction)
       return
