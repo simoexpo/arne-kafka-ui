@@ -31,7 +31,7 @@ export function TopicsView({ cluster }: { cluster: string }) {
       </div>
       <div className="flex items-center gap-4">
         <FilterInput value={filter} onChange={setFilter} placeholder="filter topics…" ariaLabel="filter topics" />
-        <label className="flex items-center gap-2 text-sm text-zinc-500">
+        <label className="inline-flex w-fit items-center gap-2 text-sm text-zinc-500">
           <button
             type="button"
             role="switch"

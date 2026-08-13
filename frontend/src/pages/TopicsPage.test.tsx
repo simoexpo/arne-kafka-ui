@@ -62,6 +62,14 @@ describe('TopicsView', () => {
     expect(screen.getByText('__consumer_offsets')).toBeInTheDocument()
   })
 
+  it('show-internal switch label is content-sized, not stretched to fill the row', async () => {
+    vi.mocked(client.getTopics).mockResolvedValue(topics)
+    await renderWithRouter(<TopicsView cluster="prod" />)
+    await screen.findByText('orders')
+    const label = screen.getByRole('switch', { name: /internal/i }).closest('label')
+    expect(label?.className).toMatch(/\bw-fit\b/)
+  })
+
   it('RF column header explains replication factor via a tooltip', async () => {
     vi.mocked(client.getTopics).mockResolvedValue(topics)
     await renderWithRouter(<TopicsView cluster="prod" />)

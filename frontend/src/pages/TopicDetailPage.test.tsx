@@ -92,6 +92,15 @@ describe('TopicDetailView', () => {
     expect(screen.getByTestId('config-all-max.message.bytes')).toHaveTextContent('default')
   })
 
+  it('show-all-configs switch label is content-sized, not stretched to fill the row', async () => {
+    vi.mocked(client.getTopicDetail).mockResolvedValue(detail)
+    renderWithQuery(<TopicDetailView cluster="prod" topic="orders" />)
+    await userEvent.click(screen.getByRole('button', { name: 'Config' }))
+    await screen.findByTestId('config-retention.ms')
+    const label = screen.getByRole('switch', { name: 'show all configs' }).closest('label')
+    expect(label?.className).toMatch(/\bw-fit\b/)
+  })
+
   it('config tab filter box is hidden until "show all configs" is on', async () => {
     vi.mocked(client.getTopicDetail).mockResolvedValue(detail)
     renderWithQuery(<TopicDetailView cluster="prod" topic="orders" />)

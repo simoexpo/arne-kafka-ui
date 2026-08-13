@@ -16,7 +16,7 @@ export function FilterInput({
   const inputRef = useRef<HTMLInputElement>(null)
 
   return (
-    <div className="relative">
+    <div className="relative inline-block w-fit">
       <input
         ref={inputRef}
         value={value}

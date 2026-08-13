@@ -204,7 +204,7 @@ function ConfigTab({ data, error, loading }: { data?: TopicDetail; error: unknow
               ? <p className="text-sm text-zinc-500">no overrides — all values are broker defaults</p>
               : <ConfigTable entries={overridden} testPrefix="config" />}
           </div>
-          <label className="flex items-center gap-2 text-sm text-zinc-500">
+          <label className="inline-flex w-fit items-center gap-2 text-sm text-zinc-500">
             <button
               type="button"
               role="switch"

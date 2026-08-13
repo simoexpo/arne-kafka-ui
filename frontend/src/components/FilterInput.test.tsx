@@ -21,4 +21,10 @@ describe('FilterInput', () => {
     expect(onChange).toHaveBeenCalledWith('')
     expect(screen.getByLabelText('filter x')).toHaveFocus()
   })
+
+  it('wrapper is content-sized, not stretched to fill its row', () => {
+    render(<FilterInput value="" onChange={vi.fn()} placeholder="filter…" ariaLabel="filter x" />)
+    const wrapper = screen.getByLabelText('filter x').parentElement
+    expect(wrapper?.className).toMatch(/\bw-fit\b/)
+  })
 })
