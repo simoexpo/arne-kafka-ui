@@ -167,6 +167,40 @@ describe('Timeline', () => {
     expect(screen.getByText('p0·1')).toBeInTheDocument() // rows stay visible
   })
 
+  it('classifies a kafka page error as Kafka-unreachable, not a generic connection-lost banner', async () => {
+    mockTail()
+    const user = userEvent.setup()
+    render(<Timeline cluster="prod" topic="orders" />)
+    await emit(0, 'match', mk(1))
+    await emit(0, 'page_end', { cursor: 'c1', exhausted: false })
+
+    await user.click(screen.getByTestId('load-older'))
+    await emit(1, 'error', {
+      code: 'kafka_timeout',
+      message: 'fetch metadata timed out',
+      cluster: 'prod',
+      retriable: true,
+    })
+
+    expect(screen.getByText(/Kafka unreachable/)).toBeInTheDocument()
+    expect(screen.queryByText(/Connection to Betrachtung lost/)).not.toBeInTheDocument()
+  })
+
+  it('a page transport error still shows the generic connection-lost banner', async () => {
+    mockTail()
+    const user = userEvent.setup()
+    render(<Timeline cluster="prod" topic="orders" />)
+    await emit(0, 'match', mk(1))
+    await emit(0, 'page_end', { cursor: 'c1', exhausted: false })
+
+    await user.click(screen.getByTestId('load-older'))
+    await act(async () => {
+      FakeEventSource.instances[1].fireTransportError()
+    })
+
+    expect(screen.getByText(/Connection to Betrachtung lost/)).toBeInTheDocument()
+  })
+
   it('renders a decode-error row loudly instead of skipping it', async () => {
     mockTail()
     render(<Timeline cluster="prod" topic="orders" />)

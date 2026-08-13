@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { ApiError } from '../../api/client'
 import { timelinePage } from '../../api/sse'
 import type { TimelinePageParams, TimelineProgress } from '../../api/sse'
 import type { MessageOut } from '../../api/types'
@@ -17,7 +18,13 @@ interface TimelineState {
   loading: boolean
   progress: TimelineProgress | null
   exhausted: { back: boolean; forward: boolean }
-  error: string | null
+  // A structured error, not a bare string: consumers (Panel's describeError)
+  // need `code`/`cluster`/`retriable` to tell a kafka-side failure from a
+  // real connection-to-Betrachtung loss. Server-emitted `error` events
+  // become an ApiError carrying that structure; a transport failure
+  // (EventSource's onerror) legitimately IS connection-lost and is a plain
+  // Error with the established wording.
+  error: ApiError | Error | null
 }
 
 interface TimelineCursors {
@@ -125,7 +132,8 @@ export function useTimelinePage(cluster: string, topic: string): UseTimelinePage
           if (generationRef.current !== myGen) return
           handle.close()
           handleRef.current = null
-          setState((prev) => ({ ...prev, loading: false, error: e.message }))
+          const error = new ApiError(0, e.code, e.message, e.cluster ?? null, e.retriable ?? false)
+          setState((prev) => ({ ...prev, loading: false, error }))
           flush()
         },
         onTransportError: () => {
@@ -134,10 +142,13 @@ export function useTimelinePage(cluster: string, topic: string): UseTimelinePage
           // behavior is to auto-reconnect — exactly the v1 reconnect-loop
           // bug. A page load is a one-shot request/response over SSE, so we
           // treat any transport failure as terminal too rather than let the
-          // browser retry into a zombie stream.
+          // browser retry into a zombie stream. Unlike a server-emitted
+          // `error` event, this one is genuinely a lost connection to
+          // Betrachtung itself — a plain Error, not an ApiError, so
+          // describeError's generic connection-lost banner is exactly right.
           handle.close()
           handleRef.current = null
-          setState((prev) => ({ ...prev, loading: false, error: 'connection lost — retrying is manual' }))
+          setState((prev) => ({ ...prev, loading: false, error: new Error('connection lost — retrying is manual') }))
           flush()
         },
       })

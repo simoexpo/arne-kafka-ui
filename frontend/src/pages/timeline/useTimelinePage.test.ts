@@ -1,6 +1,7 @@
 import { act, renderHook } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { FakeEventSource } from '../../test/fake-event-source'
+import { ApiError } from '../../api/client'
 import { useTimelinePage } from './useTimelinePage'
 import type { MessageOut } from '../../api/types'
 
@@ -148,7 +149,7 @@ describe('useTimelinePage', () => {
     expect(FakeEventSource.instances.at(-1)!.closed).toBe(true)
   })
 
-  it('closes the stream after error (terminal) and surfaces the error message', () => {
+  it('closes the stream after error (terminal) and surfaces a structured ApiError', () => {
     const { result } = renderHook(() => useTimelinePage('prod', 'orders'))
     act(() => {
       result.current.loadPage({ direction: 'back', limit: 100, anchor: 'latest' }, vi.fn())
@@ -162,7 +163,16 @@ describe('useTimelinePage', () => {
       })
     })
     expect(FakeEventSource.instances.at(-1)!.closed).toBe(true)
-    expect(result.current.state.error).toBe('boom')
+    // A structured ApiError (not a bare string) so consumers like Panel's
+    // describeError can classify kafka vs backend vs app errors correctly
+    // instead of every page error collapsing into the generic
+    // "connection lost" banner.
+    expect(result.current.state.error).toBeInstanceOf(ApiError)
+    const err = result.current.state.error as ApiError
+    expect(err.code).toBe('kafka_error')
+    expect(err.message).toBe('boom')
+    expect(err.cluster).toBe('prod')
+    expect(err.retriable).toBe(true)
     expect(result.current.state.loading).toBe(false)
   })
 
@@ -197,7 +207,7 @@ describe('useTimelinePage', () => {
     expect(FakeEventSource.instances[0].closed).toBe(true)
   })
 
-  it('uses the established transport-error wording', () => {
+  it('uses the established transport-error wording, as a plain Error (legitimately connection-lost)', () => {
     const { result } = renderHook(() => useTimelinePage('prod', 'orders'))
     act(() => {
       result.current.loadPage({ direction: 'back', limit: 100, anchor: 'latest' }, vi.fn())
@@ -205,7 +215,9 @@ describe('useTimelinePage', () => {
     act(() => {
       FakeEventSource.instances[0].fireTransportError()
     })
-    expect(result.current.state.error).toBe('connection lost — retrying is manual')
+    expect(result.current.state.error).not.toBeInstanceOf(ApiError)
+    expect(result.current.state.error).toBeInstanceOf(Error)
+    expect(result.current.state.error?.message).toBe('connection lost — retrying is manual')
     expect(result.current.state.loading).toBe(false)
   })
 
