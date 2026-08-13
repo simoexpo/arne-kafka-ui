@@ -10,11 +10,30 @@ use rdkafka::topic_partition_list::TopicPartitionList;
 use rdkafka::Offset;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 /// Monotonic per-process counter so each fetch's throwaway group.id is
 /// unique even when two fetches land in the same millisecond.
 static FETCH_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// Per-topic count of real (non-trivial) `fetch_ranges_blocking` calls —
+/// i.e. calls that actually built a `BaseConsumer`, not the early-return for
+/// an already-empty range set. Test-only observability: a client-disconnect
+/// integration test uses this to prove a cancelled scan stops minting fresh
+/// consumers rather than spinning forever (the C1 zombie-scan bug). Scoped
+/// per-topic (not a single global count) so it stays meaningful even when
+/// other tests' fetches run concurrently against the shared test broker.
+static FETCH_CALLS: OnceLock<Mutex<HashMap<String, u64>>> = OnceLock::new();
+
+fn record_fetch_call(topic: &str) {
+    let calls = FETCH_CALLS.get_or_init(|| Mutex::new(HashMap::new()));
+    *calls.lock().unwrap().entry(topic.to_string()).or_insert(0) += 1;
+}
+
+pub fn fetch_call_count(topic: &str) -> u64 {
+    FETCH_CALLS.get().and_then(|m| m.lock().unwrap().get(topic).copied()).unwrap_or(0)
+}
 
 #[derive(Debug)]
 pub struct RawRecord {
@@ -90,6 +109,7 @@ pub fn fetch_ranges_blocking(
     if ranges.is_empty() {
         return Ok(FetchOutcome { records: Vec::new(), complete: trivially_complete });
     }
+    record_fetch_call(topic);
     // librdkafka's consumer machinery requires a group.id even for pure
     // assign()-based fetches with no group management involved; each fetch
     // uses a throwaway id and never commits, so no real group is affected.

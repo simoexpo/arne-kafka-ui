@@ -527,6 +527,15 @@ pub fn run_page(
             if total_matches >= limit_u64 || total_scanned >= budget {
                 break;
             }
+            // C1: a client disconnect (`CancelOnDrop`) sets this flag but a
+            // cancelled fetch always reports zero progress (see
+            // `page_made_no_progress`'s cancellation carve-out) — positions,
+            // budget, and `exhausted` all stay frozen, so without this check
+            // the loop below would spin forever, minting a fresh
+            // `BaseConsumer` every pass instead of stopping.
+            if cancelled.load(Ordering::SeqCst) {
+                return;
+            }
 
             let remaining_budget = budget - total_scanned;
             // Only partitions that would actually get a window this chunk
@@ -672,11 +681,17 @@ pub fn run_page(
                 // sparse needle must not go quiet for that long.
                 since_progress += 1;
                 if since_progress >= 2_000 {
-                    let _ = tx.send(TimelineEvent::Progress {
+                    // C1: a failed send means the client is gone — stop
+                    // right here instead of ignoring the error and looping
+                    // on regardless (the belt-and-braces half of the fix,
+                    // alongside the top-of-loop cancellation check above).
+                    if tx.send(TimelineEvent::Progress {
                         scanned: total_scanned + since_progress,
                         matches: total_matches + chunk_matches.len() as u64,
                         budget,
-                    }).await;
+                    }).await.is_err() {
+                        return;
+                    }
                     since_progress = 0;
                 }
             }
@@ -762,7 +777,9 @@ pub fn run_page(
                     return; // client disconnected: no point sending more
                 }
             }
-            let _ = tx.send(TimelineEvent::Progress { scanned: total_scanned, matches: total_matches, budget }).await;
+            if tx.send(TimelineEvent::Progress { scanned: total_scanned, matches: total_matches, budget }).await.is_err() {
+                return; // C1: client disconnected — stop, don't loop on regardless
+            }
 
             if exhausted {
                 break 'chunks;

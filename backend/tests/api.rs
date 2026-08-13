@@ -872,6 +872,80 @@ async fn timeline_unfiltered_page_crosses_a_hole_in_one_request() {
     assert!(end["cursor"].is_null());
 }
 
+/// Final-review C1 (MUST-FIX, pairs with the ledger's own deferred item): a
+/// client that disconnects mid-scan must actually stop the scan, not leave a
+/// detached task spinning. Before the fix, `run_page`'s outer chunk loop
+/// never checked its own `cancelled` flag and swallowed `Progress` send
+/// errors — once the receiver dropped (client gone), the loop kept iterating
+/// forever, minting a fresh `BaseConsumer` every pass (`fetch_call_count`
+/// growing without bound) because a cancelled fetch always returns
+/// zero-progress, so budget/edge never advance either.
+///
+/// Two partitions on purpose: partition 1 is small enough to hit its own low
+/// watermark within the first chunk, freeing up leftover scan budget for a
+/// genuine second chunk on partition 0 — that's what guarantees the scan
+/// still has real work pending (not yet exhausted, budget not yet spent)
+/// at the moment the client is dropped, so only the missing cancellation
+/// check stands between "stop" and "spin forever".
+#[tokio::test]
+async fn timeline_scan_stops_on_client_disconnect() {
+    use betrachtung::config::Limits;
+    use betrachtung::message::fetch::fetch_call_count;
+    use futures_util::StreamExt;
+
+    let bootstrap = start_kafka().await;
+    let topic = "tl-disconnect-topic";
+    create_topic(&bootstrap, topic, 2).await;
+    let big: Vec<(String, String, i64)> =
+        (0..60i64).map(|i| (format!("k{i}"), format!("noise-{i}"), 6000 + i)).collect();
+    produce_at_many(&bootstrap, topic, 0, &big).await;
+    let small: Vec<(String, String, i64)> =
+        (0..5i64).map(|i| (format!("k{i}"), format!("noise-{i}"), 6000 + i)).collect();
+    produce_at_many(&bootstrap, topic, 1, &small).await;
+
+    let mut state = state_for(&bootstrap, vec![]);
+    // Small enough that chunk 0 leaves genuine slack (some budget unspent,
+    // not exhausted) once partition 1 hits its edge — see doc comment above.
+    state.limits = std::sync::Arc::new(Limits { timeline_scan_budget: 30, ..(*state.limits).clone() });
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app(state)).await.unwrap() });
+
+    let before = fetch_call_count(topic);
+    let res = reqwest::get(format!(
+        "http://{addr}/api/clusters/test/topics/{topic}/timeline?direction=back&limit=1000000&anchor=latest&filter=contains&q=never-matches-anything"
+    ))
+    .await
+    .unwrap();
+    assert_eq!(res.status(), 200);
+
+    // Read exactly one SSE frame so the scan has genuinely started (at least
+    // one real fetch happened) before pulling the rug — a real "mid-scan"
+    // disconnect, not a connection that never got used.
+    let mut stream = res.bytes_stream();
+    let mut buf = String::new();
+    while !buf.contains("\n\n") {
+        let chunk = stream.next().await.expect("expected at least one SSE frame before disconnect").unwrap();
+        buf.push_str(&String::from_utf8_lossy(&chunk));
+    }
+    drop(stream); // client disconnects mid-scan
+
+    // Settle, then sample the fetch-call counter twice a beat apart: a
+    // zombie scan keeps minting fresh consumers every iteration (fast,
+    // unbounded growth); a properly cancelled one goes flat immediately.
+    tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+    let mid = fetch_call_count(topic);
+    tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+    let after = fetch_call_count(topic);
+
+    assert!(mid > before, "sanity: the scan must have made at least one real fetch call: before={before} mid={mid}");
+    assert_eq!(
+        after, mid,
+        "scan must stop creating fetch consumers after client disconnect (zombie scan): before={before} mid={mid} after={after}"
+    );
+}
+
 /// The messages-timeline design supersedes both `/messages` (browse) and
 /// `/search` — "both DELETED — one code path wins" (the timeline). Neither
 /// route exists in the router any more, so a request to either now falls
