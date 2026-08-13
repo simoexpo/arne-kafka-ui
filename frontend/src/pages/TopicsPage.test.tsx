@@ -49,14 +49,15 @@ describe('TopicsView', () => {
     expect(screen.getByRole('link', { name: 'a/b' })).toHaveAttribute('href', '/c/prod/topics/a%2Fb')
   })
 
-  it('filter narrows instantly and show-internal reveals internals', async () => {
+  it('filter narrows instantly, the clear button resets it, and show-internal reveals internals', async () => {
     vi.mocked(client.getTopics).mockResolvedValue(topics)
     await renderWithRouter(<TopicsView cluster="prod" />)
     await screen.findByText('orders')
     await userEvent.type(screen.getByPlaceholderText('filter topics…'), 'pay')
     expect(screen.queryByText('orders')).not.toBeInTheDocument()
     expect(screen.getByText('payments')).toBeInTheDocument()
-    await userEvent.clear(screen.getByPlaceholderText('filter topics…'))
+    await userEvent.click(screen.getByRole('button', { name: 'clear filter' }))
+    expect(screen.getByText('orders')).toBeInTheDocument() // list restored
     await userEvent.click(screen.getByRole('switch', { name: /internal/i }))
     expect(screen.getByText('__consumer_offsets')).toBeInTheDocument()
   })

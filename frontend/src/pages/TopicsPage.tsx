@@ -3,6 +3,7 @@ import { useQuery } from '@tanstack/react-query'
 import { Link, useParams } from '@tanstack/react-router'
 import { getTopics } from '../api/client'
 import { CopyButton } from '../components/CopyButton'
+import { FilterInput } from '../components/FilterInput'
 import { Panel } from '../components/Panel'
 import { StalenessChip } from '../components/StalenessChip'
 import { formatCount } from '../lib/format'
@@ -29,12 +30,7 @@ export function TopicsView({ cluster }: { cluster: string }) {
         <StalenessChip asOf={topics.data?.as_of ?? null} />
       </div>
       <div className="flex items-center gap-4">
-        <input
-          value={filter}
-          onChange={(e) => setFilter(e.target.value)}
-          placeholder="filter topics…"
-          className="w-72 rounded border border-zinc-300 bg-transparent px-3 py-1.5 text-sm outline-none focus:border-zinc-500 dark:border-zinc-700"
-        />
+        <FilterInput value={filter} onChange={setFilter} placeholder="filter topics…" ariaLabel="filter topics" />
         <label className="flex items-center gap-2 text-sm text-zinc-500">
           <button
             type="button"

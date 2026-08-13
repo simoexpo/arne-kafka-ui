@@ -3,6 +3,7 @@ import { useQuery } from '@tanstack/react-query'
 import { useParams } from '@tanstack/react-router'
 import { getTopicDetail, getThroughput, getTopicConsumers } from '../api/client'
 import { CopyButton } from '../components/CopyButton'
+import { FilterInput } from '../components/FilterInput'
 import { Panel } from '../components/Panel'
 import { StalenessChip } from '../components/StalenessChip'
 import { Sparkline } from '../components/Sparkline'
@@ -229,12 +230,12 @@ function ConfigTab({ data, error, loading }: { data?: TopicDetail; error: unknow
             <div>
               <div className="mb-2 flex items-center justify-between">
                 <h3 className="text-xs font-medium text-zinc-500">All configs</h3>
-                <input
+                <FilterInput
                   value={filter}
-                  onChange={(e) => setFilter(e.target.value)}
+                  onChange={setFilter}
                   placeholder="filter configs…"
-                  aria-label="filter configs"
-                  className="w-56 rounded border border-zinc-300 bg-transparent px-3 py-1.5 text-sm outline-none focus:border-zinc-500 dark:border-zinc-700"
+                  ariaLabel="filter configs"
+                  className="w-56"
                 />
               </div>
               {filteredConfigs.length === 0
