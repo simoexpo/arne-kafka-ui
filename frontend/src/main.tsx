@@ -8,7 +8,7 @@ import { router } from './router'
 if (localStorage.theme === 'light') document.documentElement.classList.remove('dark')
 
 const queryClient = new QueryClient({
-  defaultOptions: { queries: { staleTime: 5_000, refetchOnWindowFocus: true } },
+  defaultOptions: { queries: { staleTime: 5_000, refetchOnWindowFocus: true, retry: 1 } },
 })
 
 createRoot(document.getElementById('root')!).render(

@@ -42,11 +42,28 @@ describe('endpoints', () => {
     expect(vi.mocked(fetch).mock.calls[0][0]).toBe('/api/clusters')
   })
 
-  it('fetchJson forwards an AbortSignal', async () => {
+  it('fetchJson forwards a combined signal (caller signal + 15s timeout)', async () => {
     mockFetchOnce(200, { ok: true })
     const controller = new AbortController()
     await fetchJson('/api/x', controller.signal)
-    expect(vi.mocked(fetch).mock.calls[0][1]).toEqual({ signal: controller.signal })
+    const passedSignal = vi.mocked(fetch).mock.calls[0][1]?.signal
+    // AbortSignal.any(...) composition produces a new signal, not the raw
+    // caller signal — asserting instanceof + non-identity is the behavioral
+    // coverage available without faking AbortSignal.timeout's internals.
+    expect(passedSignal).toBeInstanceOf(AbortSignal)
+    expect(passedSignal).not.toBe(controller.signal)
+  })
+
+  it('maps a TimeoutError abort to a plain, meaningful error', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new DOMException('signal timed out', 'TimeoutError')))
+    await expect(fetchJson('/api/x')).rejects.toThrow('request timed out after 15s')
+  })
+
+  it('does not rewrap a caller-initiated abort (unmount cancellations stay silent)', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new DOMException('The user aborted a request.', 'AbortError')))
+    const err = await fetchJson('/api/x').catch((e) => e as unknown)
+    expect(err).toBeInstanceOf(DOMException)
+    expect((err as DOMException).name).toBe('AbortError')
   })
 
   it('getMessages builds anchor query strings', async () => {

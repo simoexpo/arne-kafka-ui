@@ -18,8 +18,26 @@ export class ApiError extends Error {
   }
 }
 
-export async function fetchJson<T>(path: string, signal?: AbortSignal): Promise<T> {
-  const res = await fetch(path, { signal })
+const REQUEST_TIMEOUT_MS = 15_000
+
+export async function fetchJson<T>(path: string, callerSignal?: AbortSignal): Promise<T> {
+  const signal = callerSignal
+    ? AbortSignal.any([callerSignal, AbortSignal.timeout(REQUEST_TIMEOUT_MS)])
+    : AbortSignal.timeout(REQUEST_TIMEOUT_MS)
+  let res: Response
+  try {
+    res = await fetch(path, { signal })
+  } catch (err) {
+    // A timeout fires as a DOMException named 'TimeoutError' — map it to a
+    // plain, readable Error so panels can render something meaningful.
+    // A caller-initiated abort (component unmount, navigation away) fires
+    // as 'AbortError' and must stay silent — rethrow it unchanged so it is
+    // not mistaken for a real failure.
+    if (err instanceof DOMException && err.name === 'TimeoutError') {
+      throw new Error(`request timed out after ${REQUEST_TIMEOUT_MS / 1000}s`)
+    }
+    throw err
+  }
   if (res.ok) return res.json() as Promise<T>
   let body: { code?: string; message?: string; cluster?: string | null; retriable?: boolean } = {}
   try {

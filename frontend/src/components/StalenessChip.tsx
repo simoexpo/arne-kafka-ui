@@ -4,9 +4,13 @@ import { formatAgo } from '../lib/format'
 const AGING_THRESHOLD_MS = 36_000
 const STALE_THRESHOLD_MS = 120_000
 
-type Tier = 'fresh' | 'aging' | 'stale' | 'refreshing'
+type Tier = 'fresh' | 'aging' | 'stale' | 'refreshing' | 'failed'
 
-function tierOf(asOf: number | null, now: number, refreshing: boolean): Tier | null {
+// Precedence: failed > refreshing > age-based tiers. A query that just
+// errored is the loudest signal regardless of how old the last-good data
+// is or whether a retry happens to be in flight at the same moment.
+function tierOf(asOf: number | null, now: number, refreshing: boolean, failed: boolean): Tier | null {
+  if (failed) return 'failed'
   if (asOf === null) return null
   if (refreshing) return 'refreshing'
   const delta = now - asOf
@@ -24,16 +28,19 @@ const TIER_CLASSES: Record<Tier, string> = {
   // as alarming. While a refetch for this data is in flight, suppress tier
   // styling and show the true age in the neutral zinc style instead.
   refreshing: 'border-zinc-300 text-zinc-500 dark:border-zinc-700 dark:text-zinc-400',
+  failed: 'border-red-400 text-red-600 dark:border-red-600 dark:text-red-400',
 }
 
 export function StalenessChip({
   asOf,
   now,
   refreshing = false,
+  failed = false,
 }: {
   asOf: number | null
   now?: number
   refreshing?: boolean
+  failed?: boolean
 }) {
   const [tick, setTick] = useState(() => now ?? Date.now())
   useEffect(() => {
@@ -42,7 +49,7 @@ export function StalenessChip({
     return () => clearInterval(id)
   }, [now])
   const current = now ?? tick
-  const tier = tierOf(asOf, current, refreshing)
+  const tier = tierOf(asOf, current, refreshing, failed)
   return (
     <span
       className={`rounded-full border px-2 py-0.5 text-xs ${TIER_CLASSES[tier ?? 'fresh']}`}

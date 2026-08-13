@@ -229,7 +229,7 @@ export function MessagesTab({ cluster, topic }: { cluster: string; topic: string
           {isTailing ? (
             <span className="animate-pulse text-emerald-500">● live</span>
           ) : (
-            <StalenessChip asOf={messages.data?.as_of ?? null} refreshing={messages.isFetching} />
+            <StalenessChip asOf={messages.data?.as_of ?? null} refreshing={messages.isFetching} failed={messages.isError} />
           )}
         </div>
       </div>

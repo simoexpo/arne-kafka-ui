@@ -35,4 +35,22 @@ describe('StalenessChip', () => {
     expect(chip.className).not.toMatch(/red/)
     expect(chip.className).not.toMatch(/amber/)
   })
+  it('turns red and "failed" immediately when the query errored', () => {
+    render(<StalenessChip asOf={1_000_000} now={1_180_000} failed />)
+    const chip = screen.getByText('3m ago')
+    expect(chip).toHaveAttribute('data-staleness', 'failed')
+    expect(chip.className).toMatch(/red/)
+  })
+  it('failed wins over refreshing when both are true', () => {
+    render(<StalenessChip asOf={1_000_000} now={1_180_000} failed refreshing />)
+    const chip = screen.getByText('3m ago')
+    expect(chip).toHaveAttribute('data-staleness', 'failed')
+    expect(chip.className).toMatch(/red/)
+  })
+  it('failed with no data yet still reports failed', () => {
+    render(<StalenessChip asOf={null} now={1_000} failed />)
+    const chip = screen.getByText('no data yet')
+    expect(chip).toHaveAttribute('data-staleness', 'failed')
+    expect(chip.className).toMatch(/red/)
+  })
 })
