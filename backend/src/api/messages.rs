@@ -254,12 +254,6 @@ pub async fn search(
     Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
 }
 
-/// Default per-request scan budget for timeline pages. Only exercised by
-/// filtered pages (task 4); unfiltered pages (this task) never scan past
-/// their `limit`-sized windows, so this is currently a fixed constant rather
-/// than a `Limits` field — matching the "filter: None" scope of this task.
-const DEFAULT_TIMELINE_SCAN_BUDGET: u64 = 250_000;
-
 #[derive(Debug, Deserialize)]
 pub struct TimelineParams {
     pub direction: String,
@@ -269,6 +263,9 @@ pub struct TimelineParams {
     pub partition: Option<i32>,
     pub offset: Option<i64>,
     pub ts_ms: Option<i64>,
+    pub filter: Option<String>,
+    pub q: Option<String>,
+    pub path: Option<String>,
 }
 
 /// Validated before any Kafka round-trip, same rationale as `Anchor::parse`
@@ -341,6 +338,18 @@ pub async fn timeline_sse(
         return Err(ApiError::bad_request("exactly one of cursor or anchor is required"));
     }
 
+    // Filter params validated up front too — same rationale as direction/
+    // limit/cursor above: a bad filter kind, a missing `q`, or a `json_eq`
+    // missing its `path` must 400 before any Kafka round trip, even against
+    // an unknown cluster.
+    let filter = match &params.filter {
+        Some(kind) => {
+            let q = params.q.as_deref().ok_or_else(|| ApiError::bad_request("filter requires q"))?;
+            Some(Filter::parse(kind, q, params.path.as_deref()).map_err(ApiError::bad_request)?)
+        }
+        None => None,
+    };
+
     let source = match &params.cursor {
         Some(cursor) => {
             let decoded = timeline::Cursor::decode(cursor)
@@ -389,7 +398,8 @@ pub async fn timeline_sse(
         }).await.map_err(|e| ApiError::internal(format!("task join: {e}")))??
     };
 
-    let (rx, cancel) = timeline::run_page(handle, topic, positions, watermarks, direction, limit, None, DEFAULT_TIMELINE_SCAN_BUDGET);
+    let budget = state.limits.timeline_scan_budget;
+    let (rx, cancel) = timeline::run_page(handle, topic, positions, watermarks, direction, limit, filter, budget);
     let guard = CancelOnDrop(cancel);
     let stream = ReceiverStream::new(rx).map(move |event: TimelineEvent| {
         let _hold = &guard; // move the guard into the stream: dropped on disconnect

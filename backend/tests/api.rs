@@ -846,6 +846,117 @@ async fn timeline_cursor_with_unknown_partition_terminates_properly() {
     assert!(end["cursor"].is_null());
 }
 
+/// Filter params are validated the same way direction/limit/cursor already
+/// are: 400 before any Kafka round trip (even against a topic/cluster that
+/// doesn't exist) — an unknown filter kind, a missing `q`, or `json_eq`
+/// missing its `path`.
+#[tokio::test]
+async fn timeline_bad_filter_params_are_400_before_streaming() {
+    let bootstrap = start_kafka().await;
+    let state = state_for(&bootstrap, vec![]);
+
+    let (status, body) = get_json(
+        app(state.clone()),
+        "/api/clusters/test/topics/x/timeline?direction=back&limit=10&anchor=latest&filter=sideways&q=x",
+    ).await;
+    assert_eq!(status, 400, "unknown filter kind: {body}");
+    assert_eq!(body["code"], "bad_request");
+
+    let (status, body) = get_json(
+        app(state.clone()),
+        "/api/clusters/test/topics/x/timeline?direction=back&limit=10&anchor=latest&filter=contains",
+    ).await;
+    assert_eq!(status, 400, "missing q: {body}");
+    assert_eq!(body["code"], "bad_request");
+
+    let (status, body) = get_json(
+        app(state),
+        "/api/clusters/test/topics/x/timeline?direction=back&limit=10&anchor=latest&filter=json_eq&q=42",
+    ).await;
+    assert_eq!(status, 400, "json_eq missing path: {body}");
+    assert_eq!(body["code"], "bad_request");
+}
+
+#[tokio::test]
+async fn timeline_filter_scans_until_limit_with_progress() {
+    let bootstrap = start_kafka().await;
+    create_topic(&bootstrap, "tl-filter-topic", 1).await;
+    let records: Vec<(String, String, i64)> = (0..200i64)
+        .map(|i| {
+            let v = if i % 20 == 0 { format!("special-{i}") } else { format!("noise-{i}") };
+            (format!("k{i}"), v, 3000 + i)
+        })
+        .collect();
+    produce_at_many(&bootstrap, "tl-filter-topic", 0, &records).await;
+    let state = state_for(&bootstrap, vec![]);
+    let events = collect_sse(app(state), "/api/clusters/test/topics/tl-filter-topic/timeline?direction=back&limit=5&anchor=latest&filter=contains&q=special", 300).await;
+    let m: Vec<_> = events.iter().filter(|(n, _)| n == "match").map(|(_, v)| v["value"]["text"].as_str().unwrap().to_string()).collect();
+    assert_eq!(m.len(), 5);
+    assert!(m.iter().all(|t| t.starts_with("special-")));
+    assert!(events.iter().any(|(n, _)| n == "progress"), "expected progress events");
+    let (_, end) = events.iter().find(|(n, _)| n == "page_end").unwrap().clone();
+    assert_eq!(end["exhausted"], false);
+    assert!(end["cursor"].is_string());
+}
+
+#[tokio::test]
+async fn timeline_filter_budget_exhaustion_reports_and_continues() {
+    use betrachtung::config::Limits;
+    let bootstrap = start_kafka().await;
+    create_topic(&bootstrap, "tl-budget-topic", 1).await;
+    let records: Vec<(String, String, i64)> = (0..300i64)
+        .map(|i| {
+            let v = if i == 10 { "needle".to_string() } else { format!("hay-{i}") };
+            (format!("k{i}"), v, 4000 + i)
+        })
+        .collect();
+    produce_at_many(&bootstrap, "tl-budget-topic", 0, &records).await;
+    let mut state = state_for(&bootstrap, vec![]);
+    state.limits = std::sync::Arc::new(Limits { timeline_scan_budget: 100, ..(*state.limits).clone() });
+    // back from latest with budget 100: scans offsets 200..300, finds nothing, stops un-exhausted
+    let events = collect_sse(app(state.clone()), "/api/clusters/test/topics/tl-budget-topic/timeline?direction=back&limit=5&anchor=latest&filter=contains&q=needle", 300).await;
+    let m = events.iter().filter(|(n, _)| n == "match").count();
+    assert_eq!(m, 0);
+    let (_, end) = events.iter().find(|(n, _)| n == "page_end").unwrap().clone();
+    assert_eq!(end["exhausted"], false, "budget stop is not edge: {end}");
+    let c1 = end["cursor"].as_str().unwrap().to_string();
+    // two more budgeted continues reach the needle at offset 10
+    let events2 = collect_sse(app(state.clone()), &format!("/api/clusters/test/topics/tl-budget-topic/timeline?direction=back&limit=5&cursor={}&filter=contains&q=needle", urlencoding::encode(&c1)), 300).await;
+    let c2 = events2.iter().find(|(n, _)| n == "page_end").unwrap().1["cursor"].as_str().unwrap().to_string();
+    let events3 = collect_sse(app(state), &format!("/api/clusters/test/topics/tl-budget-topic/timeline?direction=back&limit=5&cursor={}&filter=contains&q=needle", urlencoding::encode(&c2)), 300).await;
+    let found: Vec<_> = events3.iter().filter(|(n, _)| n == "match").map(|(_, v)| v["value"]["text"].as_str().unwrap().to_string()).collect();
+    assert_eq!(found, vec!["needle"]);
+}
+
+/// Empty-page contract amendment: the scan budget bounds unfiltered hole
+/// traversal too, so a page whose first window is entirely a legitimate
+/// offset hole must keep chunk-scanning *within the same request* rather
+/// than handing back an empty, non-exhausted page. A single committed
+/// transaction with exactly one real message leaves exactly this shape: the
+/// topic's very last offset is the transaction's own control record (never
+/// delivered by `poll()`), with the one real message sitting immediately
+/// below it. `back`/`latest`/`limit=1` makes the very *first* chunk (span
+/// 1, an unfiltered page's chunk-0 span always equals `limit`) land
+/// exactly on that trailing hole — zero matches, but not exhausted, since
+/// the real message is still there — so the only way this test can pass is
+/// if `run_page` keeps scanning into a second, larger chunk within this
+/// same request instead of returning the hole as an empty page.
+#[tokio::test]
+async fn timeline_unfiltered_page_crosses_a_hole_in_one_request() {
+    let bootstrap = start_kafka().await;
+    create_topic(&bootstrap, "tl-hole-topic", 1).await;
+    produce_transactional(&bootstrap, "tl-hole-topic", 1).await;
+    let state = state_for(&bootstrap, vec![]);
+
+    let events = collect_sse(app(state), "/api/clusters/test/topics/tl-hole-topic/timeline?direction=back&limit=1&anchor=latest", 200).await;
+    assert!(events.iter().all(|(n, _)| n != "error"), "must not error crossing a legitimate hole region: {events:?}");
+    let m: Vec<_> = events.iter().filter(|(n, _)| n == "match").map(|(_, v)| v["value"]["text"].as_str().unwrap().to_string()).collect();
+    assert_eq!(m, vec!["v0"], "a single request must cross the trailing hole and return the real record beyond it: {events:?}");
+    let (_, end) = events.iter().find(|(n, _)| n == "page_end").unwrap().clone();
+    assert_eq!(end["exhausted"], true, "the one real record is everything in the topic: {end}");
+    assert!(end["cursor"].is_null());
+}
+
 #[tokio::test]
 async fn spa_fallback_serves_html_for_unknown_paths() {
     let bootstrap = start_kafka().await;

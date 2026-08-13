@@ -268,6 +268,37 @@ pub async fn produce_at(bootstrap: &str, topic: &str, partition: i32, key: &str,
         .unwrap();
 }
 
+/// Like `produce_at`, called once per `(key, value, ts_ms)` in `records`,
+/// but reusing a single producer across every send instead of building a
+/// fresh one each time.
+///
+/// This matters for more than throughput: a test producing a few hundred
+/// messages via `produce_at` in a loop (a fresh `FutureProducer` — a new
+/// broker connection and metadata round trip — per message) can easily take
+/// 25-30+ real wall-clock seconds. Kafka's own log-retention sweep runs its
+/// *first* pass roughly 30 seconds after broker startup regardless of the
+/// configured check interval; timeline tests deliberately produce with
+/// small, near-epoch-1970 timestamps (`ts_ms` in the low thousands) to get
+/// deterministic cross-partition ordering, and once that first retention
+/// sweep fires, every message with such an ancient `CreateTime` is judged
+/// far older than `log.retention.hours` and silently deleted — the log's
+/// low watermark jumps forward mid-test, and messages the test just wrote
+/// vanish before it ever reads them back. Reusing one producer keeps a
+/// several-hundred-message setup down to low single-digit seconds, safely
+/// under that window.
+pub async fn produce_at_many(bootstrap: &str, topic: &str, partition: i32, records: &[(String, String, i64)]) {
+    let producer: FutureProducer = client(bootstrap).create().unwrap();
+    for (key, value, ts_ms) in records {
+        producer
+            .send(
+                FutureRecord::to(topic).key(key).payload(value).partition(partition).timestamp(*ts_ms),
+                Duration::from_secs(10),
+            )
+            .await
+            .unwrap();
+    }
+}
+
 /// Produces `count` messages (keys/values `k0`/`v0` .. ) to `topic` inside
 /// one committed Kafka transaction.
 ///

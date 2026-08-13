@@ -74,10 +74,21 @@ pub struct Limits {
     pub max_search_matches: u32,
     #[serde(default = "default_sampler_interval")]
     pub sampler_interval_secs: u64,
+    /// Per-request cap on records scanned by one timeline page (`run_page`),
+    /// filtered or not — see the messages-timeline design's "Empty-page
+    /// contract": this bounds both a filtered scan hunting for matches and
+    /// an unfiltered page traversing a hole-dominated region, so neither can
+    /// turn into an unbounded scan within a single request.
+    #[serde(default = "default_timeline_scan_budget")]
+    pub timeline_scan_budget: u64,
 }
 impl Default for Limits {
     fn default() -> Self {
-        Self { max_search_matches: default_max_matches(), sampler_interval_secs: default_sampler_interval() }
+        Self {
+            max_search_matches: default_max_matches(),
+            sampler_interval_secs: default_sampler_interval(),
+            timeline_scan_budget: default_timeline_scan_budget(),
+        }
     }
 }
 
@@ -85,6 +96,7 @@ fn default_true() -> bool { true }
 fn default_port() -> u16 { 8080 }
 fn default_max_matches() -> u32 { 500 }
 fn default_sampler_interval() -> u64 { 10 }
+fn default_timeline_scan_budget() -> u64 { 250_000 }
 
 pub fn interpolate(raw: &str, lookup: &dyn Fn(&str) -> Option<String>) -> Result<String, ConfigError> {
     let mut out = String::with_capacity(raw.len());
@@ -292,6 +304,7 @@ limits: { max_search_matches: 100, sampler_interval_secs: 5 }
         assert_eq!(cfg.server.port, 8080);
         assert_eq!(cfg.limits.max_search_matches, 500);
         assert_eq!(cfg.limits.sampler_interval_secs, 10);
+        assert_eq!(cfg.limits.timeline_scan_budget, 250_000);
     }
 
     #[test]

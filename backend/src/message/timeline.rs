@@ -334,9 +334,32 @@ fn page_made_no_progress(taken_is_empty: bool, any_incomplete_window: bool, canc
     taken_is_empty && any_incomplete_window && !cancelled
 }
 
-/// Runs one unfiltered timeline page (`filter: None` — the only path this
-/// task implements; a filtered page is Task 4's job and reports an explicit
-/// `error` rather than silently behaving like an unfiltered scan).
+/// Per-partition span of one scan iteration ("chunk") once a page needs to
+/// keep looking past its first window — either because it's hunting for
+/// filter matches, or (this task's amendment) crossing a hole-dominated
+/// region on an unfiltered page. Deliberately much larger than a typical
+/// `limit` (100-500): a chunk's job is to make real progress against
+/// sparse matches/holes without round-tripping to the broker for every few
+/// records.
+const CHUNK_SPAN: u64 = 5_000;
+
+/// Decodes a single record — a thin wrapper over `fetch::to_message_out`'s
+/// batch API (mirrors `search.rs`'s `one_message_out`), used because
+/// filtering must decode-then-test one record at a time as the merge walks
+/// forward (see `run_page`'s doc comment, step 3): a filter's verdict on a
+/// record can only be known after decoding it, and the loop's stopping
+/// condition (accumulated matches reaching `limit`) depends on that verdict
+/// record-by-record, not on a batch decoded after the fact.
+async fn decode_one(record: RawRecord, sr: Option<&super::schema_registry::SchemaRegistry>) -> MessageOut {
+    fetch::to_message_out(vec![record], sr).await.pop().expect("one in, one out")
+}
+
+/// Runs one timeline page — filtered or not, `filter: None` behaving as
+/// match-everything (the design's "filter-off = match-all, same code
+/// path"). Fetches fresh-enough windows, scans and decodes them, and emits
+/// `TimelineEvent`s over an mpsc channel until `limit` matches are found,
+/// the topic edge is truly reached, or the per-request scan `budget` is
+/// spent.
 ///
 /// Fix round 2 replaced simple truncation with **contiguous selection**:
 /// each partition can only ever contribute a *contiguous prefix* of its
@@ -350,6 +373,14 @@ fn page_made_no_progress(taken_is_empty: bool, any_incomplete_window: bool, canc
 /// tombstones — and round 2 could not tell those apart from a genuine short
 /// read (fetch's own deadline cutting a scan short), producing spurious
 /// errors or `exhausted: false` on perfectly healthy, hole-having topics.
+///
+/// Task 3 turns the single-window pass into a **chunked scan loop**: each
+/// iteration below is a "chunk" — one window of up to `CHUNK_SPAN` records
+/// per partition (the very first chunk of an *unfiltered* page instead uses
+/// exactly `limit`, matching this engine's original one-shot behavior and
+/// its performance: an ordinary "give me the latest 100" page must not
+/// suddenly fetch 5,000 records per partition just in case there's a hole
+/// nearby). One chunk:
 ///
 /// 1. Per partition, order its fetched window records *adjacent-first*:
 ///    `Back` sorts offset descending (nearest-to-position first, since the
@@ -367,23 +398,30 @@ fn page_made_no_progress(taken_is_empty: bool, any_incomplete_window: bool, canc
 ///    for an **incomplete** partition does round 2's original guard still
 ///    apply: if its fetched records don't include the position-adjacent
 ///    offset (`adjacent_offset`), the entire window is discarded for this
-///    page (contributes nothing, position doesn't move) — because for an
+///    chunk (contributes nothing, position doesn't move) — because for an
 ///    incomplete partition we genuinely can't tell a hole from data that
 ///    just hasn't arrived yet.
-/// 3. **k-way merge**: repeatedly compare the current head (next
-///    unconsumed, adjacent-most record) of every partition's stream and
-///    take the one `merge_prefers` (best timestamp for the direction; see
-///    its doc comment for the tie-break), advancing only that partition's
-///    stream — until `limit` records are taken or every stream is empty.
+/// 3. **k-way merge, decode-as-you-go**: repeatedly compare the current head
+///    (next unconsumed, adjacent-most record) of every partition's stream
+///    and take the one `merge_prefers` (best timestamp for the direction;
+///    see its doc comment for the tie-break), decoding and filtering it
+///    immediately — this record-by-record decode (as opposed to decoding
+///    the whole taken batch at the end, task 2's shape) is what lets the
+///    loop's stopping condition depend on the filter's verdict. Every
+///    popped record (matching or not) still advances that partition's
+///    cursor bookkeeping below; only matches are queued for emission. The
+///    inner loop stops once accumulated matches (this chunk's plus every
+///    earlier chunk's, this request) reach `limit`, or every stream is
+///    empty.
 /// 4. **Cursor (N6: by offset, not count)**: a *complete* partition whose
-///    stream ends this page fully drained — every delivered record was
+///    stream ends this chunk fully drained — every delivered record was
 ///    taken, or it started empty (a window that was nothing but holes) —
 ///    jumps straight to the **window boundary** (`w.start`/`w.end`):
 ///    completeness already confirms the *entire* range, real records and
 ///    holes alike, has been accounted for, so there's nothing left to wait
 ///    for, including any trailing hole past the last real record (a
 ///    committed transaction's control record, say). Otherwise, a partition
-///    with records taken this page advances only to `min(taken offsets)`
+///    with records taken this chunk advances only to `min(taken offsets)`
 ///    (`Back`) or `max(taken offsets) + 1` (`Forward`) — the position bound
 ///    is exclusive-upper for `Back`, so the lowest offset actually taken
 ///    *is* the new bound; inclusive-lower for `Forward`, so one past the
@@ -395,19 +433,37 @@ fn page_made_no_progress(taken_is_empty: bool, any_incomplete_window: bool, canc
 ///    page. A partition with nothing taken and *not* complete-and-drained
 ///    keeps its old position unchanged — the safe default, whether it lost
 ///    every merge comparison (real data still pending) or is incomplete
-///    (unknown state).
-/// 5. The taken set (already ≤ `limit`, already loss-free, already
-///    overlap-free) is sorted into **display** order —
+///    (unknown state). The **scan budget** is charged by the exact offset
+///    span each partition's position advanced this chunk (`old.abs_diff(new)`,
+///    summed) — not by matches or even by delivered records — precisely so
+///    that a chunk whose window is nothing but holes (zero delivered
+///    records) still spends budget proportional to the ground it covered;
+///    otherwise an unfiltered page could cross an unbounded hole region for
+///    free, defeating the whole point of a *scan* budget.
+/// 5. Each chunk's matches (already ≤ remaining `limit`, already loss-free,
+///    already overlap-free) are sorted into **display** order —
 ///    `(timestamp_ms, partition, offset)`, desc/asc to match `direction` —
-///    before decoding and emitting; the merge's *selection* order can
-///    differ from display order under non-monotonic timestamps, which is
-///    exactly the page-boundary "fuzz" the design doc already licenses.
+///    and emitted before moving to the next chunk: the merge's *selection*
+///    order can differ from display order under non-monotonic timestamps,
+///    and chunk-to-chunk the display order is only as good as each chunk's
+///    own sort — both are exactly the page-boundary "fuzz" the design doc
+///    already licenses, now also licensed *within* one request's chunks.
 /// 6. **Progress guarantee** (`page_made_no_progress`, narrowed by N4): a
-///    page that took nothing, wasn't cancelled, and had at least one
+///    chunk that took nothing, wasn't cancelled, and had at least one
 ///    genuinely *incomplete* window (a true short read) reports a terminal
-///    `error` rather than an unadvanced, non-exhausted `page_end`. A page
+///    `error` rather than an unadvanced, non-exhausted `page_end`. A chunk
 ///    that took nothing only because every window was complete-and-holes
-///    is *not* an error — see step 4(b).
+///    is *not* an error — it simply advances past the hole and (step 7)
+///    the outer loop tries another chunk.
+///
+/// The **outer loop** keeps running chunks until: accumulated matches reach
+/// `limit`; the scan budget is spent (`page_end` reports `exhausted:
+/// false`, never a silent stop — the client can request another page from
+/// the returned cursor); or every partition has truly reached its
+/// low/high watermark edge (`exhausted: true`, the only end-of-data
+/// signal). This is what makes a hole-dominated region — filtered or not —
+/// get crossed within one request instead of one near-empty page per
+/// `limit` offsets.
 #[allow(clippy::too_many_arguments)] // mirrors search.rs's `drive_partition`
 pub fn run_page(
     handle: Arc<ClusterHandle>,
@@ -422,197 +478,247 @@ pub fn run_page(
     let (tx, rx) = mpsc::channel::<TimelineEvent>(256);
     let cancelled = Arc::new(AtomicBool::new(false));
     let cancel = cancelled.clone();
-    // Budget only bounds filtered scans (task 4): an unfiltered page's window
-    // span is exactly `limit`, so there is nothing left to keep scanning
-    // past once the window is consumed.
-    let _ = budget;
 
     tokio::spawn(async move {
-        if filter.is_some() {
-            // Filtered timeline pages (budget-driven scanning with a
-            // `continue` affordance) are Task 4's responsibility. Reporting
-            // a loud `error` here — rather than quietly ignoring the filter
-            // and returning an unfiltered page — matches the product
-            // charter's "never silently skip" rule.
-            let _ = tx.send(TimelineEvent::Error {
-                code: "not_implemented".into(),
-                message: "filtered timeline pages are not yet implemented".into(),
-                cluster: Some(handle.name.clone()),
-                retriable: false,
-            }).await;
-            return;
-        }
-
         // C4/N5: clamp before anything else sees `positions` (see the doc
         // comment on `clamp_positions`).
-        let positions = clamp_positions(&positions, &watermarks);
+        let mut cur_positions = clamp_positions(&positions, &watermarks);
+        let limit_u64 = limit as u64;
+        let budget = budget.max(1);
+
+        let mut total_matches: u64 = 0;
+        let mut total_scanned: u64 = 0;
+        let mut chunk_index: u64 = 0;
+        let mut exhausted = false;
 
         type ScanResult = Result<(fetch::FetchOutcome, Vec<PartitionRange>), ApiError>;
-        let result = {
-            let cfg = handle.config.clone();
-            let topic = topic.clone();
-            let positions = positions.clone();
-            let watermarks = watermarks.clone();
-            // I3: `run_page`'s own `cancelled` flag (checked by
-            // `CancelOnDrop` on client disconnect) now actually reaches the
-            // blocking scan loop, the same way `search.rs`'s does — a
-            // dropped SSE stream stops the in-flight Kafka poll loop instead
-            // of only ever toggling a flag nothing reads.
-            let cancelled = cancelled.clone();
-            tokio::task::spawn_blocking(move || -> ScanResult {
-                let windows = page_windows(&positions, &watermarks, direction, limit as u64);
-                let cap = range::total(&windows) as usize;
-                let outcome = fetch::fetch_ranges_blocking(&cfg, &topic, &windows, cap, &cancelled)?;
-                Ok((outcome, windows))
-            }).await
-        };
 
-        let (outcome, windows) = match result {
-            Ok(Ok(pair)) => pair,
-            Ok(Err(e)) => {
-                let _ = tx.send(e.into()).await;
-                return;
+        'chunks: loop {
+            if total_matches >= limit_u64 || total_scanned >= budget {
+                break;
             }
-            Err(join_err) => {
-                let _ = tx.send(ApiError::internal(format!("task join: {join_err}")).into()).await;
-                return;
+
+            let remaining_budget = budget - total_scanned;
+            let active_partitions = (cur_positions.len() as u64).max(1);
+            let per_partition_share = (remaining_budget / active_partitions).max(1);
+            let base_span = if filter.is_none() && chunk_index == 0 { limit_u64 } else { CHUNK_SPAN };
+            let span = base_span.min(per_partition_share).max(1);
+
+            let windows = page_windows(&cur_positions, &watermarks, direction, span);
+            if windows.is_empty() {
+                // No partition has anything left in `direction`: the true
+                // topic edge, independent of the budget.
+                exhausted = true;
+                break;
             }
-        };
-        let complete = outcome.complete;
 
-        // Group fetched records by partition, ascending by offset (their
-        // natural fetch order — `fetch_ranges_blocking` scans low-to-high
-        // per partition regardless of `direction`; sorting explicitly here
-        // is a cheap defensive guarantee, not a load-bearing assumption).
-        let mut by_partition: HashMap<i32, Vec<RawRecord>> = HashMap::new();
-        for r in outcome.records {
-            by_partition.entry(r.partition).or_default().push(r);
-        }
-        for v in by_partition.values_mut() {
-            v.sort_by_key(|r| r.offset);
-        }
-
-        // Step 1 + 2: build each partition's adjacent-first stream. `streams`
-        // and `is_complete` are indexed in parallel with `windows` (minor: a
-        // plain `Vec` here, not a `HashMap<i32, _>` keyed by partition,
-        // avoids a lookup-then-`.expect()` chain in the merge loop below —
-        // indices are always in-bounds by construction).
-        let is_complete: Vec<bool> = windows.iter().map(|w| complete.contains(&w.partition)).collect();
-        let mut streams: Vec<VecDeque<RawRecord>> = Vec::with_capacity(windows.len());
-        for (w, &partition_complete) in windows.iter().zip(&is_complete) {
-            let fetched = by_partition.remove(&w.partition).unwrap_or_default();
-            // N4: a complete partition's holes (if any) are confirmed
-            // legitimate — trust its delivered records as-is. Only an
-            // incomplete partition still needs the N3 short-read guard:
-            // without the position-adjacent offset, we can't tell a real
-            // hole from data that simply hasn't arrived yet.
-            let trust_as_is = partition_complete || fetched.iter().any(|r| r.offset == adjacent_offset(w, direction));
-            let ordered: VecDeque<RawRecord> = if trust_as_is {
-                match direction {
-                    Direction::Back => fetched.into_iter().rev().collect(),
-                    Direction::Forward => fetched.into_iter().collect(),
-                }
-            } else {
-                VecDeque::new()
+            let result: ScanResult = {
+                let cfg = handle.config.clone();
+                let topic = topic.clone();
+                let windows = windows.clone();
+                // I3: `run_page`'s own `cancelled` flag (checked by
+                // `CancelOnDrop` on client disconnect) reaches the blocking
+                // scan loop, the same way `search.rs`'s does — a dropped
+                // SSE stream stops the in-flight Kafka poll loop instead of
+                // only ever toggling a flag nothing reads.
+                let cancelled = cancelled.clone();
+                tokio::task::spawn_blocking(move || -> ScanResult {
+                    let cap = range::total(&windows) as usize;
+                    let outcome = fetch::fetch_ranges_blocking(&cfg, &topic, &windows, cap, &cancelled)?;
+                    Ok((outcome, windows))
+                }).await
+                .unwrap_or_else(|join_err| Err(ApiError::internal(format!("task join: {join_err}"))))
             };
-            streams.push(ordered);
-        }
 
-        // Step 3: k-way merge, taking at most `limit` records total. `best`
-        // carries the current-best candidate's reference along with its
-        // index (minor: hoisted out of a HashMap re-lookup every iteration).
-        let mut taken: Vec<RawRecord> = Vec::new();
-        let mut taken_min: Vec<Option<i64>> = vec![None; windows.len()];
-        let mut taken_max: Vec<Option<i64>> = vec![None; windows.len()];
-        while taken.len() < limit {
-            let mut best: Option<(usize, &RawRecord)> = None;
-            for (i, stream) in streams.iter().enumerate() {
-                let Some(candidate) = stream.front() else { continue };
-                best = match best {
-                    None => Some((i, candidate)),
-                    Some((bi, current_best)) => {
-                        if merge_prefers(direction, candidate, current_best) { Some((i, candidate)) } else { Some((bi, current_best)) }
+            let (outcome, windows) = match result {
+                Ok(pair) => pair,
+                Err(e) => {
+                    let _ = tx.send(e.into()).await;
+                    return;
+                }
+            };
+            let complete = outcome.complete;
+
+            // Group fetched records by partition, ascending by offset
+            // (their natural fetch order — `fetch_ranges_blocking` scans
+            // low-to-high per partition regardless of `direction`; sorting
+            // explicitly here is a cheap defensive guarantee, not a
+            // load-bearing assumption).
+            let mut by_partition: HashMap<i32, Vec<RawRecord>> = HashMap::new();
+            for r in outcome.records {
+                by_partition.entry(r.partition).or_default().push(r);
+            }
+            for v in by_partition.values_mut() {
+                v.sort_by_key(|r| r.offset);
+            }
+
+            // Step 1 + 2: build each partition's adjacent-first stream.
+            // `streams` and `is_complete` are indexed in parallel with
+            // `windows` (minor: a plain `Vec` here, not a `HashMap<i32, _>`
+            // keyed by partition, avoids a lookup-then-`.expect()` chain in
+            // the merge loop below — indices are always in-bounds by
+            // construction).
+            let is_complete: Vec<bool> = windows.iter().map(|w| complete.contains(&w.partition)).collect();
+            let mut streams: Vec<VecDeque<RawRecord>> = Vec::with_capacity(windows.len());
+            for (w, &partition_complete) in windows.iter().zip(&is_complete) {
+                let fetched = by_partition.remove(&w.partition).unwrap_or_default();
+                // N4: a complete partition's holes (if any) are confirmed
+                // legitimate — trust its delivered records as-is. Only an
+                // incomplete partition still needs the N3 short-read guard:
+                // without the position-adjacent offset, we can't tell a
+                // real hole from data that simply hasn't arrived yet.
+                let trust_as_is = partition_complete || fetched.iter().any(|r| r.offset == adjacent_offset(w, direction));
+                let ordered: VecDeque<RawRecord> = if trust_as_is {
+                    match direction {
+                        Direction::Back => fetched.into_iter().rev().collect(),
+                        Direction::Forward => fetched.into_iter().collect(),
                     }
+                } else {
+                    VecDeque::new()
                 };
+                streams.push(ordered);
             }
-            let Some((i, _)) = best else { break };
-            let rec = streams[i].pop_front().expect("index i was just selected from a non-empty front() above");
-            let offset = rec.offset;
-            taken_min[i] = Some(taken_min[i].map_or(offset, |m| m.min(offset)));
-            taken_max[i] = Some(taken_max[i].map_or(offset, |m| m.max(offset)));
-            taken.push(rec);
-        }
 
-        // Step 4: N6 exact offset-based cursor math (see doc comment above).
-        // A complete partition whose stream is now fully drained (every
-        // delivered record taken, or it started empty — a window that was
-        // nothing but holes) has had its *entire* window accounted for, real
-        // records and holes alike, so it jumps straight to the window
-        // boundary — not just to the edge of what got taken, which could
-        // strand it just short of a trailing hole forever. A partition
-        // that's complete but still has real records left in its stream
-        // (the merge loop hit `limit` first) must NOT take that shortcut —
-        // there's pending data it would skip past.
-        let new_positions: Vec<(i32, i64)> = positions
-            .iter()
-            .map(|&(p, pos)| {
-                let Some(i) = windows.iter().position(|w| w.partition == p) else { return (p, pos) };
-                let w = &windows[i];
-                if is_complete[i] && streams[i].is_empty() {
-                    return (p, match direction { Direction::Back => w.start, Direction::Forward => w.end });
+            // Step 3: k-way merge with per-record decode+filter, taking
+            // until this chunk's contribution plus every earlier chunk's
+            // matches reach `limit`, or every stream is empty.
+            let mut taken_min: Vec<Option<i64>> = vec![None; windows.len()];
+            let mut taken_max: Vec<Option<i64>> = vec![None; windows.len()];
+            let mut any_taken = false;
+            let mut chunk_matches: Vec<MessageOut> = Vec::new();
+            let mut since_progress: u64 = 0;
+            loop {
+                if total_matches + chunk_matches.len() as u64 >= limit_u64 {
+                    break;
                 }
-                match direction {
-                    Direction::Back => match taken_min[i] {
-                        Some(min_offset) => (p, min_offset),
-                        None => (p, pos),
-                    },
-                    Direction::Forward => match taken_max[i] {
-                        Some(max_offset) => (p, max_offset + 1),
-                        None => (p, pos),
-                    },
+                let mut best: Option<(usize, &RawRecord)> = None;
+                for (i, stream) in streams.iter().enumerate() {
+                    let Some(candidate) = stream.front() else { continue };
+                    best = match best {
+                        None => Some((i, candidate)),
+                        Some((bi, current_best)) => {
+                            if merge_prefers(direction, candidate, current_best) { Some((i, candidate)) } else { Some((bi, current_best)) }
+                        }
+                    };
                 }
-            })
-            .collect();
+                let Some((i, _)) = best else { break };
+                let rec = streams[i].pop_front().expect("index i was just selected from a non-empty front() above");
+                let offset = rec.offset;
+                taken_min[i] = Some(taken_min[i].map_or(offset, |m| m.min(offset)));
+                taken_max[i] = Some(taken_max[i].map_or(offset, |m| m.max(offset)));
+                any_taken = true;
 
-        // Step 6: progress guarantee — before computing/sending anything
-        // else, so a stalled page never reaches the normal page_end path.
-        let any_incomplete_window = is_complete.iter().any(|&c| !c);
-        if page_made_no_progress(taken.is_empty(), any_incomplete_window, cancelled.load(Ordering::SeqCst)) {
-            let _ = tx.send(ApiError::kafka(
-                &handle.name,
-                "page made no progress: broker returned no records for non-empty windows",
-            ).into()).await;
-            return;
-        }
+                let decoded = decode_one(rec, handle.schema_registry.as_deref()).await;
+                let is_match = filter.as_ref().is_none_or(|f| super::filter::matches(f, &decoded));
+                if is_match {
+                    chunk_matches.push(decoded);
+                }
 
-        let exhausted = new_positions.iter().all(|&(p, pos)| {
-            watermarks.iter().find(|(wp, _, _)| *wp == p).is_some_and(|&(_, lo, hi)| match direction {
-                Direction::Back => pos == lo,
-                Direction::Forward => pos == hi,
-            })
-        });
-        let cursor = if exhausted { None } else { Some(Cursor { direction, positions: new_positions }.encode()) };
+                // Progress guarantee (design doc): at least every 2,000
+                // scanned, a `progress` event goes out mid-chunk, not just
+                // at chunk boundaries — a single chunk can span thousands
+                // of records (`CHUNK_SPAN`), and a filtered scan hunting a
+                // sparse needle must not go quiet for that long.
+                since_progress += 1;
+                if since_progress >= 2_000 {
+                    let _ = tx.send(TimelineEvent::Progress {
+                        scanned: total_scanned + since_progress,
+                        matches: total_matches + chunk_matches.len() as u64,
+                        budget,
+                    }).await;
+                    since_progress = 0;
+                }
+            }
 
-        // Step 5: display order, then decode only the taken (≤ limit) set.
-        match direction {
-            Direction::Back => taken.sort_by(|a, b| {
-                b.timestamp_ms.unwrap_or(i64::MIN).cmp(&a.timestamp_ms.unwrap_or(i64::MIN))
-                    .then(a.partition.cmp(&b.partition))
-                    .then(b.offset.cmp(&a.offset))
-            }),
-            Direction::Forward => taken.sort_by(|a, b| {
-                a.timestamp_ms.unwrap_or(i64::MIN).cmp(&b.timestamp_ms.unwrap_or(i64::MIN))
-                    .then(a.partition.cmp(&b.partition))
-                    .then(a.offset.cmp(&b.offset))
-            }),
-        }
+            // Step 4: N6 exact offset-based cursor math (see doc comment
+            // above). A complete partition whose stream is now fully
+            // drained (every delivered record taken, or it started empty —
+            // a window that was nothing but holes) has had its *entire*
+            // window accounted for, real records and holes alike, so it
+            // jumps straight to the window boundary — not just to the edge
+            // of what got taken, which could strand it just short of a
+            // trailing hole forever. A partition that's complete but still
+            // has real records left in its stream (the merge loop hit the
+            // match target first) must NOT take that shortcut — there's
+            // pending data it would skip past.
+            let new_positions: Vec<(i32, i64)> = cur_positions
+                .iter()
+                .map(|&(p, pos)| {
+                    let Some(i) = windows.iter().position(|w| w.partition == p) else { return (p, pos) };
+                    let w = &windows[i];
+                    if is_complete[i] && streams[i].is_empty() {
+                        return (p, match direction { Direction::Back => w.start, Direction::Forward => w.end });
+                    }
+                    match direction {
+                        Direction::Back => match taken_min[i] {
+                            Some(min_offset) => (p, min_offset),
+                            None => (p, pos),
+                        },
+                        Direction::Forward => match taken_max[i] {
+                            Some(max_offset) => (p, max_offset + 1),
+                            None => (p, pos),
+                        },
+                    }
+                })
+                .collect();
 
-        let decoded = fetch::to_message_out(taken, handle.schema_registry.as_deref()).await;
-        for m in decoded {
-            if tx.send(TimelineEvent::Match(Box::new(m))).await.is_err() {
-                return; // client disconnected: no point sending page_end
+            // Step 6: progress guarantee — before committing this chunk's
+            // results, so a stalled chunk never reaches the normal
+            // page_end path.
+            let any_incomplete_window = is_complete.iter().any(|&c| !c);
+            if page_made_no_progress(!any_taken, any_incomplete_window, cancelled.load(Ordering::SeqCst)) {
+                let _ = tx.send(ApiError::kafka(
+                    &handle.name,
+                    "page made no progress: broker returned no records for non-empty windows",
+                ).into()).await;
+                return;
+            }
+
+            // Charge the budget by the exact offset span each partition
+            // advanced this chunk — holes included (see doc comment above).
+            let chunk_scanned: u64 = cur_positions
+                .iter()
+                .zip(&new_positions)
+                .map(|(&(_, old), &(_, new))| old.abs_diff(new))
+                .sum();
+            total_scanned += chunk_scanned;
+            total_matches += chunk_matches.len() as u64;
+
+            exhausted = new_positions.iter().all(|&(p, pos)| {
+                watermarks.iter().find(|(wp, _, _)| *wp == p).is_some_and(|&(_, lo, hi)| match direction {
+                    Direction::Back => pos == lo,
+                    Direction::Forward => pos == hi,
+                })
+            });
+            cur_positions = new_positions;
+            chunk_index += 1;
+
+            // Step 5: display order, then emit — one chunk at a time.
+            match direction {
+                Direction::Back => chunk_matches.sort_by(|a, b| {
+                    b.timestamp_ms.unwrap_or(i64::MIN).cmp(&a.timestamp_ms.unwrap_or(i64::MIN))
+                        .then(a.partition.cmp(&b.partition))
+                        .then(b.offset.cmp(&a.offset))
+                }),
+                Direction::Forward => chunk_matches.sort_by(|a, b| {
+                    a.timestamp_ms.unwrap_or(i64::MIN).cmp(&b.timestamp_ms.unwrap_or(i64::MIN))
+                        .then(a.partition.cmp(&b.partition))
+                        .then(a.offset.cmp(&b.offset))
+                }),
+            }
+            for m in chunk_matches {
+                if tx.send(TimelineEvent::Match(Box::new(m))).await.is_err() {
+                    return; // client disconnected: no point sending more
+                }
+            }
+            let _ = tx.send(TimelineEvent::Progress { scanned: total_scanned, matches: total_matches, budget }).await;
+
+            if exhausted {
+                break 'chunks;
             }
         }
+
+        let cursor = if exhausted { None } else { Some(Cursor { direction, positions: cur_positions }.encode()) };
         let _ = tx.send(TimelineEvent::PageEnd { cursor, exhausted }).await;
     });
 

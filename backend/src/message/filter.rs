@@ -6,6 +6,13 @@ pub enum Filter {
     KeyContains(String),
     ValueContains(String),
     JsonPathEquals { path: String, value: String },
+    /// Case-insensitive contains on key text OR value text — the bare-text
+    /// filter box of the timeline design (`filter=contains&q=...`). The
+    /// value side keeps the same decode-error exclusion as `ValueContains`
+    /// (a base64-of-raw-bytes blob is not real content); the key side
+    /// matches whenever the key decoded at all (a `None` key never matches,
+    /// same convention as `KeyEquals`/`KeyContains`).
+    Contains(String),
 }
 
 impl Filter {
@@ -14,6 +21,7 @@ impl Filter {
             "key_eq" => Ok(Filter::KeyEquals(q.to_string())),
             "key_contains" => Ok(Filter::KeyContains(q.to_string())),
             "value_contains" => Ok(Filter::ValueContains(q.to_string())),
+            "contains" => Ok(Filter::Contains(q.to_string())),
             "json_eq" => path
                 .map(|p| Filter::JsonPathEquals { path: p.to_string(), value: q.to_string() })
                 .ok_or_else(|| "filter json_eq requires a path parameter".to_string()),
@@ -61,6 +69,14 @@ pub fn matches(filter: &Filter, msg: &MessageOut) -> bool {
                     .and_then(|root| json_at_path(&root, path).map(|found| scalar_eq(found, value)))
                     .unwrap_or(false)
         }),
+        Filter::Contains(q) => {
+            let q = q.to_lowercase();
+            let key_hit = msg.key.as_ref().is_some_and(|k| k.text.to_lowercase().contains(&q));
+            let value_hit = msg.value.as_ref().is_some_and(|v| {
+                v.encoding != Encoding::DecodeError && v.text.to_lowercase().contains(&q)
+            });
+            key_hit || value_hit
+        }
     }
 }
 
@@ -137,7 +153,35 @@ mod tests {
     fn parse_validates() {
         assert!(matches!(Filter::parse("key_eq", "k", None), Ok(Filter::KeyEquals(_))));
         assert!(matches!(Filter::parse("json_eq", "42", Some("a.b")), Ok(Filter::JsonPathEquals { .. })));
+        assert!(matches!(Filter::parse("contains", "x", None), Ok(Filter::Contains(_))));
         assert!(Filter::parse("json_eq", "42", None).is_err());
         assert!(Filter::parse("sideways", "x", None).is_err());
+    }
+
+    #[test]
+    fn contains_hits_on_key() {
+        let m = msg(Some("order-42"), "irrelevant value", Encoding::Utf8);
+        assert!(matches(&Filter::Contains("order".into()), &m));
+        assert!(!matches(&Filter::Contains("nope".into()), &m));
+    }
+
+    #[test]
+    fn contains_hits_on_value() {
+        let m = msg(None, "hello kafka world", Encoding::Utf8);
+        assert!(matches(&Filter::Contains("kafka".into()), &m));
+        assert!(!matches(&Filter::Contains("rabbit".into()), &m));
+    }
+
+    #[test]
+    fn contains_is_case_insensitive() {
+        let m = msg(Some("Order-42"), "Hello KAFKA World", Encoding::Utf8);
+        assert!(matches(&Filter::Contains("ORDER".into()), &m));
+        assert!(matches(&Filter::Contains("kafka".into()), &m));
+    }
+
+    #[test]
+    fn contains_never_matches_decode_error_value() {
+        let m = msg(None, "a-base64-blob-that-happens-to-contain-special", Encoding::DecodeError);
+        assert!(!matches(&Filter::Contains("special".into()), &m));
     }
 }
