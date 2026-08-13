@@ -5,7 +5,6 @@ pub mod filter;
 pub mod proto;
 pub mod range;
 pub mod schema_registry;
-pub mod search;
 pub mod tail;
 pub mod timeline;
 

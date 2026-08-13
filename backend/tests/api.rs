@@ -216,159 +216,6 @@ async fn topics_on_unknown_cluster_is_404() {
 }
 
 #[tokio::test]
-async fn browse_latest_returns_newest_messages_decoded() {
-    let bootstrap = start_kafka().await;
-    create_topic(&bootstrap, "browse-topic", 2).await;
-    produce(&bootstrap, "browse-topic", 10).await; // keys k0..k9, values v0..v9
-    let state = state_for(&bootstrap, vec![]);
-    let (status, body) = get_json(app(state), "/api/clusters/test/topics/browse-topic/messages?anchor=latest&limit=4").await;
-    assert_eq!(status, 200, "body: {body}");
-    let messages = body["messages"].as_array().unwrap();
-    assert_eq!(messages.len(), 4);
-    for m in messages {
-        assert_eq!(m["value"]["encoding"], "utf8");
-        assert!(m["value"]["text"].as_str().unwrap().starts_with('v'));
-        assert!(m["offset"].as_i64().is_some());
-        assert!(m["timestamp_ms"].as_i64().unwrap() > 0);
-    }
-    assert!(body["as_of"].as_i64().unwrap() > 0);
-}
-
-#[tokio::test]
-async fn browse_by_offset_is_exact() {
-    let bootstrap = start_kafka().await;
-    create_topic(&bootstrap, "browse-offset-topic", 1).await;
-    produce(&bootstrap, "browse-offset-topic", 10).await;
-    let state = state_for(&bootstrap, vec![]);
-    let (status, body) = get_json(
-        app(state),
-        "/api/clusters/test/topics/browse-offset-topic/messages?anchor=offset&partition=0&offset=3&limit=2",
-    ).await;
-    assert_eq!(status, 200, "body: {body}");
-    let messages = body["messages"].as_array().unwrap();
-    assert_eq!(messages.len(), 2);
-    let offsets: Vec<i64> = messages.iter().map(|m| m["offset"].as_i64().unwrap()).collect();
-    assert!(offsets.contains(&3) && offsets.contains(&4), "got offsets {offsets:?}");
-}
-
-#[tokio::test]
-async fn browse_bad_anchor_is_400_and_unknown_topic_404() {
-    let bootstrap = start_kafka().await;
-    let state = state_for(&bootstrap, vec![]);
-    let (status, body) = get_json(app(state.clone()), "/api/clusters/test/topics/x/messages?anchor=sideways").await;
-    assert_eq!(status, 400, "body: {body}");
-    let (status, body) = get_json(app(state), "/api/clusters/test/topics/ghost-topic/messages?anchor=latest").await;
-    assert_eq!(status, 404, "body: {body}");
-    assert_eq!(body["code"], "topic_not_found");
-}
-
-#[tokio::test]
-async fn search_streams_matches_progress_and_done() {
-    let bootstrap = start_kafka().await;
-    create_topic(&bootstrap, "search-topic", 2).await;
-    produce(&bootstrap, "search-topic", 30).await; // v0..v29
-    let state = state_for(&bootstrap, vec![]);
-    let events = collect_sse(
-        app(state),
-        "/api/clusters/test/topics/search-topic/search?range=last_n&n=30&filter=value_contains&q=v2",
-        200,
-    ).await;
-
-    let matches: Vec<_> = events.iter().filter(|(n, _)| n == "match").collect();
-    // v2, v20..v29 = 11 matches
-    assert_eq!(matches.len(), 11, "events: {events:?}");
-    for (_, m) in &matches {
-        assert!(m["value"]["text"].as_str().unwrap().contains("v2"));
-    }
-    let (last_name, last) = events.last().unwrap();
-    assert_eq!(last_name, "done");
-    assert_eq!(last["reason"], "complete");
-    let progress: Vec<_> = events.iter().filter(|(n, _)| n == "progress").collect();
-    assert!(!progress.is_empty(), "expected progress events");
-    let (_, p) = progress.last().unwrap();
-    assert_eq!(p["total"], 30);
-    assert_eq!(p["scanned"], 30);
-    assert_eq!(p["matches"], 11);
-}
-
-#[tokio::test]
-async fn search_stops_at_max_matches() {
-    use betrachtung::config::Limits;
-    let bootstrap = start_kafka().await;
-    create_topic(&bootstrap, "search-cap-topic", 1).await;
-    produce(&bootstrap, "search-cap-topic", 20).await;
-    let mut state = state_for(&bootstrap, vec![]);
-    state.limits = std::sync::Arc::new(Limits { max_search_matches: 3, ..Limits::default() });
-    let events = collect_sse(
-        app(state),
-        "/api/clusters/test/topics/search-cap-topic/search?range=last_n&n=20&filter=value_contains&q=v",
-        200,
-    ).await;
-    let matches = events.iter().filter(|(n, _)| n == "match").count();
-    assert_eq!(matches, 3, "events: {events:?}");
-    assert_eq!(events.last().unwrap().1["reason"], "max_matches");
-}
-
-#[tokio::test]
-async fn search_max_matches_with_deep_partitions() {
-    use betrachtung::config::Limits;
-    let bootstrap = start_kafka().await;
-    create_topic(&bootstrap, "search-deep-topic", 2).await;
-    produce(&bootstrap, "search-deep-topic", 200).await;
-    let mut state = state_for(&bootstrap, vec![]);
-    state.limits = std::sync::Arc::new(Limits { max_search_matches: 3, ..Limits::default() });
-    // A worker that hits the match cap breaks out of its own recv loop while
-    // its partition's scanner thread may still be parked mid-send; if that
-    // scanner is never woken, the stream never reaches `done` and this hangs
-    // forever. Bound it explicitly so a regression fails fast instead of
-    // wedging the test run. (The exact lock-step race is captured
-    // deterministically, independent of real Kafka timing, by
-    // `message::search::tests::worker_giving_up_early_wakes_a_parked_scanner`
-    // in src/message/search.rs; this test covers the same defect end to end.)
-    let events = tokio::time::timeout(
-        std::time::Duration::from_secs(10),
-        collect_sse(
-            app(state),
-            "/api/clusters/test/topics/search-deep-topic/search?range=last_n&n=200&filter=value_contains&q=v",
-            500,
-        ),
-    )
-    .await
-    .expect("search must terminate with done{max_matches} within 10s instead of hanging");
-    let matches = events.iter().filter(|(n, _)| n == "match").count();
-    assert_eq!(matches, 3, "events: {events:?}");
-    assert_eq!(events.last().unwrap().1["reason"], "max_matches");
-}
-
-#[tokio::test]
-async fn search_bad_filter_is_error_event_or_400() {
-    let bootstrap = start_kafka().await;
-    let state = state_for(&bootstrap, vec![]);
-    let (status, body) = get_json(
-        app(state),
-        "/api/clusters/test/topics/x/search?range=last_n&n=10&filter=sideways&q=x",
-    ).await;
-    assert_eq!(status, 400, "body: {body}");
-    assert_eq!(body["code"], "bad_request");
-}
-
-/// I5 regression: `range` must be validated before any Kafka round trip —
-/// same as browse's `anchor` — so a malformed `range` on a topic that
-/// doesn't even exist is a fast 400, not a 404 (and not a broker round
-/// trip at all).
-#[tokio::test]
-async fn search_bad_range_on_unknown_topic_is_400_not_404() {
-    let bootstrap = start_kafka().await;
-    let state = state_for(&bootstrap, vec![]);
-    let (status, body) = get_json(
-        app(state),
-        "/api/clusters/test/topics/ghost-topic/search?range=sideways&filter=value_contains&q=x",
-    ).await;
-    assert_eq!(status, 400, "body: {body}");
-    assert_eq!(body["code"], "bad_request");
-}
-
-#[tokio::test]
 async fn tail_streams_new_messages() {
     let bootstrap = start_kafka().await;
     create_topic(&bootstrap, "tail-topic", 1).await;
@@ -413,8 +260,11 @@ async fn tail_streams_new_messages() {
 /// (magic byte 0x0 + a schema id) lands on a cluster with NO schema
 /// registry configured. Nothing should ever drop or hide this record — it
 /// must surface as `encoding: "decode_error"` with a non-empty error and
-/// the raw bytes as base64, in both browse (poll) and search (streaming)
-/// results.
+/// the raw bytes as base64, through the `/timeline` endpoint that replaced
+/// both `/messages` (browse) and `/search`: once unfiltered (a plain back
+/// page) and once with `filter=key_contains` matching its (decodable) key —
+/// a matched record whose *value* failed to decode must never be dropped
+/// from a filtered page either.
 #[tokio::test]
 async fn confluent_framed_message_without_registry_surfaces_as_decode_error_everywhere() {
     let bootstrap = start_kafka().await;
@@ -428,31 +278,33 @@ async fn confluent_framed_message_without_registry_surfaces_as_decode_error_ever
     // The "test" cluster (state_for) has no schema_registry configured.
     let state = state_for(&bootstrap, vec![]);
 
-    let (status, body) = get_json(
+    // (a) Unfiltered back page from latest must show the record with its
+    // value surfaced as a decode error, never silently dropped.
+    let events = collect_sse(
         app(state.clone()),
-        "/api/clusters/test/topics/confluent-no-sr-topic/messages?anchor=latest",
+        "/api/clusters/test/topics/confluent-no-sr-topic/timeline?direction=back&limit=10&anchor=latest",
+        50,
     ).await;
-    assert_eq!(status, 200, "body: {body}");
-    let messages = body["messages"].as_array().unwrap();
-    assert_eq!(messages.len(), 1, "messages: {messages:?}");
-    let v = &messages[0]["value"];
-    assert_eq!(v["encoding"], "decode_error", "browse must surface the decode failure, not skip it: {v:?}");
+    let matches: Vec<_> = events.iter().filter(|(n, _)| n == "match").collect();
+    assert_eq!(matches.len(), 1, "events: {events:?}");
+    let v = &matches[0].1["value"];
+    assert_eq!(v["encoding"], "decode_error", "timeline must surface the decode failure, not skip it: {v:?}");
     assert!(v["error"].as_str().is_some_and(|e| !e.is_empty()), "expected a non-empty error: {v:?}");
     assert!(v["text"].as_str().is_some_and(|t| !t.is_empty()), "expected base64 raw bytes: {v:?}");
 
-    // Filter on the key (which decodes fine as utf8) so the match doesn't
-    // depend on the value's content — the point here is that the record
-    // still surfaces in search results at all, with its value correctly
-    // labeled as a decode error.
+    // (b) Filter on the key (which decodes fine as utf8) so the match
+    // criterion doesn't depend on the value's content — the point is that a
+    // record matched by its key still surfaces in a filtered timeline page
+    // even though its value failed to decode.
     let events = collect_sse(
         app(state),
-        "/api/clusters/test/topics/confluent-no-sr-topic/search?range=last_n&n=10&filter=key_contains&q=confluent",
+        "/api/clusters/test/topics/confluent-no-sr-topic/timeline?direction=back&limit=10&anchor=latest&filter=key_contains&q=confluent",
         50,
     ).await;
     let matches: Vec<_> = events.iter().filter(|(n, _)| n == "match").collect();
     assert_eq!(matches.len(), 1, "events: {events:?}");
     let (_, m) = matches[0];
-    assert_eq!(m["value"]["encoding"], "decode_error", "search must surface the decode failure too: {m:?}");
+    assert_eq!(m["value"]["encoding"], "decode_error", "filtered timeline must surface the decode failure too: {m:?}");
     assert!(m["value"]["error"].as_str().is_some_and(|e| !e.is_empty()), "expected a non-empty error: {m:?}");
     assert!(m["value"]["text"].as_str().is_some_and(|t| !t.is_empty()), "expected base64 raw bytes: {m:?}");
 }
@@ -991,6 +843,37 @@ async fn timeline_unfiltered_page_crosses_a_hole_in_one_request() {
     let (_, end) = events.iter().find(|(n, _)| n == "page_end").unwrap().clone();
     assert_eq!(end["exhausted"], true, "the one real record is everything in the topic: {end}");
     assert!(end["cursor"].is_null());
+}
+
+/// The messages-timeline design supersedes both `/messages` (browse) and
+/// `/search` — "both DELETED — one code path wins" (the timeline). Neither
+/// route exists in the router any more, so a request to either now falls
+/// through to the SPA fallback like any other unmatched path: 200,
+/// text/html, not a JSON 404 from an API handler.
+#[tokio::test]
+async fn old_endpoints_are_gone() {
+    let bootstrap = start_kafka().await;
+    let state = state_for(&bootstrap, vec![]);
+
+    let res = app(state.clone())
+        .oneshot(axum::http::Request::builder()
+            .uri("/api/clusters/test/topics/x/messages?anchor=latest")
+            .body(axum::body::Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(res.status(), 200);
+    let ct = res.headers().get("content-type").unwrap().to_str().unwrap().to_string();
+    assert!(ct.starts_with("text/html"), "/messages must be gone (SPA fallback), got content-type {ct}");
+
+    let res = app(state)
+        .oneshot(axum::http::Request::builder()
+            .uri("/api/clusters/test/topics/x/search?range=last_n&n=10&filter=value_contains&q=x")
+            .body(axum::body::Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(res.status(), 200);
+    let ct = res.headers().get("content-type").unwrap().to_str().unwrap().to_string();
+    assert!(ct.starts_with("text/html"), "/search must be gone (SPA fallback), got content-type {ct}");
 }
 
 #[tokio::test]

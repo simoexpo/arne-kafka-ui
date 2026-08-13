@@ -16,8 +16,6 @@ pub fn app(state: AppState) -> Router {
         .route("/api/clusters/{cluster}/topics/{topic}", get(topics::detail))
         .route("/api/clusters/{cluster}/topics/{topic}/consumers", get(topics::consumers))
         .route("/api/clusters/{cluster}/topics/{topic}/throughput", get(topics::throughput))
-        .route("/api/clusters/{cluster}/topics/{topic}/messages", get(messages::browse))
-        .route("/api/clusters/{cluster}/topics/{topic}/search", get(messages::search))
         .route("/api/clusters/{cluster}/topics/{topic}/tail", get(messages::tail_sse))
         .route("/api/clusters/{cluster}/topics/{topic}/timeline", get(messages::timeline_sse))
         .route("/api/clusters/{cluster}/groups", get(groups::list))
