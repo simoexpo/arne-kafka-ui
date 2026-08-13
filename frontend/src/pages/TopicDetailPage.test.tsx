@@ -34,6 +34,7 @@ describe('TopicDetailView', () => {
     renderWithQuery(<TopicDetailView cluster="prod" topic="orders" />)
     await userEvent.click(screen.getByRole('button', { name: 'Partitions' }))
     expect(await screen.findByText('42')).toBeInTheDocument() // end offset p0
+    expect(screen.getByRole('heading', { name: '2 partitions' })).toBeInTheDocument()
     const rows = screen.getAllByTestId('partition-row')
     expect(rows).toHaveLength(2)
     expect(rows[1]).toHaveTextContent('under-replicated') // isr < replicas
@@ -44,6 +45,7 @@ describe('TopicDetailView', () => {
     renderWithQuery(<TopicDetailView cluster="prod" topic="orders" />)
     await userEvent.click(screen.getByRole('button', { name: 'Config' }))
     expect(await screen.findByTestId('stat-partitions')).toHaveTextContent('2')
+    expect(screen.getByRole('heading', { name: 'Summary' })).toBeInTheDocument()
     expect(screen.getByTestId('stat-cleanup.policy')).toHaveTextContent('delete')
     expect(screen.getByTestId('stat-retention.ms')).toHaveTextContent('604800000 (7d)')
     expect(screen.getByTestId('stat-retention.bytes')).toHaveTextContent('∞')
