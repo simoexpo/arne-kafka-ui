@@ -41,8 +41,17 @@ export function useTimelinePage(cluster: string, topic: string): UseTimelinePage
   })
   const [cursors, setCursors] = useState<TimelineCursors>({ back: null, forward: null })
   const handleRef = useRef<{ close: () => void } | null>(null)
+  // Bumped by every loadPage (and by cancel) — each page's handler closures
+  // capture the generation they were created under and no-op once it's
+  // stale. This is the authoritative "am I still the current stream" check:
+  // FakeEventSource (and, in principle, a real transport under a pathological
+  // edge case) can still fire events after close(), so closing the handle
+  // alone isn't a sufficient guard against a superseded stream's events
+  // reaching state.
+  const generationRef = useRef(0)
 
   const cancel = useCallback(() => {
+    generationRef.current += 1
     handleRef.current?.close()
     handleRef.current = null
   }, [])
@@ -56,6 +65,7 @@ export function useTimelinePage(cluster: string, topic: string): UseTimelinePage
       // was running, terminal event or not.
       handleRef.current?.close()
       handleRef.current = null
+      const myGen = ++generationRef.current
 
       let batch: MessageOut[] = []
       const flush = () => {
@@ -65,35 +75,61 @@ export function useTimelinePage(cluster: string, topic: string): UseTimelinePage
         onMatches(delivered)
       }
 
-      setState((prev) => ({ ...prev, loading: true, progress: null, error: null }))
+      // Anchor jumps (and fresh cursor pages) must clear stale exhaustion
+      // for the direction being (re)loaded — Task 7's viewport jumps rely
+      // on this so a previously-exhausted direction can become
+      // not-exhausted again after e.g. "jump to beginning".
+      setState((prev) => ({
+        ...prev,
+        loading: true,
+        progress: null,
+        error: null,
+        exhausted: { ...prev.exhausted, [params.direction]: false },
+      }))
 
       const handle = timelinePage(cluster, topic, params, {
         onMatch: (m) => {
+          if (generationRef.current !== myGen) return
           batch.push(m)
           if (batch.length >= BATCH_SIZE) flush()
         },
-        onProgress: (p) => setState((prev) => ({ ...prev, progress: p })),
+        onProgress: (p) => {
+          if (generationRef.current !== myGen) return
+          setState((prev) => ({ ...prev, progress: p }))
+        },
         onPageEnd: (cursor, exhausted) => {
+          if (generationRef.current !== myGen) return
           // Terminal: close before anything else, so no late transport
           // event (or browser auto-reconnect) can resurrect this stream —
           // the exact reconnect-loop failure mode v1 hit.
           handle.close()
           handleRef.current = null
-          flush()
+          // Finalize ALL of this page's state BEFORE flushing matches to
+          // the caller: flush() invokes the caller's onMatches synchronously,
+          // and a caller that starts another loadPage from inside onMatches
+          // (e.g. auto-advancing to the next page) must see its own
+          // loading:true/cursors survive — not get overwritten by this
+          // handler's own trailing updates running after the fact. The
+          // generation guard above additionally protects against the
+          // (structurally impossible here, but defensive) case where this
+          // handler fires after being superseded.
           setCursors((prev) => ({ ...prev, [params.direction]: cursor }))
           setState((prev) => ({
             ...prev,
             loading: false,
             exhausted: { ...prev.exhausted, [params.direction]: exhausted },
           }))
+          flush()
         },
         onError: (e) => {
+          if (generationRef.current !== myGen) return
           handle.close()
           handleRef.current = null
-          flush()
           setState((prev) => ({ ...prev, loading: false, error: e.message }))
+          flush()
         },
         onTransportError: () => {
+          if (generationRef.current !== myGen) return
           // Not a server-emitted terminal event, but EventSource's default
           // behavior is to auto-reconnect — exactly the v1 reconnect-loop
           // bug. A page load is a one-shot request/response over SSE, so we
@@ -101,8 +137,8 @@ export function useTimelinePage(cluster: string, topic: string): UseTimelinePage
           // browser retry into a zombie stream.
           handle.close()
           handleRef.current = null
+          setState((prev) => ({ ...prev, loading: false, error: 'connection lost — retrying is manual' }))
           flush()
-          setState((prev) => ({ ...prev, loading: false, error: 'connection lost' }))
         },
       })
       handleRef.current = handle

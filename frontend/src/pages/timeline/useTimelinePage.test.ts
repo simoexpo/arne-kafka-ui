@@ -196,4 +196,85 @@ describe('useTimelinePage', () => {
     unmount()
     expect(FakeEventSource.instances[0].closed).toBe(true)
   })
+
+  it('uses the established transport-error wording', () => {
+    const { result } = renderHook(() => useTimelinePage('prod', 'orders'))
+    act(() => {
+      result.current.loadPage({ direction: 'back', limit: 100, anchor: 'latest' }, vi.fn())
+    })
+    act(() => {
+      FakeEventSource.instances[0].fireTransportError()
+    })
+    expect(result.current.state.error).toBe('connection lost — retrying is manual')
+    expect(result.current.state.loading).toBe(false)
+  })
+
+  it('loadPage resets exhausted for its own direction at the start (anchor jumps clear stale exhaustion)', () => {
+    const { result } = renderHook(() => useTimelinePage('prod', 'orders'))
+    act(() => {
+      result.current.loadPage({ direction: 'forward', limit: 100, anchor: 'beginning' }, vi.fn())
+    })
+    act(() => {
+      FakeEventSource.instances[0].emit('page_end', { cursor: null, exhausted: true })
+    })
+    expect(result.current.state.exhausted.forward).toBe(true)
+
+    act(() => {
+      result.current.loadPage({ direction: 'forward', limit: 100, anchor: 'latest' }, vi.fn())
+    })
+    expect(result.current.state.exhausted.forward).toBe(false)
+  })
+
+  it('a loadPage started synchronously from onMatches (during the outer page_end flush) is not stomped by the outer trailing state updates', () => {
+    const { result } = renderHook(() => useTimelinePage('prod', 'orders'))
+    act(() => {
+      result.current.loadPage({ direction: 'back', limit: 100, anchor: 'latest' }, (msgs) => {
+        if (msgs.some((m) => m.offset === 1)) {
+          result.current.loadPage({ direction: 'forward', limit: 100, anchor: 'beginning' }, vi.fn())
+        }
+      })
+    })
+    const firstEs = FakeEventSource.instances[0]
+    act(() => {
+      firstEs.emit('match', mk(1))
+      firstEs.emit('page_end', { cursor: 'c-first', exhausted: false })
+    })
+    // The second loadPage (started inside the first onMatches call) must have
+    // opened its own stream, and its loading:true must survive the first
+    // page_end handler's own trailing loading:false update.
+    const secondEs = FakeEventSource.instances[1]
+    expect(secondEs).toBeDefined()
+    expect(result.current.state.loading).toBe(true)
+    expect(result.current.cursors.back).toBe('c-first')
+
+    act(() => {
+      secondEs.emit('page_end', { cursor: 'c-second', exhausted: true })
+    })
+    expect(result.current.state.loading).toBe(false)
+    expect(result.current.cursors.forward).toBe('c-second')
+    expect(result.current.state.exhausted.forward).toBe(true)
+  })
+
+  it('events on a superseded (closed) stream are ignored, even if the transport still fires them', () => {
+    const { result } = renderHook(() => useTimelinePage('prod', 'orders'))
+    const onMatchesA = vi.fn()
+    act(() => {
+      result.current.loadPage({ direction: 'back', limit: 100, anchor: 'latest' }, onMatchesA)
+    })
+    const esA = FakeEventSource.instances[0]
+    act(() => {
+      result.current.loadPage({ direction: 'forward', limit: 100, anchor: 'beginning' }, vi.fn())
+    })
+    expect(esA.closed).toBe(true)
+
+    const stateBefore = result.current.state
+    const cursorsBefore = result.current.cursors
+    act(() => {
+      esA.emit('match', mk(1))
+      esA.emit('page_end', { cursor: 'stale-cursor', exhausted: true })
+    })
+    expect(onMatchesA).not.toHaveBeenCalled()
+    expect(result.current.state).toBe(stateBefore)
+    expect(result.current.cursors).toBe(cursorsBefore)
+  })
 })
