@@ -35,4 +35,9 @@ describe('timelineStore', () => {
     s.insert([mk(0, 1, 400), mk(0, 2, 100)], 'back')
     expect(s.rows().map((m) => m.offset)).toEqual([2, 1])
   })
+  it('rows() result is frozen', () => {
+    const s = createTimelineStore()
+    s.insert([mk(0, 1, 100)], 'back')
+    expect(Object.isFrozen(s.rows())).toBe(true)
+  })
 })

@@ -9,7 +9,7 @@ export interface Dropped {
 
 export interface TimelineStore {
   insert(msgs: MessageOut[], origin: InsertOrigin): void
-  rows(): MessageOut[]
+  rows(): readonly MessageOut[]
   dropped(): Dropped
   clear(): void
 }
@@ -45,7 +45,7 @@ export function createTimelineStore(cap = 2000): TimelineStore {
   const partitions = new Map<number, MessageOut[]>()
   const seen = new Set<string>()
   const dropCounts: Dropped = { top: 0, bottom: 0 }
-  let cachedRows: MessageOut[] | null = null
+  let cachedRows: readonly MessageOut[] | null = null
 
   function totalCount(): number {
     let n = 0
@@ -113,6 +113,11 @@ export function createTimelineStore(cap = 2000): TimelineStore {
       let changed = false
       for (const msg of msgs) {
         const k = partitionKey(msg.partition, msg.offset)
+        // Dedup on partition:offset: first-inserted record wins and later
+        // duplicates are silently dropped. This matches the server's
+        // re-emission overlap semantics (e.g. a 'back' page and a 'live'
+        // tail can both deliver the same offset; only the first copy seen
+        // is kept, subsequent identical offsets are no-ops).
         if (seen.has(k)) continue
         seen.add(k)
         let arr = partitions.get(msg.partition)
@@ -127,7 +132,10 @@ export function createTimelineStore(cap = 2000): TimelineStore {
       enforceCap(origin)
     },
     rows() {
-      if (cachedRows === null) cachedRows = mergeRows()
+      // Freeze the memoized array so a consumer's in-place sort/splice can't
+      // silently corrupt every subsequent read of the shared cache — it's
+      // zero-copy (no clone) and mutation attempts throw in strict mode.
+      if (cachedRows === null) cachedRows = Object.freeze(mergeRows())
       return cachedRows
     },
     dropped() {
