@@ -1,4 +1,4 @@
-import { act, render, screen } from '@testing-library/react'
+import { act, fireEvent, render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { FakeEventSource } from '../../test/fake-event-source'
@@ -210,5 +210,203 @@ describe('Timeline', () => {
     await emit(0, 'page_end', { cursor: 'c1', exhausted: false })
     expect(screen.getByText('schema registry returned 404 for schema id 9')).toBeInTheDocument()
     expect(screen.getByText('decode_error')).toBeInTheDocument()
+  })
+
+  describe('pause machinery', () => {
+    async function settleWithOneRow(index = 0) {
+      await emit(index, 'match', mk(1))
+      await emit(index, 'page_end', { cursor: null, exhausted: true })
+    }
+
+    function scrollTo(scrollTop: number) {
+      fireEvent.scroll(screen.getByTestId('timeline-scroll'), { target: { scrollTop } })
+    }
+
+    it('scrolling off the top auto-pauses: live messages buffer instead of prepending, and the pill counts them', async () => {
+      const tail = mockTail()
+      render(<Timeline cluster="prod" topic="orders" />)
+      await settleWithOneRow()
+
+      scrollTo(100) // off the top -> auto-pause
+      await act(async () => tail.handlers().onMessage(mk(5)))
+      expect(screen.queryByText('p0·5')).not.toBeInTheDocument()
+      expect(screen.getByText('▲ 1 new')).toBeInTheDocument()
+
+      await act(async () => tail.handlers().onMessage(mk(6)))
+      expect(screen.getByText('▲ 2 new')).toBeInTheDocument()
+      expect(screen.queryByText('p0·6')).not.toBeInTheDocument()
+    })
+
+    it('clicking the pill flushes the buffer into the store and resumes (auto-pause)', async () => {
+      const tail = mockTail()
+      const user = userEvent.setup()
+      render(<Timeline cluster="prod" topic="orders" />)
+      await settleWithOneRow()
+
+      scrollTo(100)
+      await act(async () => tail.handlers().onMessage(mk(5)))
+      expect(screen.getByText('▲ 1 new')).toBeInTheDocument()
+
+      await user.click(screen.getByTestId('live-pill'))
+      expect(screen.getByText('p0·5')).toBeInTheDocument()
+      expect(screen.queryByTestId('live-pill')).not.toBeInTheDocument()
+
+      // Resumed: a further live message inserts directly, no more buffering.
+      await act(async () => tail.handlers().onMessage(mk(7)))
+      expect(screen.getByText('p0·7')).toBeInTheDocument()
+      expect(screen.queryByTestId('live-pill')).not.toBeInTheDocument()
+    })
+
+    it('scrolling back to the top auto-flushes and resumes without a click', async () => {
+      const tail = mockTail()
+      render(<Timeline cluster="prod" topic="orders" />)
+      await settleWithOneRow()
+
+      scrollTo(100)
+      await act(async () => tail.handlers().onMessage(mk(5)))
+      expect(screen.getByText('▲ 1 new')).toBeInTheDocument()
+
+      scrollTo(0) // back to top
+      expect(screen.getByText('p0·5')).toBeInTheDocument()
+      expect(screen.queryByTestId('live-pill')).not.toBeInTheDocument()
+
+      await act(async () => tail.handlers().onMessage(mk(8)))
+      expect(screen.getByText('p0·8')).toBeInTheDocument()
+      expect(screen.queryByTestId('live-pill')).not.toBeInTheDocument()
+    })
+
+    it('explicit pause overrides top-pinning: scrolling to top does NOT auto-resume', async () => {
+      const tail = mockTail()
+      const user = userEvent.setup()
+      render(<Timeline cluster="prod" topic="orders" />)
+      await settleWithOneRow()
+
+      const toggle = screen.getByTestId('play-pause-toggle')
+      expect(toggle).toHaveAttribute('aria-pressed', 'false')
+      await user.click(toggle) // explicit pause, while pinned at top
+      expect(toggle).toHaveAttribute('aria-pressed', 'true')
+
+      await act(async () => tail.handlers().onMessage(mk(5)))
+      expect(screen.queryByText('p0·5')).not.toBeInTheDocument()
+      expect(screen.getByText('▲ 1 new')).toBeInTheDocument()
+
+      scrollTo(0) // still "at the top" but pause is explicit -> no auto-resume
+      expect(screen.queryByText('p0·5')).not.toBeInTheDocument()
+      expect(screen.getByText('▲ 1 new')).toBeInTheDocument()
+      expect(toggle).toHaveAttribute('aria-pressed', 'true')
+
+      await user.click(toggle) // explicit play -> resumes + flushes
+      expect(screen.getByText('p0·5')).toBeInTheDocument()
+      expect(screen.queryByTestId('live-pill')).not.toBeInTheDocument()
+      expect(toggle).toHaveAttribute('aria-pressed', 'false')
+    })
+
+    it('caps the buffer at 500, dropping the oldest, and shows the honest "500+ · older dropped" label', async () => {
+      const tail = mockTail()
+      const user = userEvent.setup()
+      render(<Timeline cluster="prod" topic="orders" />)
+      await settleWithOneRow()
+
+      scrollTo(100)
+      await act(async () => {
+        for (let i = 0; i < 501; i++) tail.handlers().onMessage(mk(100 + i))
+      })
+      expect(screen.getByText('500+ · older dropped')).toBeInTheDocument()
+      expect(screen.queryByText(/▲ \d+ new/)).not.toBeInTheDocument()
+
+      await user.click(screen.getByTestId('live-pill'))
+      expect(screen.getByText('p0·600')).toBeInTheDocument() // newest kept
+      expect(screen.queryByText('p0·100')).not.toBeInTheDocument() // oldest dropped
+      // 1 initial row + exactly 500 buffered (the 501st push dropped the
+      // very oldest, keeping the cap honest rather than growing unbounded).
+      expect(screen.getByText('501 messages')).toBeInTheDocument()
+    })
+  })
+
+  describe('jump control', () => {
+    it('jump to beginning clears the store, loads a forward/beginning page, and pauses (auto)', async () => {
+      const tail = mockTail()
+      const user = userEvent.setup()
+      render(<Timeline cluster="prod" topic="orders" />)
+      await emit(0, 'match', mk(9))
+      await emit(0, 'page_end', { cursor: 'c1', exhausted: false })
+      expect(screen.getByText('p0·9')).toBeInTheDocument()
+
+      await user.click(screen.getByTestId('jump-beginning'))
+      expect(screen.queryByText('p0·9')).not.toBeInTheDocument() // store cleared
+      expect(FakeEventSource.instances[1].url).toBe(
+        '/api/clusters/prod/topics/orders/timeline?direction=forward&limit=100&anchor=beginning',
+      )
+      await emit(1, 'match', mk(2))
+      await emit(1, 'page_end', { cursor: 'c9', exhausted: false })
+      expect(screen.getByText('p0·2')).toBeInTheDocument()
+
+      // Paused-auto: a live message buffers instead of prepending.
+      await act(async () => tail.handlers().onMessage(mk(50)))
+      expect(screen.queryByText('p0·50')).not.toBeInTheDocument()
+      expect(screen.getByText('▲ 1 new')).toBeInTheDocument()
+    })
+
+    it('jump to now clears the store, loads a back/latest page, and restores default live (no pause)', async () => {
+      const tail = mockTail()
+      const user = userEvent.setup()
+      render(<Timeline cluster="prod" topic="orders" />)
+      await emit(0, 'match', mk(9))
+      await emit(0, 'page_end', { cursor: 'c1', exhausted: false })
+
+      // Get into a paused state first via a beginning jump.
+      await user.click(screen.getByTestId('jump-beginning'))
+      await emit(1, 'page_end', { cursor: null, exhausted: true })
+      await act(async () => tail.handlers().onMessage(mk(3)))
+      expect(screen.getByText('▲ 1 new')).toBeInTheDocument()
+
+      await user.click(screen.getByTestId('jump-now'))
+      expect(screen.queryByText('p0·3')).not.toBeInTheDocument() // store + buffer cleared
+      expect(screen.queryByTestId('live-pill')).not.toBeInTheDocument()
+      expect(FakeEventSource.instances[2].url).toBe(
+        '/api/clusters/prod/topics/orders/timeline?direction=back&limit=100&anchor=latest',
+      )
+      await emit(2, 'page_end', { cursor: null, exhausted: true })
+
+      // Live is back on (not paused): a tail message inserts directly.
+      await act(async () => tail.handlers().onMessage(mk(11)))
+      expect(screen.getByText('p0·11')).toBeInTheDocument()
+      expect(screen.queryByTestId('live-pill')).not.toBeInTheDocument()
+    })
+
+    it('jump to offset issues a back page anchored at partition+offset, clears the store, and pauses', async () => {
+      mockTail()
+      const user = userEvent.setup()
+      render(<Timeline cluster="prod" topic="orders" />)
+      await emit(0, 'match', mk(9))
+      await emit(0, 'page_end', { cursor: 'c1', exhausted: false })
+
+      await user.click(screen.getByTestId('jump-offset'))
+      await user.type(screen.getByTestId('jump-offset-partition-input'), '1')
+      await user.type(screen.getByTestId('jump-offset-value-input'), '77')
+      await user.click(screen.getByTestId('jump-offset-apply'))
+
+      expect(screen.queryByText('p0·9')).not.toBeInTheDocument()
+      expect(FakeEventSource.instances[1].url).toBe(
+        '/api/clusters/prod/topics/orders/timeline?direction=back&limit=100&anchor=offset&partition=1&offset=77',
+      )
+    })
+
+    it('jump to timestamp issues a back page anchored at ts_ms, clears the store, and pauses', async () => {
+      mockTail()
+      const user = userEvent.setup()
+      render(<Timeline cluster="prod" topic="orders" />)
+      await emit(0, 'match', mk(9))
+      await emit(0, 'page_end', { cursor: 'c1', exhausted: false })
+
+      await user.click(screen.getByTestId('jump-timestamp'))
+      await user.type(screen.getByTestId('jump-timestamp-input'), '1700000000000')
+      await user.click(screen.getByTestId('jump-timestamp-apply'))
+
+      expect(screen.queryByText('p0·9')).not.toBeInTheDocument()
+      expect(FakeEventSource.instances[1].url).toBe(
+        '/api/clusters/prod/topics/orders/timeline?direction=back&limit=100&anchor=timestamp&ts_ms=1700000000000',
+      )
+    })
   })
 })

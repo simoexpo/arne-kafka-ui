@@ -7,6 +7,8 @@ import { Panel } from '../../components/Panel'
 import { StalenessChip } from '../../components/StalenessChip'
 import { parseFilterQuery } from '../../lib/filterQuery'
 import { createTimelineStore } from '../../lib/timelineStore'
+import { JumpControl, type JumpTarget } from './JumpControl'
+import { LivePill, PlayPauseToggle } from './LivePill'
 import { useTimelinePage } from './useTimelinePage'
 
 const PAGE_LIMIT = 100
@@ -18,8 +20,21 @@ const PAGE_LIMIT = 100
 // topic can't spin forever. ~20 auto-continues (per the design spec) is the
 // safety cap; beyond it we stop and hand control back with an affordance.
 const ITERATION_CAP = 20
+// Auto-pause buffer cap (see design spec): once paused (auto or explicit),
+// live messages that pass the predicate accumulate here instead of the
+// store. Capped at 500 — beyond that we drop the OLDEST buffered entry per
+// arrival and switch the pill to an honest "500+ · older dropped" label
+// rather than a raw (and increasingly meaningless) count.
+const BUFFER_CAP = 500
+// Scroll offset below which the viewport counts as "pinned to top" —
+// roughly half a row, per the design spec's threshold.
+const TOP_PIN_THRESHOLD = 20
 
 type Direction = 'back' | 'forward'
+// 'none': live inserts straight into the store. 'auto': paused by scrolling
+// off the top — returning to the top resumes. 'explicit': paused via the
+// play/pause pill — overrides top-pinning, only the pill itself resumes it.
+type PauseReason = 'none' | 'auto' | 'explicit'
 
 export function Timeline({ cluster, topic }: { cluster: string; topic: string }) {
   // The store is mutable (merge-native insert/rows), so it lives in a ref;
@@ -46,6 +61,27 @@ export function Timeline({ cluster, topic }: { cluster: string; topic: string })
   const [live, setLive] = useState(true)
   const [tailErrorText, setTailErrorText] = useState<string | null>(null)
   const tailHandleRef = useRef<{ close: () => void } | null>(null)
+
+  // Pause machinery: pauseReasonRef is the source of truth (read at render
+  // time, like storeRef), mutated directly and paired with `bump()` so a
+  // change is visible next render — same pattern as the store itself,
+  // avoiding stale closures in the tail effect (which only runs once, on
+  // [cluster, topic]). bufferRef holds live messages held back while paused;
+  // bufferOverflowRef flips permanently (until the next flush) once the
+  // buffer has dropped an oldest entry, so the pill can show the honest
+  // "500+ · older dropped" label instead of a raw, increasingly meaningless
+  // count.
+  const pauseReasonRef = useRef<PauseReason>('none')
+  const bufferRef = useRef<MessageOut[]>([])
+  const bufferOverflowRef = useRef(false)
+
+  const flushBuffer = useCallback(() => {
+    if (bufferRef.current.length > 0) {
+      storeRef.current.insert(bufferRef.current, 'live')
+    }
+    bufferRef.current = []
+    bufferOverflowRef.current = false
+  }, [])
 
   const runPage = useCallback(
     (direction: Direction, params: TimelinePageParams, opts: { resetIteration: boolean }) => {
@@ -101,7 +137,15 @@ export function Timeline({ cluster, topic }: { cluster: string; topic: string })
     const handle = tailTopic(cluster, topic, {
       onMessage: (m) => {
         if (!predicateRef.current(m)) return
-        storeRef.current.insert([m], 'live')
+        if (pauseReasonRef.current === 'none') {
+          storeRef.current.insert([m], 'live')
+        } else {
+          bufferRef.current.push(m)
+          if (bufferRef.current.length > BUFFER_CAP) {
+            bufferRef.current.shift() // drop the OLDEST buffered entry
+            bufferOverflowRef.current = true
+          }
+        }
         bump()
       },
       onError: (e) => {
@@ -127,6 +171,84 @@ export function Timeline({ cluster, topic }: { cluster: string; topic: string })
 
   const rows = storeRef.current.rows()
 
+  // Wired directly onto MessageList's real scroll element (scroll events
+  // don't bubble, so this can't live on a wrapper). Scrolling off the top
+  // auto-pauses (only from 'none' — 'auto'/'explicit' are already paused).
+  // Returning to the top auto-flushes + resumes, but ONLY if the pause was
+  // automatic: an explicit pause overrides top-pinning entirely.
+  const handleScroll = (scrollTop: number) => {
+    const pinnedTop = scrollTop < TOP_PIN_THRESHOLD
+    if (pinnedTop) {
+      if (pauseReasonRef.current === 'auto') {
+        flushBuffer()
+        pauseReasonRef.current = 'none'
+        bump()
+      }
+    } else if (pauseReasonRef.current === 'none') {
+      pauseReasonRef.current = 'auto'
+      bump()
+    }
+  }
+
+  // Clicking the "▲ n new" pill always flushes; it only resumes when the
+  // pause was automatic — an explicit pause stays paused (the pill just
+  // clears what had built up so far).
+  const handlePillClick = () => {
+    flushBuffer()
+    if (pauseReasonRef.current === 'auto') pauseReasonRef.current = 'none'
+    bump()
+  }
+
+  // The explicit play/pause toggle: pausing always forces 'explicit'
+  // (overriding whatever auto/none state was in effect); un-pausing always
+  // flushes + resumes fully, regardless of how it got paused.
+  const handlePlayPauseToggle = () => {
+    if (pauseReasonRef.current === 'none') {
+      pauseReasonRef.current = 'explicit'
+    } else {
+      flushBuffer()
+      pauseReasonRef.current = 'none'
+    }
+    bump()
+  }
+
+  // A jump repositions the viewport: the current window is no longer
+  // meaningful, so the store and any buffered live messages are dropped
+  // outright (not flushed — they belong to the OLD viewport). 'now' is the
+  // only jump that lands pinned at the true top, so it's the only one that
+  // resumes live; the others land mid-topic or at the tail end, where an
+  // unpaused live prepend would immediately scroll the user's new anchor
+  // out of view — so they enter paused-auto (the pill counts, top-pinning
+  // still resumes normally from there on).
+  const handleJump = (target: JumpTarget) => {
+    storeRef.current.clear()
+    bufferRef.current = []
+    bufferOverflowRef.current = false
+    switch (target.kind) {
+      case 'now':
+        pauseReasonRef.current = 'none'
+        runPage('back', { direction: 'back', limit: PAGE_LIMIT, anchor: 'latest' }, { resetIteration: true })
+        break
+      case 'beginning':
+        pauseReasonRef.current = 'auto'
+        runPage('forward', { direction: 'forward', limit: PAGE_LIMIT, anchor: 'beginning' }, { resetIteration: true })
+        break
+      case 'offset':
+        pauseReasonRef.current = 'auto'
+        runPage(
+          'back',
+          { direction: 'back', limit: PAGE_LIMIT, anchor: 'offset', partition: target.partition, offset: target.offset },
+          { resetIteration: true },
+        )
+        break
+      case 'timestamp':
+        pauseReasonRef.current = 'auto'
+        runPage('back', { direction: 'back', limit: PAGE_LIMIT, anchor: 'timestamp', ts_ms: target.ts_ms }, { resetIteration: true })
+        break
+    }
+    bump()
+  }
+
   const loadOlder = () => {
     if (cursors.back === null) return
     runPage('back', { direction: 'back', limit: PAGE_LIMIT, cursor: cursors.back }, { resetIteration: true })
@@ -144,17 +266,25 @@ export function Timeline({ cluster, topic }: { cluster: string; topic: string })
 
   const showLoadOlder = cursors.back !== null && !state.exhausted.back
   const showLoadNewer = cursors.forward !== null && !state.exhausted.forward
+  const paused = pauseReasonRef.current !== 'none'
 
   return (
     <div className="space-y-3">
       <div className="flex items-center justify-between">
         <h2 className="text-sm font-medium text-zinc-500 dark:text-zinc-400">{rows.length} messages</h2>
-        {live ? (
-          <span className="animate-pulse text-emerald-500">● live</span>
-        ) : (
-          <StalenessChip asOf={rows[0]?.timestamp_ms ?? null} failed={false} />
-        )}
+        <div className="flex items-center gap-2">
+          <LivePill count={bufferRef.current.length} capped={bufferOverflowRef.current} onClick={handlePillClick} />
+          {live ? (
+            <>
+              {!paused && <span className="animate-pulse text-emerald-500">● live</span>}
+              <PlayPauseToggle paused={paused} onClick={handlePlayPauseToggle} />
+            </>
+          ) : (
+            <StalenessChip asOf={rows[0]?.timestamp_ms ?? null} failed={false} />
+          )}
+        </div>
       </div>
+      <JumpControl onJump={handleJump} />
       {tailErrorText && (
         <p className="text-sm text-amber-600 dark:text-amber-400">{`live stopped — ${tailErrorText}`}</p>
       )}
@@ -178,7 +308,7 @@ export function Timeline({ cluster, topic }: { cluster: string; topic: string })
         )
       )}
       <Panel error={state.error} hasData={rows.length > 0} loading={state.loading && rows.length === 0}>
-        <MessageList messages={rows} />
+        <MessageList messages={rows} onScroll={handleScroll} />
       </Panel>
       {continueDirection === 'back' ? (
         <button

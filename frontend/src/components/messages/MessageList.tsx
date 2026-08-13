@@ -3,7 +3,18 @@ import { useVirtualizer } from '@tanstack/react-virtual'
 import type { MessageOut } from '../../api/types'
 import { MessageRow } from './MessageRow'
 
-export function MessageList({ messages }: { messages: readonly MessageOut[] }) {
+export function MessageList({
+  messages,
+  onScroll,
+}: {
+  messages: readonly MessageOut[]
+  // Forwarded directly onto the real scrolling element (not a wrapper) —
+  // scroll events don't bubble, so Timeline's top-pin detection needs the
+  // handler on the exact element the virtualizer scrolls. In real browsers
+  // this is `parentRef`'s scrollTop; jsdom tests drive it via
+  // `fireEvent.scroll` on this same element (found via its data-testid).
+  onScroll?: (scrollTop: number) => void
+}) {
   const parentRef = useRef<HTMLDivElement>(null)
   const virtualizer = useVirtualizer({
     count: messages.length,
@@ -16,7 +27,12 @@ export function MessageList({ messages }: { messages: readonly MessageOut[] }) {
     return <p className="p-4 text-sm text-zinc-500">no messages</p>
   }
   return (
-    <div ref={parentRef} className="max-h-[32rem] overflow-auto">
+    <div
+      ref={parentRef}
+      data-testid="timeline-scroll"
+      onScroll={(e) => onScroll?.(e.currentTarget.scrollTop)}
+      className="max-h-[32rem] overflow-auto"
+    >
       <div style={{ height: virtualizer.getTotalSize(), position: 'relative' }}>
         {virtualizer.getVirtualItems().map((item) => (
           <div
