@@ -1,5 +1,6 @@
 import type { ReactNode } from 'react'
 import { ApiError } from '../api/client'
+import { describeError } from '../api/errors'
 
 export function Panel({ title, error, loading, hasData, children }: {
   title?: string
@@ -24,8 +25,10 @@ function PanelError({ error }: { error: unknown }) {
   const message = error instanceof Error ? error.message : String(error)
   const code = error instanceof ApiError ? error.code : 'error'
   const retriable = error instanceof ApiError && error.retriable
+  const { headline } = describeError(error)
   return (
     <div className="rounded-md border border-red-300 bg-red-50 p-3 text-sm dark:border-red-900 dark:bg-red-950">
+      {headline && <p className="mb-1 font-semibold text-red-900 dark:text-red-200">{headline}</p>}
       <span className="font-mono text-red-700 dark:text-red-400">{code}</span>
       <p className="mt-1 text-red-800 dark:text-red-300">{message}</p>
       {retriable && <p className="mt-1 text-xs text-red-600 dark:text-red-500">retriable — data may recover on its own</p>}
@@ -39,12 +42,14 @@ function PanelError({ error }: { error: unknown }) {
 function PanelErrorBanner({ error }: { error: unknown }) {
   const message = error instanceof Error ? error.message : String(error)
   const code = error instanceof ApiError ? error.code : 'error'
+  const { headline } = describeError(error)
   return (
     <div
       data-testid="panel-error-banner"
       className="mb-3 border-l-2 border-red-500 bg-red-50 px-2 py-1 text-xs text-red-800 dark:border-red-400 dark:bg-red-950 dark:text-red-300"
     >
-      <span className="font-mono text-red-700 dark:text-red-400">{code}</span> {message}
+      {headline && <p className="font-semibold">⚠ {headline}</p>}
+      <p><span className="font-mono text-red-700 dark:text-red-400">{code}</span> {message}</p>
     </div>
   )
 }
