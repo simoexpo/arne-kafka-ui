@@ -49,7 +49,9 @@ await page.getByPlaceholder('filter topics…').waitFor({ timeout: 10000 })
 // open the first topic and check the flagship tab
 await page.locator('table a').first().click()
 await page.getByRole('button', { name: 'Messages' }).waitFor({ timeout: 10000 })
-await page.getByRole('button', { name: 'Load' }).waitFor({ timeout: 10000 })
+await page.getByTestId('message-row').first().waitFor({ timeout: 10000 })
+await page.getByText('● live').waitFor({ timeout: 10000 })
+await page.getByPlaceholder('filter messages…').waitFor({ timeout: 10000 })
 
 if (errors.length) {
   console.error('page errors:', errors)
