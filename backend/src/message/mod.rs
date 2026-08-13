@@ -7,6 +7,7 @@ pub mod range;
 pub mod schema_registry;
 pub mod search;
 pub mod tail;
+pub mod timeline;
 
 use serde::Serialize;
 
