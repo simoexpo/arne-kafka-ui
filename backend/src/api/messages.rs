@@ -5,6 +5,7 @@ use crate::message::filter::Filter;
 use crate::message::range::{self, PartitionRange};
 use crate::message::search::{self, SearchEvent};
 use crate::message::tail;
+use crate::message::timeline::{self, TimelineEvent};
 use crate::state::AppState;
 use crate::util::now_ms;
 use axum::extract::{Path, Query, State};
@@ -258,6 +259,110 @@ pub async fn search(
     let (rx, cancel) = search::run(handle, topic, ranges, filter, max);
     let guard = CancelOnDrop(cancel);
     let stream = ReceiverStream::new(rx).map(move |event: SearchEvent| {
+        let _hold = &guard; // move the guard into the stream: dropped on disconnect
+        Ok(Event::default().event(event.name()).data(serde_json::to_string(&event).unwrap_or_default()))
+    });
+    Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
+}
+
+/// Default per-request scan budget for timeline pages. Only exercised by
+/// filtered pages (task 4); unfiltered pages (this task) never scan past
+/// their `limit`-sized windows, so this is currently a fixed constant rather
+/// than a `Limits` field — matching the "filter: None" scope of this task.
+const DEFAULT_TIMELINE_SCAN_BUDGET: u64 = 250_000;
+
+#[derive(Debug, Deserialize)]
+pub struct TimelineParams {
+    pub direction: String,
+    pub limit: Option<u64>,
+    pub anchor: Option<String>,
+    pub cursor: Option<String>,
+    pub partition: Option<i32>,
+    pub offset: Option<i64>,
+    pub ts_ms: Option<i64>,
+}
+
+/// Validated before any Kafka round-trip, same rationale as `Anchor::parse`
+/// and `Range::parse`: a malformed request must 400 fast, even against a
+/// topic that doesn't exist and even on a request that would otherwise
+/// stream.
+enum TimelineAnchorInput {
+    Latest,
+    Beginning,
+    Offset { partition: i32, offset: i64 },
+    Timestamp { ts_ms: i64 },
+}
+
+impl TimelineAnchorInput {
+    fn parse(params: &TimelineParams) -> Result<Self, ApiError> {
+        match params.anchor.as_deref() {
+            Some("latest") => Ok(TimelineAnchorInput::Latest),
+            Some("beginning") => Ok(TimelineAnchorInput::Beginning),
+            Some("offset") => Ok(TimelineAnchorInput::Offset {
+                partition: params.partition
+                    .ok_or_else(|| ApiError::bad_request("anchor=offset requires partition"))?,
+                offset: params.offset
+                    .ok_or_else(|| ApiError::bad_request("anchor=offset requires offset"))?,
+            }),
+            Some("timestamp") => Ok(TimelineAnchorInput::Timestamp {
+                ts_ms: params.ts_ms
+                    .ok_or_else(|| ApiError::bad_request("anchor=timestamp requires ts_ms"))?,
+            }),
+            Some(other) => Err(ApiError::bad_request(format!("unknown anchor '{other}'"))),
+            None => unreachable!("cursor xor anchor already validated by the caller"),
+        }
+    }
+}
+
+pub async fn timeline_sse(
+    State(state): State<AppState>,
+    Path((cluster, topic)): Path<(String, String)>,
+    Query(params): Query<TimelineParams>,
+) -> Result<Sse<impl Stream<Item = Result<Event, std::convert::Infallible>>>, ApiError> {
+    let handle = state.registry.get(&cluster)?;
+
+    let direction = match params.direction.as_str() {
+        "back" => timeline::Direction::Back,
+        "forward" => timeline::Direction::Forward,
+        other => return Err(ApiError::bad_request(format!("unknown direction '{other}'"))),
+    };
+    let limit = params.limit.unwrap_or(100).min(1000) as usize;
+
+    if params.cursor.is_some() == params.anchor.is_some() {
+        return Err(ApiError::bad_request("exactly one of cursor or anchor is required"));
+    }
+
+    let positions = match &params.cursor {
+        Some(cursor) => {
+            timeline::Cursor::decode(cursor)
+                .map_err(|e| ApiError::bad_request(format!("bad cursor: {e}")))?
+                .positions
+        }
+        None => {
+            let anchor_input = TimelineAnchorInput::parse(&params)?;
+            let handle = handle.clone();
+            let topic = topic.clone();
+            tokio::task::spawn_blocking(move || -> Result<_, ApiError> {
+                let wm = watermarks_blocking(&handle, &topic)?;
+                let anchor = match anchor_input {
+                    TimelineAnchorInput::Latest => timeline::Anchor::Latest,
+                    TimelineAnchorInput::Beginning => timeline::Anchor::Beginning,
+                    TimelineAnchorInput::Offset { partition, offset } => {
+                        timeline::Anchor::Offset { partition, offset }
+                    }
+                    TimelineAnchorInput::Timestamp { ts_ms } => {
+                        let resolved = ts_starts_blocking(&handle, &topic, &wm, ts_ms)?;
+                        timeline::Anchor::TimestampResolved(resolved)
+                    }
+                };
+                Ok(timeline::initial_positions(&wm, &anchor))
+            }).await.map_err(|e| ApiError::internal(format!("task join: {e}")))??
+        }
+    };
+
+    let (rx, cancel) = timeline::run_page(handle, topic, positions, direction, limit, None, DEFAULT_TIMELINE_SCAN_BUDGET);
+    let guard = CancelOnDrop(cancel);
+    let stream = ReceiverStream::new(rx).map(move |event: TimelineEvent| {
         let _hold = &guard; // move the guard into the stream: dropped on disconnect
         Ok(Event::default().event(event.name()).data(serde_json::to_string(&event).unwrap_or_default()))
     });

@@ -458,6 +458,57 @@ async fn confluent_framed_message_without_registry_surfaces_as_decode_error_ever
 }
 
 #[tokio::test]
+async fn timeline_first_page_is_globally_ordered_and_paginates_back() {
+    let bootstrap = start_kafka().await;
+    create_topic(&bootstrap, "tl-topic", 2).await;
+    // interleaved timestamps across partitions: p0 evens, p1 odds, ts = 1000+i*10
+    for i in 0..30i64 {
+        produce_at(&bootstrap, "tl-topic", (i % 2) as i32, &format!("k{i}"), &format!("v{i}"), 1000 + i * 10).await;
+    }
+    let state = state_for(&bootstrap, vec![]);
+    let events = collect_sse(app(state.clone()), "/api/clusters/test/topics/tl-topic/timeline?direction=back&limit=10&anchor=latest", 200).await;
+    let matches: Vec<_> = events.iter().filter(|(n, _)| n == "match").map(|(_, m)| m.clone()).collect();
+    assert_eq!(matches.len(), 10);
+    let ts: Vec<i64> = matches.iter().map(|m| m["timestamp_ms"].as_i64().unwrap()).collect();
+    let mut sorted = ts.clone(); sorted.sort(); sorted.reverse();
+    assert_eq!(ts, sorted, "page must be newest-first globally: {ts:?}");
+    assert_eq!(matches[0]["value"]["text"], "v29");
+    assert_eq!(matches[9]["value"]["text"], "v20");
+    let (_, end) = events.iter().find(|(n, _)| n == "page_end").unwrap().clone();
+    assert_eq!(end["exhausted"], false);
+    let cursor = end["cursor"].as_str().unwrap().to_string();
+
+    // page 2 continues without gap or overlap
+    let events2 = collect_sse(app(state), &format!("/api/clusters/test/topics/tl-topic/timeline?direction=back&limit=10&cursor={}", urlencoding::encode(&cursor)), 200).await;
+    let m2: Vec<_> = events2.iter().filter(|(n, _)| n == "match").map(|(_, m)| m["value"]["text"].as_str().unwrap().to_string()).collect();
+    assert_eq!(m2.first().unwrap(), "v19");
+    assert_eq!(m2.last().unwrap(), "v10");
+}
+
+#[tokio::test]
+async fn timeline_beginning_forward_reaches_exhaustion() {
+    let bootstrap = start_kafka().await;
+    create_topic(&bootstrap, "tl-fwd-topic", 1).await;
+    for i in 0..5i64 { produce_at(&bootstrap, "tl-fwd-topic", 0, &format!("k{i}"), &format!("v{i}"), 2000 + i).await; }
+    let state = state_for(&bootstrap, vec![]);
+    let events = collect_sse(app(state), "/api/clusters/test/topics/tl-fwd-topic/timeline?direction=forward&limit=10&anchor=beginning", 200).await;
+    let m: Vec<_> = events.iter().filter(|(n, _)| n == "match").map(|(_, v)| v["value"]["text"].as_str().unwrap().to_string()).collect();
+    assert_eq!(m, vec!["v0", "v1", "v2", "v3", "v4"]); // forward pages are oldest-first
+    let (_, end) = events.iter().find(|(n, _)| n == "page_end").unwrap().clone();
+    assert_eq!(end["exhausted"], true);
+    assert!(end["cursor"].is_null());
+}
+
+#[tokio::test]
+async fn timeline_bad_params_is_400_before_streaming() {
+    let bootstrap = start_kafka().await;
+    let state = state_for(&bootstrap, vec![]);
+    let (status, body) = get_json(app(state), "/api/clusters/test/topics/x/timeline?direction=sideways&limit=10&anchor=latest").await;
+    assert_eq!(status, 400, "body: {body}");
+    assert_eq!(body["code"], "bad_request");
+}
+
+#[tokio::test]
 async fn spa_fallback_serves_html_for_unknown_paths() {
     let bootstrap = start_kafka().await;
     let state = state_for(&bootstrap, vec![]);

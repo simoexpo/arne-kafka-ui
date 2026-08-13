@@ -244,6 +244,21 @@ pub async fn produce_raw(bootstrap: &str, topic: &str, key: &str, value: &[u8]) 
         .unwrap();
 }
 
+/// Produces a single message with an explicit partition and timestamp — used
+/// by timeline tests to construct interleaved, known cross-partition
+/// timestamps (mirrors `produce`'s string values, but pins `.partition()` and
+/// `.timestamp()` instead of leaving them to the producer's defaults).
+pub async fn produce_at(bootstrap: &str, topic: &str, partition: i32, key: &str, value: &str, ts_ms: i64) {
+    let producer: FutureProducer = client(bootstrap).create().unwrap();
+    producer
+        .send(
+            FutureRecord::to(topic).key(key).payload(value).partition(partition).timestamp(ts_ms),
+            Duration::from_secs(10),
+        )
+        .await
+        .unwrap();
+}
+
 pub async fn produce(bootstrap: &str, topic: &str, count: usize) {
     let producer: FutureProducer = client(bootstrap).create().unwrap();
     for i in 0..count {

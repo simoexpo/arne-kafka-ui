@@ -1,14 +1,26 @@
-//! Cursor codec and window math for the messages timeline.
+//! Cursor codec, window math, and the paging engine for the messages
+//! timeline.
 //!
-//! These are pure functions: no I/O, no Kafka client, nothing async. The
-//! wider timeline engine (later tasks) supplies real per-partition
-//! watermarks and drives `page_windows`/`advance` in a loop; this module
-//! only computes the arithmetic.
+//! `Direction`/`Cursor`/`Anchor`/`initial_positions`/`page_windows`/`advance`
+//! are pure functions: no I/O, no Kafka client, nothing async. `run_page`
+//! (this task) is the engine that drives them against a real cluster: it
+//! fetches fresh watermarks, computes windows, scans and decodes them, and
+//! emits `TimelineEvent`s over an mpsc channel — the SSE handler in
+//! `api::messages` just maps those to wire events.
 
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 
-use super::range;
+use super::fetch::{self, RawRecord};
+use super::filter::Filter;
+use super::range::{self, PartitionRange};
+use super::MessageOut;
+use crate::cluster::{ClusterHandle, ADMIN_TIMEOUT};
+use crate::error::{self, ApiError};
+use rdkafka::consumer::Consumer;
+use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
+use tokio::sync::mpsc;
 
 /// Which way a page reads relative to its cursor's positions.
 ///
@@ -171,6 +183,183 @@ pub fn advance(
     });
 
     (new_positions, exhausted)
+}
+
+/// One event of a `run_page` SSE stream. Serialized untagged (like
+/// `search::SearchEvent`): the SSE `event:` field carries the discriminant
+/// (`.name()`), so the JSON `data:` payload is just the variant's own
+/// fields.
+#[derive(Debug, Serialize)]
+#[serde(untagged)]
+pub enum TimelineEvent {
+    Match(Box<MessageOut>),
+    Progress { scanned: u64, matches: u64, budget: u64 },
+    PageEnd { cursor: Option<String>, exhausted: bool },
+    Error { code: String, message: String, cluster: Option<String>, retriable: bool },
+}
+
+impl TimelineEvent {
+    pub fn name(&self) -> &'static str {
+        match self {
+            TimelineEvent::Match(_) => "match",
+            TimelineEvent::Progress { .. } => "progress",
+            TimelineEvent::PageEnd { .. } => "page_end",
+            TimelineEvent::Error { .. } => "error",
+        }
+    }
+}
+
+impl From<ApiError> for TimelineEvent {
+    fn from(e: ApiError) -> Self {
+        TimelineEvent::Error { code: e.code.to_string(), message: e.message, cluster: e.cluster, retriable: e.retriable }
+    }
+}
+
+/// Fetches fresh per-partition watermarks for `topic`. Deliberately separate
+/// from `api::messages::watermarks_blocking` (which the browse/search
+/// handlers use to resolve an anchor *before* calling into this engine):
+/// `run_page` always needs its own fresh watermarks regardless of whether
+/// this page started from an anchor or a cursor, so it cannot rely on
+/// whatever the caller may or may not have already fetched.
+fn watermarks_blocking(handle: &ClusterHandle, topic: &str) -> Result<Vec<(i32, i64, i64)>, ApiError> {
+    let md = handle.consumer()
+        .fetch_metadata(Some(topic), ADMIN_TIMEOUT)
+        .map_err(|e| error::from_kafka(&handle.name, "fetch metadata", &e))?;
+    let t = md.topics().iter()
+        .find(|t| t.name() == topic && !t.partitions().is_empty())
+        .ok_or_else(|| ApiError::topic_not_found(&handle.name, topic))?;
+    let mut wm = Vec::new();
+    for p in t.partitions() {
+        let (lo, hi) = handle.consumer()
+            .fetch_watermarks(topic, p.id(), ADMIN_TIMEOUT)
+            .map_err(|e| error::from_kafka(&handle.name, "fetch watermarks", &e))?;
+        wm.push((p.id(), lo, hi));
+    }
+    Ok(wm)
+}
+
+/// Runs one unfiltered timeline page (`filter: None` — the only path this
+/// task implements; a filtered page is Task 4's job and reports an explicit
+/// `error` rather than silently behaving like an unfiltered scan).
+///
+/// Unfiltered semantics: `span = limit` per partition (no budget-driven
+/// scanning needed — every window record is a candidate, so there's nothing
+/// to keep scanning past), scan every window, decode, merge-sort globally by
+/// `(timestamp_ms, partition, offset)` (desc for `Back`, asc for `Forward`),
+/// then truncate to `limit` keeping the records nearest the position (the
+/// front of that sorted order).
+///
+/// The subtle part is the cursor: it must advance only past what was
+/// *actually emitted*, not past the full requested window. If truncation
+/// dropped some of a partition's window (because other partitions had
+/// records closer to the position), naively advancing to that partition's
+/// full window boundary would silently skip the dropped records on the next
+/// page. Instead, per-partition extremes are recomputed from the emitted set
+/// itself: for `Back`, the new position is the lowest offset actually
+/// emitted for that partition; for `Forward`, one past the highest. A
+/// partition with nothing in the emitted set keeps its old position
+/// unchanged (its window, if any, was entirely displaced by other
+/// partitions' records — nothing has been consumed from it yet).
+pub fn run_page(
+    handle: Arc<ClusterHandle>,
+    topic: String,
+    positions: Vec<(i32, i64)>,
+    direction: Direction,
+    limit: usize,
+    filter: Option<Filter>,
+    budget: u64,
+) -> (mpsc::Receiver<TimelineEvent>, Arc<AtomicBool>) {
+    let (tx, rx) = mpsc::channel::<TimelineEvent>(256);
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let cancel = cancelled.clone();
+    // Budget only bounds filtered scans (task 4): an unfiltered page's window
+    // span is exactly `limit`, so there is nothing left to keep scanning
+    // past once the window is consumed.
+    let _ = budget;
+
+    tokio::spawn(async move {
+        if filter.is_some() {
+            // Filtered timeline pages (budget-driven scanning with a
+            // `continue` affordance) are Task 4's responsibility. Reporting
+            // a loud `error` here — rather than quietly ignoring the filter
+            // and returning an unfiltered page — matches the product
+            // charter's "never silently skip" rule.
+            let _ = tx.send(TimelineEvent::Error {
+                code: "not_implemented".into(),
+                message: "filtered timeline pages are not yet implemented".into(),
+                cluster: Some(handle.name.clone()),
+                retriable: false,
+            }).await;
+            return;
+        }
+
+        type ScanResult = Result<(Vec<RawRecord>, Vec<(i32, i64, i64)>), ApiError>;
+        let result = {
+            let handle = handle.clone();
+            let topic = topic.clone();
+            let positions = positions.clone();
+            tokio::task::spawn_blocking(move || -> ScanResult {
+                let watermarks = watermarks_blocking(&handle, &topic)?;
+                let windows = page_windows(&positions, &watermarks, direction, limit as u64);
+                let cap = range::total(&windows) as usize;
+                let records = fetch::fetch_ranges_blocking(&handle.config, &topic, &windows, cap)?;
+                Ok((records, watermarks))
+            }).await
+        };
+
+        let (records, watermarks) = match result {
+            Ok(Ok(pair)) => pair,
+            Ok(Err(e)) => {
+                let _ = tx.send(e.into()).await;
+                return;
+            }
+            Err(join_err) => {
+                let _ = tx.send(ApiError::internal(format!("task join: {join_err}")).into()).await;
+                return;
+            }
+        };
+
+        let mut merged = fetch::to_message_out(records, handle.schema_registry.as_deref()).await;
+        match direction {
+            Direction::Back => merged.sort_by(|a, b| {
+                b.timestamp_ms.unwrap_or(i64::MIN).cmp(&a.timestamp_ms.unwrap_or(i64::MIN))
+                    .then(a.partition.cmp(&b.partition))
+                    .then(a.offset.cmp(&b.offset))
+            }),
+            Direction::Forward => merged.sort_by(|a, b| {
+                a.timestamp_ms.unwrap_or(i64::MIN).cmp(&b.timestamp_ms.unwrap_or(i64::MIN))
+                    .then(a.partition.cmp(&b.partition))
+                    .then(a.offset.cmp(&b.offset))
+            }),
+        }
+        merged.truncate(limit);
+
+        // Recompute per-partition extremes from what was *actually emitted*
+        // (see the doc comment above) — this is what makes the cursor safe
+        // against truncation, whether or not truncation actually cut
+        // anything from a given partition.
+        let emitted_windows: Vec<PartitionRange> = positions
+            .iter()
+            .filter_map(|&(partition, _)| {
+                let offsets: Vec<i64> = merged.iter().filter(|m| m.partition == partition).map(|m| m.offset).collect();
+                match direction {
+                    Direction::Back => offsets.iter().min().map(|&lo| PartitionRange { partition, start: lo, end: lo }),
+                    Direction::Forward => offsets.iter().max().map(|&hi| PartitionRange { partition, start: hi + 1, end: hi + 1 }),
+                }
+            })
+            .collect();
+        let (new_positions, exhausted) = advance(&positions, &emitted_windows, &watermarks, direction);
+        let cursor = if exhausted { None } else { Some(Cursor { direction, positions: new_positions }.encode()) };
+
+        for m in merged {
+            if tx.send(TimelineEvent::Match(Box::new(m))).await.is_err() {
+                return; // client disconnected: no point sending page_end
+            }
+        }
+        let _ = tx.send(TimelineEvent::PageEnd { cursor, exhausted }).await;
+    });
+
+    (rx, cancel)
 }
 
 #[cfg(test)]
