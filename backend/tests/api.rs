@@ -508,6 +508,152 @@ async fn timeline_bad_params_is_400_before_streaming() {
     assert_eq!(body["code"], "bad_request");
 }
 
+/// Fix round 1, C1+C2 (reviewer's exact construction): p0 = [o0@100, o1@300,
+/// o2@300], p1 = [o0@400, o1@400], back limit 3.
+///
+/// C1: within an equal-timestamp tie in one partition, `Back` must break
+/// ties by offset *descending* — o2 (the higher offset, same timestamp as
+/// o1) must win a spot on page 1 over o1, or the wrong record gets kept.
+/// C2: because of that, page 1 (which can't fit all 5 records at limit=3)
+/// must NOT report `exhausted: true` — there's a whole record (o1) still
+/// pending in p0.
+///
+/// The pagination must be loss-free end to end: across as many pages as it
+/// takes, every one of the 5 (partition, offset) pairs must show up exactly
+/// (no gaps — and for this monotonic-timestamp case, no overlap either).
+#[tokio::test]
+async fn timeline_back_ties_are_lossless_and_not_falsely_exhausted() {
+    let bootstrap = start_kafka().await;
+    create_topic(&bootstrap, "tl-tie-topic", 2).await;
+    produce_at(&bootstrap, "tl-tie-topic", 0, "k", "p0o0", 100).await; // p0 offset 0
+    produce_at(&bootstrap, "tl-tie-topic", 0, "k", "p0o1", 300).await; // p0 offset 1
+    produce_at(&bootstrap, "tl-tie-topic", 0, "k", "p0o2", 300).await; // p0 offset 2 (tied with o1)
+    produce_at(&bootstrap, "tl-tie-topic", 1, "k", "p1o0", 400).await; // p1 offset 0
+    produce_at(&bootstrap, "tl-tie-topic", 1, "k", "p1o1", 400).await; // p1 offset 1 (tied with o0)
+    let state = state_for(&bootstrap, vec![]);
+
+    let events1 = collect_sse(app(state.clone()), "/api/clusters/test/topics/tl-tie-topic/timeline?direction=back&limit=3&anchor=latest", 200).await;
+    let vals1: Vec<String> = events1.iter().filter(|(n, _)| n == "match")
+        .map(|(_, m)| m["value"]["text"].as_str().unwrap().to_string()).collect();
+    // C1: p1's tie (o0, o1 @400) resolves o1-before-o0 (offset desc); p0's
+    // tie (o1, o2 @300) resolves o2-before-o1 — o1 must NOT appear yet.
+    assert_eq!(vals1, vec!["p1o1", "p1o0", "p0o2"], "back tie-break must keep the higher offset first: {vals1:?}");
+    let (_, end1) = events1.iter().find(|(n, _)| n == "page_end").unwrap().clone();
+    assert_eq!(end1["exhausted"], false, "C2: a page that couldn't fit everything must not claim exhaustion: {end1}");
+    let cursor = end1["cursor"].as_str().unwrap().to_string();
+
+    let events2 = collect_sse(app(state), &format!("/api/clusters/test/topics/tl-tie-topic/timeline?direction=back&limit=3&cursor={}", urlencoding::encode(&cursor)), 200).await;
+    let vals2: Vec<String> = events2.iter().filter(|(n, _)| n == "match")
+        .map(|(_, m)| m["value"]["text"].as_str().unwrap().to_string()).collect();
+    assert_eq!(vals2, vec!["p0o1", "p0o0"]);
+    let (_, end2) = events2.iter().find(|(n, _)| n == "page_end").unwrap().clone();
+    assert_eq!(end2["exhausted"], true);
+
+    let mut seen: std::collections::HashSet<String> = vals1.into_iter().collect();
+    seen.extend(vals2);
+    let expected: std::collections::HashSet<String> =
+        ["p0o0", "p0o1", "p0o2", "p1o0", "p1o1"].iter().map(|s| s.to_string()).collect();
+    assert_eq!(seen, expected, "every record must be emitted exactly once across pages");
+}
+
+/// Fix round 1, C3 (reviewer's exact construction): p0 = [o0@500, o1@300,
+/// o2@300] (non-monotonic: offset 0 has the *highest* timestamp), p1 =
+/// [o0@100, o1@100], forward limit 3 from beginning.
+///
+/// The old cursor formula (advance to the emitted set's own min/max offset)
+/// assumed the emitted subset of a partition's window is always a
+/// prefix/suffix by offset — false here, since o0 sorts last (highest
+/// timestamp) despite being the lowest offset. The fix anchors on what was
+/// *dropped*, which can legitimately cause a partition to re-offer an
+/// already-emitted record on a later page (accepted: the frontend dedups on
+/// `(partition, offset)`). What must never happen is a *lost* record: the
+/// SET of (partition, offset) emitted across pages must cover all 5, even
+/// though the exact list may contain a duplicate.
+#[tokio::test]
+async fn timeline_forward_nonmonotonic_timestamps_are_lossless() {
+    let bootstrap = start_kafka().await;
+    create_topic(&bootstrap, "tl-nonmono-topic", 2).await;
+    produce_at(&bootstrap, "tl-nonmono-topic", 0, "k", "p0o0", 500).await; // p0 offset 0 — newest timestamp, oldest offset
+    produce_at(&bootstrap, "tl-nonmono-topic", 0, "k", "p0o1", 300).await; // p0 offset 1
+    produce_at(&bootstrap, "tl-nonmono-topic", 0, "k", "p0o2", 300).await; // p0 offset 2 (tied with o1)
+    produce_at(&bootstrap, "tl-nonmono-topic", 1, "k", "p1o0", 100).await; // p1 offset 0
+    produce_at(&bootstrap, "tl-nonmono-topic", 1, "k", "p1o1", 100).await; // p1 offset 1 (tied with o0)
+    let state = state_for(&bootstrap, vec![]);
+
+    let mut seen: std::collections::HashSet<(i64, i64)> = std::collections::HashSet::new();
+    let mut cursor: Option<String> = None;
+    let mut exhausted = false;
+    for _ in 0..10 {
+        // safety bound: must terminate well before this in practice
+        let path = match &cursor {
+            None => "/api/clusters/test/topics/tl-nonmono-topic/timeline?direction=forward&limit=3&anchor=beginning".to_string(),
+            Some(c) => format!("/api/clusters/test/topics/tl-nonmono-topic/timeline?direction=forward&limit=3&cursor={}", urlencoding::encode(c)),
+        };
+        let events = collect_sse(app(state.clone()), &path, 200).await;
+        for (name, m) in &events {
+            if name == "match" {
+                seen.insert((m["partition"].as_i64().unwrap(), m["offset"].as_i64().unwrap()));
+            }
+        }
+        let (_, end) = events.iter().find(|(n, _)| n == "page_end").unwrap().clone();
+        exhausted = end["exhausted"].as_bool().unwrap();
+        cursor = end["cursor"].as_str().map(str::to_string);
+        if exhausted { break; }
+    }
+    assert!(exhausted, "must reach exhaustion within the safety bound, not loop forever");
+    let expected: std::collections::HashSet<(i64, i64)> =
+        [(0i64, 0i64), (0, 1), (0, 2), (1, 0), (1, 1)].into_iter().collect();
+    assert_eq!(seen, expected, "every (partition, offset) must be covered across pages, even with non-monotonic timestamps (dup re-emission is fine, loss is not)");
+}
+
+/// Fix round 1, I1: a cursor's own `direction` must match the request's
+/// `direction` param, or it's rejected with 400 before any streaming — a
+/// stale or foreign cursor used with the wrong direction must not silently
+/// paginate in a way its stored positions never meant.
+#[tokio::test]
+async fn timeline_cursor_direction_mismatch_is_400() {
+    let bootstrap = start_kafka().await;
+    let state = state_for(&bootstrap, vec![]);
+    let back_cursor = betrachtung::message::timeline::Cursor {
+        direction: betrachtung::message::timeline::Direction::Back,
+        positions: vec![(0, 5)],
+    }.encode();
+    let (status, body) = get_json(
+        app(state),
+        &format!("/api/clusters/test/topics/x/timeline?direction=forward&limit=10&cursor={}", urlencoding::encode(&back_cursor)),
+    ).await;
+    assert_eq!(status, 400, "body: {body}");
+    assert_eq!(body["code"], "bad_request");
+}
+
+/// Fix round 1, M2: `limit=0` is nonsensical (an empty page forever) and
+/// must 400, not silently return zero records forever.
+#[tokio::test]
+async fn timeline_limit_zero_is_400() {
+    let bootstrap = start_kafka().await;
+    let state = state_for(&bootstrap, vec![]);
+    let (status, body) = get_json(app(state), "/api/clusters/test/topics/x/timeline?direction=back&limit=0&anchor=latest").await;
+    assert_eq!(status, 400, "body: {body}");
+    assert_eq!(body["code"], "bad_request");
+}
+
+/// Fix round 1, M3: params must be validated before the cluster registry
+/// lookup, so a bad request against an *unknown* cluster is still 400 (not
+/// a 404 that masks the real problem) — mirrors
+/// `search_bad_range_on_unknown_topic_is_400_not_404`'s rationale, applied
+/// to an unknown cluster instead of an unknown topic.
+#[tokio::test]
+async fn timeline_bad_params_on_unknown_cluster_is_400_not_404() {
+    let bootstrap = start_kafka().await;
+    let state = state_for(&bootstrap, vec![]);
+    let (status, body) = get_json(
+        app(state),
+        "/api/clusters/ghost/topics/x/timeline?direction=sideways&limit=10&anchor=latest",
+    ).await;
+    assert_eq!(status, 400, "body: {body}");
+    assert_eq!(body["code"], "bad_request");
+}
+
 #[tokio::test]
 async fn spa_fallback_serves_html_for_unknown_paths() {
     let bootstrap = start_kafka().await;

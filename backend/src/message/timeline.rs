@@ -15,9 +15,9 @@ use super::fetch::{self, RawRecord};
 use super::filter::Filter;
 use super::range::{self, PartitionRange};
 use super::MessageOut;
-use crate::cluster::{ClusterHandle, ADMIN_TIMEOUT};
-use crate::error::{self, ApiError};
-use rdkafka::consumer::Consumer;
+use crate::cluster::ClusterHandle;
+use crate::error::ApiError;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -215,27 +215,51 @@ impl From<ApiError> for TimelineEvent {
     }
 }
 
-/// Fetches fresh per-partition watermarks for `topic`. Deliberately separate
-/// from `api::messages::watermarks_blocking` (which the browse/search
-/// handlers use to resolve an anchor *before* calling into this engine):
-/// `run_page` always needs its own fresh watermarks regardless of whether
-/// this page started from an anchor or a cursor, so it cannot rely on
-/// whatever the caller may or may not have already fetched.
-fn watermarks_blocking(handle: &ClusterHandle, topic: &str) -> Result<Vec<(i32, i64, i64)>, ApiError> {
-    let md = handle.consumer()
-        .fetch_metadata(Some(topic), ADMIN_TIMEOUT)
-        .map_err(|e| error::from_kafka(&handle.name, "fetch metadata", &e))?;
-    let t = md.topics().iter()
-        .find(|t| t.name() == topic && !t.partitions().is_empty())
-        .ok_or_else(|| ApiError::topic_not_found(&handle.name, topic))?;
-    let mut wm = Vec::new();
-    for p in t.partitions() {
-        let (lo, hi) = handle.consumer()
-            .fetch_watermarks(topic, p.id(), ADMIN_TIMEOUT)
-            .map_err(|e| error::from_kafka(&handle.name, "fetch watermarks", &e))?;
-        wm.push((p.id(), lo, hi));
-    }
-    Ok(wm)
+/// Clamps decoded cursor positions into each partition's *current*
+/// `[lo, hi]` watermark range before they drive anything else.
+///
+/// Fix round 1, C4: a forged cursor, or a legitimate one whose partition has
+/// since been trimmed by retention, can carry a position outside today's
+/// watermarks (e.g. an offset below the new low watermark). `page_windows`
+/// already clamps its internal `pos` when computing a window's bounds — but
+/// `advance`'s fallback for an at-edge partition (no window at all) hands
+/// back the position *unchanged*. If that position was never clamped, it's
+/// the raw out-of-range value, `advance`'s edge check (`pos == lo`/`hi`)
+/// never matches it, and the same non-advancing cursor gets re-encoded and
+/// handed back forever: identical cursor, `exhausted: false`, nothing new,
+/// no error — a silent infinite loop from the client's point of view.
+/// Clamping once, up front, before `page_windows`, `advance`, or the cursor
+/// encoder ever see `positions`, makes "already at the edge" actually equal
+/// `lo`/`hi`, so it's recognized and reported as exhausted instead.
+fn clamp_positions(positions: &[(i32, i64)], watermarks: &[(i32, i64, i64)]) -> Vec<(i32, i64)> {
+    positions
+        .iter()
+        .map(|&(partition, pos)| match watermarks.iter().find(|(p, _, _)| *p == partition) {
+            Some(&(_, lo, hi)) => (partition, pos.clamp(lo, hi)),
+            None => (partition, pos),
+        })
+        .collect()
+}
+
+/// A page "stalled" if it had real windows to scan (Kafka reported data
+/// there when watermarks were fetched) but emitted nothing at all and no
+/// partition's position moved.
+///
+/// Fix round 1, C4 (progress guarantee): ordinarily this can't happen —
+/// non-empty windows mean at least one partition has records, so at least
+/// one gets emitted and/or advances. The one case it doesn't hold is a race
+/// against compaction or retention between the watermark fetch and the
+/// scan: every offset `page_windows` expected to exist has since vanished.
+/// Handing back `page_end` with an unchanged cursor there would make the
+/// client loop forever — identical cursor, `exhausted: false`, no new data,
+/// ever. That must surface as a terminal `error` instead.
+fn page_stalled(
+    windows: &[PartitionRange],
+    emitted_count: usize,
+    positions: &[(i32, i64)],
+    new_positions: &[(i32, i64)],
+) -> bool {
+    !windows.is_empty() && emitted_count == 0 && new_positions == positions
 }
 
 /// Runs one unfiltered timeline page (`filter: None` — the only path this
@@ -249,21 +273,44 @@ fn watermarks_blocking(handle: &ClusterHandle, topic: &str) -> Result<Vec<(i32, 
 /// then truncate to `limit` keeping the records nearest the position (the
 /// front of that sorted order).
 ///
-/// The subtle part is the cursor: it must advance only past what was
-/// *actually emitted*, not past the full requested window. If truncation
-/// dropped some of a partition's window (because other partitions had
-/// records closer to the position), naively advancing to that partition's
-/// full window boundary would silently skip the dropped records on the next
-/// page. Instead, per-partition extremes are recomputed from the emitted set
-/// itself: for `Back`, the new position is the lowest offset actually
-/// emitted for that partition; for `Forward`, one past the highest. A
-/// partition with nothing in the emitted set keeps its old position
-/// unchanged (its window, if any, was entirely displaced by other
-/// partitions' records — nothing has been consumed from it yet).
+/// The cursor must advance only past what was *actually emitted*, not past
+/// the full requested window — and (fix round 1) it must do so in a way
+/// that survives non-monotonic (producer-stamped) timestamps, not just
+/// simple truncation.
+///
+/// Fix round 1, C1: within an equal-timestamp tie in one partition, `Back`
+/// breaks ties by offset *descending* — the higher offset is the one
+/// actually nearer the position (later in the partition, whatever its
+/// timestamp says), so it must be the one kept when truncation has to
+/// choose. The original ascending tie-break could keep a lower offset over
+/// a higher one from the same partition/timestamp, which fed directly into
+/// C2 (falsely reporting a partial page as exhausted) once combined with
+/// the old emitted-extremes cursor formula.
+///
+/// Fix round 1, C3: that old formula — new position = the emitted set's own
+/// min (`Back`)/max+1 (`Forward`) offset per partition — assumed the
+/// emitted subset of a partition's window is always a clean prefix/suffix
+/// by offset. Non-monotonic timestamps break that assumption: a record can
+/// sort to the far end of the global merge (and get truncated away) while
+/// sitting at a *low* offset in its partition, with a *higher*-offset,
+/// same-or-later-timestamp sibling from the same partition making the cut.
+/// Advancing to the emitted set's own extreme would then silently step past
+/// the dropped low-offset record forever. The fix anchors the new position
+/// on what was *dropped* from each partition's window instead of what was
+/// emitted: `Back` position = `max(dropped) + 1` (or `window.start` if
+/// nothing was dropped); `Forward` position = `min(dropped)` (or
+/// `window.end` if nothing was dropped). This is safe by construction — the
+/// new position always excludes every dropped offset — at the cost of
+/// bounded overlap: a partition that still has a dropped record pending can
+/// re-offer an already-emitted sibling on a later page. That's an accepted
+/// trade (the frontend already dedups on `(partition, offset)`; the product
+/// charter forbids losing records, not repeating one at a page boundary).
+#[allow(clippy::too_many_arguments)] // mirrors search.rs's `drive_partition`
 pub fn run_page(
     handle: Arc<ClusterHandle>,
     topic: String,
     positions: Vec<(i32, i64)>,
+    watermarks: Vec<(i32, i64, i64)>,
     direction: Direction,
     limit: usize,
     filter: Option<Filter>,
@@ -293,21 +340,31 @@ pub fn run_page(
             return;
         }
 
-        type ScanResult = Result<(Vec<RawRecord>, Vec<(i32, i64, i64)>), ApiError>;
+        // C4: clamp before anything else sees `positions` (see the doc
+        // comment on `clamp_positions`).
+        let positions = clamp_positions(&positions, &watermarks);
+
+        type ScanResult = Result<(Vec<RawRecord>, Vec<PartitionRange>), ApiError>;
         let result = {
-            let handle = handle.clone();
+            let cfg = handle.config.clone();
             let topic = topic.clone();
             let positions = positions.clone();
+            let watermarks = watermarks.clone();
+            // I3: `run_page`'s own `cancelled` flag (checked by
+            // `CancelOnDrop` on client disconnect) now actually reaches the
+            // blocking scan loop, the same way `search.rs`'s does — a
+            // dropped SSE stream stops the in-flight Kafka poll loop instead
+            // of only ever toggling a flag nothing reads.
+            let cancelled = cancelled.clone();
             tokio::task::spawn_blocking(move || -> ScanResult {
-                let watermarks = watermarks_blocking(&handle, &topic)?;
                 let windows = page_windows(&positions, &watermarks, direction, limit as u64);
                 let cap = range::total(&windows) as usize;
-                let records = fetch::fetch_ranges_blocking(&handle.config, &topic, &windows, cap)?;
-                Ok((records, watermarks))
+                let records = fetch::fetch_ranges_blocking(&cfg, &topic, &windows, cap, &cancelled)?;
+                Ok((records, windows))
             }).await
         };
 
-        let (records, watermarks) = match result {
+        let (mut records, windows) = match result {
             Ok(Ok(pair)) => pair,
             Ok(Err(e)) => {
                 let _ = tx.send(e.into()).await;
@@ -319,39 +376,75 @@ pub fn run_page(
             }
         };
 
-        let mut merged = fetch::to_message_out(records, handle.schema_registry.as_deref()).await;
+        // I2: sort + truncate the raw, undecoded records first — only the
+        // page that's actually emitted gets decoded (which can be
+        // expensive: schema lookups, Avro/Protobuf parsing), not every
+        // candidate across every partition's full window.
         match direction {
-            Direction::Back => merged.sort_by(|a, b| {
+            Direction::Back => records.sort_by(|a, b| {
                 b.timestamp_ms.unwrap_or(i64::MIN).cmp(&a.timestamp_ms.unwrap_or(i64::MIN))
                     .then(a.partition.cmp(&b.partition))
-                    .then(a.offset.cmp(&b.offset))
+                    .then(b.offset.cmp(&a.offset)) // C1: offset DESC within a tie
             }),
-            Direction::Forward => merged.sort_by(|a, b| {
+            Direction::Forward => records.sort_by(|a, b| {
                 a.timestamp_ms.unwrap_or(i64::MIN).cmp(&b.timestamp_ms.unwrap_or(i64::MIN))
                     .then(a.partition.cmp(&b.partition))
                     .then(a.offset.cmp(&b.offset))
             }),
         }
-        merged.truncate(limit);
 
-        // Recompute per-partition extremes from what was *actually emitted*
-        // (see the doc comment above) — this is what makes the cursor safe
-        // against truncation, whether or not truncation actually cut
-        // anything from a given partition.
-        let emitted_windows: Vec<PartitionRange> = positions
+        // Every offset actually fetched per partition, captured *before*
+        // truncation — the "window" that C3's dropped-offset formula below
+        // is computed against.
+        let mut fetched_by_partition: HashMap<i32, Vec<i64>> = HashMap::new();
+        for r in &records {
+            fetched_by_partition.entry(r.partition).or_default().push(r.offset);
+        }
+
+        records.truncate(limit);
+
+        let mut emitted_by_partition: HashMap<i32, HashSet<i64>> = HashMap::new();
+        for r in &records {
+            emitted_by_partition.entry(r.partition).or_default().insert(r.offset);
+        }
+
+        // C3: anchor the new position on what was *dropped*, not on the
+        // emitted extremes (see the doc comment above `run_page`).
+        let empty_offsets: Vec<i64> = Vec::new();
+        let empty_emitted: HashSet<i64> = HashSet::new();
+        let cursor_windows: Vec<PartitionRange> = windows
             .iter()
-            .filter_map(|&(partition, _)| {
-                let offsets: Vec<i64> = merged.iter().filter(|m| m.partition == partition).map(|m| m.offset).collect();
-                match direction {
-                    Direction::Back => offsets.iter().min().map(|&lo| PartitionRange { partition, start: lo, end: lo }),
-                    Direction::Forward => offsets.iter().max().map(|&hi| PartitionRange { partition, start: hi + 1, end: hi + 1 }),
-                }
+            .map(|w| {
+                let fetched = fetched_by_partition.get(&w.partition).unwrap_or(&empty_offsets);
+                let emitted = emitted_by_partition.get(&w.partition).unwrap_or(&empty_emitted);
+                let dropped: Vec<i64> = fetched.iter().copied().filter(|o| !emitted.contains(o)).collect();
+                let pos = match direction {
+                    Direction::Back => dropped.iter().max().map_or(w.start, |m| m + 1),
+                    Direction::Forward => dropped.iter().min().copied().unwrap_or(w.end),
+                };
+                PartitionRange { partition: w.partition, start: pos, end: pos }
             })
             .collect();
-        let (new_positions, exhausted) = advance(&positions, &emitted_windows, &watermarks, direction);
+
+        let (new_positions, exhausted) = advance(&positions, &cursor_windows, &watermarks, direction);
+
+        // C4 progress guarantee: never hand back an identical,
+        // non-exhausted cursor (see the doc comment on `page_stalled`).
+        if page_stalled(&windows, records.len(), &positions, &new_positions) {
+            let _ = tx.send(TimelineEvent::Error {
+                code: "no_progress".into(),
+                message: "page produced no records and could not advance past its window \
+                          (likely a compaction or retention race)".into(),
+                cluster: Some(handle.name.clone()),
+                retriable: true,
+            }).await;
+            return;
+        }
+
         let cursor = if exhausted { None } else { Some(Cursor { direction, positions: new_positions }.encode()) };
 
-        for m in merged {
+        let decoded = fetch::to_message_out(records, handle.schema_registry.as_deref()).await;
+        for m in decoded {
             if tx.send(TimelineEvent::Match(Box::new(m))).await.is_err() {
                 return; // client disconnected: no point sending page_end
             }
@@ -446,5 +539,76 @@ mod tests {
         let (p2, exhausted2) = advance(&p, &w2, wm, Direction::Back);
         assert_eq!(p2, vec![(0, 0), (1, 0)]);
         assert!(exhausted2); // both partitions now at their low watermark
+    }
+
+    /// Fix round 1, C4 (reviewer's exact construction): a forged or
+    /// retention-raced cursor position (-5) on watermarks (0, 0, 10) must be
+    /// clamped before it drives `page_windows`/`advance` — otherwise
+    /// `advance`'s "no window for this partition" fallback hands back the
+    /// raw, unclamped -5 forever: `-5 == lo (0)` never holds, so `exhausted`
+    /// never becomes true and the identical cursor loops forever. Clamped to
+    /// 0 first, the partition is correctly recognized as already at its low
+    /// watermark: no window, and `exhausted` becomes true immediately.
+    #[test]
+    fn clamped_position_reaches_exhaustion_instead_of_looping() {
+        let wm: &[(i32, i64, i64)] = &[(0, 0, 10)];
+        let forged = vec![(0, -5)];
+
+        let positions = clamp_positions(&forged, wm);
+        assert_eq!(positions, vec![(0, 0)], "position must be clamped into [lo, hi]");
+
+        let windows = page_windows(&positions, wm, Direction::Back, 5);
+        assert!(windows.is_empty(), "already at the low watermark: nothing to fetch");
+
+        let (new_positions, exhausted) = advance(&positions, &windows, wm, Direction::Back);
+        assert_eq!(new_positions, vec![(0, 0)]);
+        assert!(exhausted, "clamped position at the edge must report exhausted, not loop forever");
+    }
+
+    /// Sanity check: a position already inside range is left untouched.
+    #[test]
+    fn clamp_positions_is_a_no_op_in_range() {
+        let wm: &[(i32, i64, i64)] = &[(0, 10, 110), (1, 0, 5)];
+        let positions = vec![(0, 60), (1, 3)];
+        assert_eq!(clamp_positions(&positions, wm), positions);
+    }
+
+    /// Fix round 1, C4 (progress guarantee, second half): a page whose
+    /// windows were non-empty but which emitted nothing and advanced no
+    /// position must be recognized as stalled — this is the "identical
+    /// cursor forever" case the reviewer flagged (realistically triggered by
+    /// a compaction/retention race between the watermark fetch and the
+    /// scan). Exercised here as a pure predicate since reproducing an actual
+    /// compaction race deterministically against a real broker isn't
+    /// practical; `run_page` wires this in directly (see its `page_stalled`
+    /// call).
+    #[test]
+    fn page_stalled_detects_no_emitted_records_and_no_advance() {
+        let windows = vec![range::PartitionRange { partition: 0, start: 0, end: 5 }];
+        let positions = vec![(0, 5)];
+        let new_positions = vec![(0, 5)]; // unchanged
+        assert!(page_stalled(&windows, 0, &positions, &new_positions));
+    }
+
+    #[test]
+    fn page_stalled_is_false_when_records_were_emitted() {
+        let windows = vec![range::PartitionRange { partition: 0, start: 0, end: 5 }];
+        let positions = vec![(0, 5)];
+        let new_positions = vec![(0, 5)]; // unchanged, but records *were* emitted
+        assert!(!page_stalled(&windows, 3, &positions, &new_positions));
+    }
+
+    #[test]
+    fn page_stalled_is_false_when_position_advanced() {
+        let windows = vec![range::PartitionRange { partition: 0, start: 0, end: 5 }];
+        let positions = vec![(0, 5)];
+        let new_positions = vec![(0, 2)]; // advanced, even with 0 emitted
+        assert!(!page_stalled(&windows, 0, &positions, &new_positions));
+    }
+
+    #[test]
+    fn page_stalled_is_false_when_no_windows_were_requested() {
+        // Already fully at the edge: nothing to scan, not a stall.
+        assert!(!page_stalled(&[], 0, &[(0, 0)], &[(0, 0)]));
     }
 }

@@ -157,7 +157,7 @@ pub async fn run(
     let wm = {
         let handle = handle.clone();
         let topic = topic.clone();
-        tokio::task::spawn_blocking(move || crate::api::messages::watermarks_blocking(&handle, &topic))
+        tokio::task::spawn_blocking(move || fetch::watermarks_blocking(&handle, &topic))
             .await
             .map_err(|e| ApiError::internal(format!("task join: {e}")))??
     };

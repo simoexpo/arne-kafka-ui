@@ -1,7 +1,7 @@
 use super::range::PartitionRange;
 use super::schema_registry::SchemaRegistry;
 use super::{decode, HeaderOut, MessageOut};
-use crate::cluster::build_client_config;
+use crate::cluster::{build_client_config, ClusterHandle, ADMIN_TIMEOUT};
 use crate::config::ClusterConfig;
 use crate::error::ApiError;
 use rdkafka::consumer::{BaseConsumer, Consumer};
@@ -9,7 +9,7 @@ use rdkafka::message::{Headers, Message};
 use rdkafka::topic_partition_list::TopicPartitionList;
 use rdkafka::Offset;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 /// Monotonic per-process counter so each fetch's throwaway group.id is
@@ -26,11 +26,34 @@ pub struct RawRecord {
     pub headers: Vec<(String, Vec<u8>)>,
 }
 
+/// Fetches fresh per-partition low/high watermarks for `topic`. Shared by
+/// every caller that needs them — `api::messages`'s browse/search anchor
+/// resolution and `message::timeline::run_page` alike (fix round 1, M4) —
+/// so there's exactly one implementation of "ask Kafka for a topic's
+/// current bounds", not a copy per call site.
+pub fn watermarks_blocking(handle: &ClusterHandle, topic: &str) -> Result<Vec<(i32, i64, i64)>, ApiError> {
+    let md = handle.consumer()
+        .fetch_metadata(Some(topic), ADMIN_TIMEOUT)
+        .map_err(|e| crate::error::from_kafka(&handle.name, "fetch metadata", &e))?;
+    let t = md.topics().iter()
+        .find(|t| t.name() == topic && !t.partitions().is_empty())
+        .ok_or_else(|| ApiError::topic_not_found(&handle.name, topic))?;
+    let mut wm = Vec::new();
+    for p in t.partitions() {
+        let (lo, hi) = handle.consumer()
+            .fetch_watermarks(topic, p.id(), ADMIN_TIMEOUT)
+            .map_err(|e| crate::error::from_kafka(&handle.name, "fetch watermarks", &e))?;
+        wm.push((p.id(), lo, hi));
+    }
+    Ok(wm)
+}
+
 pub fn fetch_ranges_blocking(
     cfg: &ClusterConfig,
     topic: &str,
     ranges: &[PartitionRange],
     cap: usize,
+    cancelled: &AtomicBool,
 ) -> Result<Vec<RawRecord>, ApiError> {
     // Ranges with start >= end have nothing to fetch (e.g. offset beyond the
     // high watermark) — drop them before assigning so the poll loop's `done`
@@ -62,7 +85,16 @@ pub fn fetch_ranges_blocking(
     let mut out = Vec::new();
     let deadline = Instant::now() + Duration::from_secs(10);
 
-    while done.values().any(|d| !d) && Instant::now() < deadline && out.len() < cap {
+    while done.values().any(|d| !d)
+        && Instant::now() < deadline
+        && out.len() < cap
+        // I3 (fix round 1): honor the caller's cancellation flag the same
+        // way search.rs's scan loop does, so a client-disconnect
+        // (CancelOnDrop) actually stops an in-flight timeline scan instead
+        // of only ever being read by whoever built the `Arc` and nothing
+        // else.
+        && !cancelled.load(Ordering::SeqCst)
+    {
         match consumer.poll(Duration::from_millis(200)) {
             Some(Ok(msg)) => {
                 let p = msg.partition();

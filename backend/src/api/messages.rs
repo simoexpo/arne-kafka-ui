@@ -29,23 +29,6 @@ pub struct BrowseParams {
     pub ts_ms: Option<i64>,
 }
 
-pub fn watermarks_blocking(handle: &ClusterHandle, topic: &str) -> Result<Vec<(i32, i64, i64)>, ApiError> {
-    let md = handle.consumer()
-        .fetch_metadata(Some(topic), ADMIN_TIMEOUT)
-        .map_err(|e| error::from_kafka(&handle.name, "fetch metadata", &e))?;
-    let t = md.topics().iter()
-        .find(|t| t.name() == topic && !t.partitions().is_empty())
-        .ok_or_else(|| ApiError::topic_not_found(&handle.name, topic))?;
-    let mut wm = Vec::new();
-    for p in t.partitions() {
-        let (lo, hi) = handle.consumer()
-            .fetch_watermarks(topic, p.id(), ADMIN_TIMEOUT)
-            .map_err(|e| error::from_kafka(&handle.name, "fetch watermarks", &e))?;
-        wm.push((p.id(), lo, hi));
-    }
-    Ok(wm)
-}
-
 pub fn ts_starts_blocking(
     handle: &ClusterHandle,
     topic: &str,
@@ -112,7 +95,7 @@ pub async fn browse(
         let handle = handle.clone();
         let topic = topic.clone();
         tokio::task::spawn_blocking(move || -> Result<_, ApiError> {
-            let wm = watermarks_blocking(&handle, &topic)?;
+            let wm = fetch::watermarks_blocking(&handle, &topic)?;
             match anchor {
                 Anchor::Latest => Ok(range::latest_ranges(&wm, limit)),
                 Anchor::Offset { partition, offset } => {
@@ -135,7 +118,10 @@ pub async fn browse(
         let topic = topic.clone();
         let ranges = ranges.clone();
         tokio::task::spawn_blocking(move || {
-            fetch::fetch_ranges_blocking(&cfg, &topic, &ranges, (limit as usize) * ranges.len().max(1))
+            // browse() is a plain polling GET with no client-cancellation
+            // concept (unlike the SSE endpoints' `CancelOnDrop`), so it
+            // always passes a flag that's never set.
+            fetch::fetch_ranges_blocking(&cfg, &topic, &ranges, (limit as usize) * ranges.len().max(1), &AtomicBool::new(false))
         }).await.map_err(|e| ApiError::internal(format!("task join: {e}")))??
     };
 
@@ -224,7 +210,7 @@ pub async fn search(
         let handle = handle.clone();
         let topic = topic.clone();
         tokio::task::spawn_blocking(move || -> Result<_, ApiError> {
-            let wm = watermarks_blocking(&handle, &topic)?;
+            let wm = fetch::watermarks_blocking(&handle, &topic)?;
             match range {
                 Range::LastN { n } => Ok(range::latest_ranges(&wm, n)),
                 Range::Offsets { from, to, partition } => {
@@ -314,53 +300,93 @@ impl TimelineAnchorInput {
     }
 }
 
+/// Where this page's starting positions come from, resolved *after* pure
+/// param validation but *before* the (single) watermarks round trip below —
+/// an anchor still needs watermarks to resolve into positions; a cursor's
+/// positions are already known from decoding alone.
+enum PositionSource {
+    FromCursor(Vec<(i32, i64)>),
+    FromAnchor(TimelineAnchorInput),
+}
+
 pub async fn timeline_sse(
     State(state): State<AppState>,
     Path((cluster, topic)): Path<(String, String)>,
     Query(params): Query<TimelineParams>,
 ) -> Result<Sse<impl Stream<Item = Result<Event, std::convert::Infallible>>>, ApiError> {
-    let handle = state.registry.get(&cluster)?;
-
+    // Fix round 1, M3: every param is validated — direction, limit, the
+    // cursor/anchor xor, the anchor's own shape, and (I1) a cursor's
+    // direction against the request's — strictly before `registry.get`, so
+    // a bad request against an *unknown* cluster is still 400, never a 404
+    // that masks the real problem.
     let direction = match params.direction.as_str() {
         "back" => timeline::Direction::Back,
         "forward" => timeline::Direction::Forward,
         other => return Err(ApiError::bad_request(format!("unknown direction '{other}'"))),
     };
-    let limit = params.limit.unwrap_or(100).min(1000) as usize;
+
+    // M2: 0 is nonsensical (an empty page forever); M1: cap restored to 500,
+    // matching browse's cap — 1000 was never intentional, just not yet
+    // reviewed.
+    let limit = params.limit.unwrap_or(100);
+    if limit == 0 {
+        return Err(ApiError::bad_request("limit must be >= 1"));
+    }
+    let limit = limit.min(500) as usize;
 
     if params.cursor.is_some() == params.anchor.is_some() {
         return Err(ApiError::bad_request("exactly one of cursor or anchor is required"));
     }
 
-    let positions = match &params.cursor {
+    let source = match &params.cursor {
         Some(cursor) => {
-            timeline::Cursor::decode(cursor)
-                .map_err(|e| ApiError::bad_request(format!("bad cursor: {e}")))?
-                .positions
+            let decoded = timeline::Cursor::decode(cursor)
+                .map_err(|e| ApiError::bad_request(format!("bad cursor: {e}")))?;
+            // I1: a cursor carries the direction it continues in; a request
+            // that flips `direction` against a stale/foreign cursor must
+            // fail fast, not silently paginate the wrong way.
+            if decoded.direction != direction {
+                return Err(ApiError::bad_request("cursor direction does not match direction param"));
+            }
+            PositionSource::FromCursor(decoded.positions)
         }
-        None => {
-            let anchor_input = TimelineAnchorInput::parse(&params)?;
-            let handle = handle.clone();
-            let topic = topic.clone();
-            tokio::task::spawn_blocking(move || -> Result<_, ApiError> {
-                let wm = watermarks_blocking(&handle, &topic)?;
-                let anchor = match anchor_input {
-                    TimelineAnchorInput::Latest => timeline::Anchor::Latest,
-                    TimelineAnchorInput::Beginning => timeline::Anchor::Beginning,
-                    TimelineAnchorInput::Offset { partition, offset } => {
-                        timeline::Anchor::Offset { partition, offset }
-                    }
-                    TimelineAnchorInput::Timestamp { ts_ms } => {
-                        let resolved = ts_starts_blocking(&handle, &topic, &wm, ts_ms)?;
-                        timeline::Anchor::TimestampResolved(resolved)
-                    }
-                };
-                Ok(timeline::initial_positions(&wm, &anchor))
-            }).await.map_err(|e| ApiError::internal(format!("task join: {e}")))??
-        }
+        None => PositionSource::FromAnchor(TimelineAnchorInput::parse(&params)?),
     };
 
-    let (rx, cancel) = timeline::run_page(handle, topic, positions, direction, limit, None, DEFAULT_TIMELINE_SCAN_BUDGET);
+    let handle = state.registry.get(&cluster)?;
+
+    // M4: exactly one watermarks round trip per page request, whether this
+    // is an anchor page (which needs watermarks to resolve positions) or a
+    // cursor page (which needs them anyway, for `run_page`'s own windowing
+    // and exhaustion check) — never two for the same request.
+    type PositionsAndWatermarks = (Vec<(i32, i64)>, Vec<(i32, i64, i64)>);
+    let (positions, watermarks) = {
+        let handle = handle.clone();
+        let topic = topic.clone();
+        tokio::task::spawn_blocking(move || -> Result<PositionsAndWatermarks, ApiError> {
+            let wm = fetch::watermarks_blocking(&handle, &topic)?;
+            let positions = match source {
+                PositionSource::FromCursor(positions) => positions,
+                PositionSource::FromAnchor(input) => {
+                    let anchor = match input {
+                        TimelineAnchorInput::Latest => timeline::Anchor::Latest,
+                        TimelineAnchorInput::Beginning => timeline::Anchor::Beginning,
+                        TimelineAnchorInput::Offset { partition, offset } => {
+                            timeline::Anchor::Offset { partition, offset }
+                        }
+                        TimelineAnchorInput::Timestamp { ts_ms } => {
+                            let resolved = ts_starts_blocking(&handle, &topic, &wm, ts_ms)?;
+                            timeline::Anchor::TimestampResolved(resolved)
+                        }
+                    };
+                    timeline::initial_positions(&wm, &anchor)
+                }
+            };
+            Ok((positions, wm))
+        }).await.map_err(|e| ApiError::internal(format!("task join: {e}")))??
+    };
+
+    let (rx, cancel) = timeline::run_page(handle, topic, positions, watermarks, direction, limit, None, DEFAULT_TIMELINE_SCAN_BUDGET);
     let guard = CancelOnDrop(cancel);
     let stream = ReceiverStream::new(rx).map(move |event: TimelineEvent| {
         let _hold = &guard; // move the guard into the stream: dropped on disconnect
