@@ -39,6 +39,33 @@ async fn topics_inventory_lists_topic_with_message_estimate() {
     assert!(body["as_of"].as_i64().unwrap() > 0);
 }
 
+/// Regression: `list_topics` used to `fetch_watermarks` every partition of
+/// every topic, internal ones included — `__transaction_state` alone can
+/// carry 50 partitions on a cluster with transactional producers, and any
+/// single watermark failure aborted the whole request (502, blank topic
+/// inventory). Internal topics are hidden by default and their estimates
+/// aren't shown meaningfully, so they must be skipped entirely: null
+/// estimate, no error, and — critically — the request as a whole still
+/// succeeds.
+#[tokio::test]
+async fn topics_inventory_skips_watermarks_for_internal_topics() {
+    let bootstrap = start_kafka().await;
+    // force __consumer_offsets into existence via a real committed offset,
+    // rather than relying on another test having already created it
+    create_topic(&bootstrap, "inv-internal-topic", 1).await;
+    produce(&bootstrap, "inv-internal-topic", 1).await;
+    consume_and_commit(&bootstrap, "inv-internal-topic", "inv-internal-group", 1).await;
+    let state = state_for(&bootstrap, vec![]);
+    let (status, body) = get_json(app(state), "/api/clusters/test/topics").await;
+    assert_eq!(status, 200);
+    let topics = body["topics"].as_array().unwrap();
+    let t = topics.iter().find(|t| t["name"] == "__consumer_offsets")
+        .expect("__consumer_offsets topic listed");
+    assert_eq!(t["internal"], true);
+    assert!(t["message_estimate"].is_null());
+    assert!(t["estimate_error"].is_null());
+}
+
 #[tokio::test]
 async fn topic_detail_shows_partitions_offsets_and_configs() {
     let bootstrap = start_kafka().await;

@@ -18,7 +18,7 @@ export function OverviewView({ cluster }: { cluster: string }) {
   })
   const top = (topics.data?.topics ?? [])
     .filter((t) => !t.internal)
-    .sort((a, b) => b.message_estimate - a.message_estimate)
+    .sort((a, b) => (b.message_estimate ?? -1) - (a.message_estimate ?? -1))
     .slice(0, 10)
 
   return (
@@ -58,7 +58,7 @@ export function OverviewView({ cluster }: { cluster: string }) {
               <tr key={t.name} data-testid="top-topic" className="border-t border-zinc-100 dark:border-zinc-800">
                 <td className="py-1 font-mono">{t.name}</td>
                 <td>{t.partitions}</td>
-                <td>{formatCount(t.message_estimate)}</td>
+                <td>{t.message_estimate === null ? '—' : formatCount(t.message_estimate)}</td>
               </tr>
             ))}
           </tbody>

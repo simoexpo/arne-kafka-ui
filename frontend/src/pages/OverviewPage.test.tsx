@@ -37,6 +37,29 @@ describe('OverviewView', () => {
     expect(screen.queryByText('__internal')).not.toBeInTheDocument() // internal excluded
   })
 
+  it('renders — for top topics whose message estimate is null, sorted after ranked ones', async () => {
+    vi.mocked(client.getOverview).mockResolvedValue({
+      brokers: [{ id: 1, host: 'b1', port: 9092 }],
+      controller_id: null,
+      topic_count: 2,
+      partition_count: 4,
+      under_replicated_partitions: 0,
+      as_of: Date.now(),
+    })
+    vi.mocked(client.getTopics).mockResolvedValue({
+      topics: [
+        { name: 'flaky', partitions: 1, replication_factor: 1, message_estimate: null, size_bytes: null, internal: false },
+        { name: 'ranked', partitions: 1, replication_factor: 1, message_estimate: 10, size_bytes: null, internal: false },
+      ],
+      as_of: Date.now(),
+    })
+    renderWithQuery(<OverviewView cluster="prod" />)
+    const topTopics = await screen.findAllByTestId('top-topic')
+    expect(topTopics[0]).toHaveTextContent('ranked')
+    expect(topTopics[1]).toHaveTextContent('flaky')
+    expect(topTopics[1]).toHaveTextContent('—')
+  })
+
   it('renders an inline error in the failing panel only', async () => {
     vi.mocked(client.getOverview).mockRejectedValue(
       new client.ApiError(504, 'kafka_timeout', 'fetch metadata timed out', 'prod', true),

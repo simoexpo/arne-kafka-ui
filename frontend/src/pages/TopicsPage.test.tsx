@@ -32,6 +32,22 @@ describe('TopicsView', () => {
     expect(link).toHaveAttribute('data-status', 'active')
   })
 
+  it('renders — for a topic whose message estimate is null', async () => {
+    vi.mocked(client.getTopics).mockResolvedValue({
+      // size_bytes is non-null so the only '—' in the row is attributable to
+      // the message-estimate cell, not the (already-guarded) size cell
+      topics: [
+        { name: 'flaky', partitions: 2, replication_factor: 1, message_estimate: null, size_bytes: 100, internal: false },
+      ],
+      as_of: Date.now(),
+    })
+    await renderWithRouter(<TopicsView cluster="prod" />)
+    expect(await screen.findByText('flaky')).toBeInTheDocument()
+    const row = screen.getByText('flaky').closest('tr')
+    expect(row).toHaveTextContent('—')
+    expect(row).not.toHaveTextContent('null')
+  })
+
   it('encodes topic names with spaces and slashes in the detail link href', async () => {
     vi.mocked(client.getTopics).mockResolvedValue({
       topics: [

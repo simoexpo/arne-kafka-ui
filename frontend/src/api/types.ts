@@ -20,7 +20,7 @@ export interface TopicSummary {
   name: string
   partitions: number
   replication_factor: number
-  message_estimate: number
+  message_estimate: number | null
   size_bytes: number | null
   internal: boolean
 }

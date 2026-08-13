@@ -82,7 +82,7 @@ export function TopicsView({ cluster }: { cluster: string }) {
                 </td>
                 <td>{t.partitions}</td>
                 <td>{t.replication_factor}</td>
-                <td>{formatCount(t.message_estimate)}</td>
+                <td>{t.message_estimate === null ? '—' : formatCount(t.message_estimate)}</td>
                 <td className="text-zinc-400">{t.size_bytes === null ? '—' : formatCount(t.size_bytes)}</td>
               </tr>
             ))}
