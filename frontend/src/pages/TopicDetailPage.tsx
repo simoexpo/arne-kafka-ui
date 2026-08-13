@@ -48,7 +48,12 @@ export function TopicDetailView({ cluster, topic }: { cluster: string; topic: st
       </div>
       {tab === 'Messages' && <MessagesTab cluster={cluster} topic={topic} />}
       {tab === 'Partitions' && (
-        <Panel title={`${detail.data?.partitions.length ?? 0} partitions`} error={detail.error} loading={detail.isPending}>
+        <Panel
+          title={`${detail.data?.partitions.length ?? 0} partitions`}
+          error={detail.error}
+          loading={detail.isPending}
+          hasData={detail.data !== undefined}
+        >
           <table className="w-full text-left text-sm">
             <thead className="text-xs text-zinc-500">
               <tr><th className="py-1">id</th><th>leader</th><th>replicas</th><th>ISR</th><th>start</th><th>end</th><th>health</th></tr>
@@ -101,7 +106,7 @@ export function ConsumersTab({ cluster, topic }: { cluster: string; topic: strin
 
   return (
     <div className="space-y-4">
-      <Panel title="Throughput" error={throughput.error} loading={throughput.isPending}>
+      <Panel title="Throughput" error={throughput.error} loading={throughput.isPending} hasData={throughput.data !== undefined}>
         <div className="flex items-end gap-4">
           <div>
             <Sparkline
@@ -118,7 +123,7 @@ export function ConsumersTab({ cluster, topic }: { cluster: string; topic: strin
           </div>
         </div>
       </Panel>
-      <Panel title="Consumer groups" error={consumers.error} loading={consumers.isPending}>
+      <Panel title="Consumer groups" error={consumers.error} loading={consumers.isPending} hasData={consumers.data !== undefined}>
         <div className="mb-2"><StalenessChip asOf={consumers.data?.as_of ?? null} refreshing={consumers.isFetching} failed={consumers.isError} /></div>
         {consumers.data && consumers.data.groups.length === 0 && (
           <p className="text-sm text-zinc-500">no consumer groups are reading this topic</p>
@@ -182,7 +187,7 @@ function ConfigTab({ data, error, loading }: { data?: TopicDetail; error: unknow
   const retentionMsHintText = retentionMs ? retentionMsHint(retentionMs.value) : null
 
   return (
-    <Panel title="Summary" error={error} loading={loading}>
+    <Panel title="Summary" error={error} loading={loading} hasData={data !== undefined}>
       {data && (
         <div className="space-y-4">
           <dl className="grid grid-cols-2 gap-4 sm:grid-cols-4">

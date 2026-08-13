@@ -51,7 +51,12 @@ export function TopicsView({ cluster }: { cluster: string }) {
           show internal
         </label>
       </div>
-      <Panel title={`${visible.length} topics`} error={topics.error} loading={topics.isPending}>
+      <Panel
+        title={`${visible.length} topics`}
+        error={topics.error}
+        loading={topics.isPending}
+        hasData={topics.data !== undefined}
+      >
         <table className="w-full text-left text-sm">
           <thead className="text-xs text-zinc-500">
             <tr>

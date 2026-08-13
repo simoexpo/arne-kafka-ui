@@ -34,5 +34,5 @@ export async function renderWithRouter(ui: ReactElement, { initialPath = '/' }: 
       <RouterProvider router={router} />
     </QueryClientProvider>,
   )
-  return { ...utils, router }
+  return { ...utils, router, queryClient: qc }
 }

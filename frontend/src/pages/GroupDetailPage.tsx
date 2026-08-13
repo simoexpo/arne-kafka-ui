@@ -17,7 +17,7 @@ export function GroupDetailView({ cluster, group }: { cluster: string; group: st
         {detail.data && <span className="text-sm text-zinc-500">{detail.data.state}</span>}
         <StalenessChip asOf={detail.data?.as_of ?? null} refreshing={detail.isFetching} failed={detail.isError} />
       </div>
-      <Panel title="Members" error={detail.error} loading={detail.isPending}>
+      <Panel title="Members" error={detail.error} loading={detail.isPending} hasData={detail.data !== undefined}>
         {detail.data && detail.data.members.length === 0 && (
           <p className="text-sm text-zinc-500">no active members</p>
         )}
@@ -31,7 +31,7 @@ export function GroupDetailView({ cluster, group }: { cluster: string; group: st
           </ul>
         )}
       </Panel>
-      <Panel title="Partition lag" error={detail.error} loading={detail.isPending}>
+      <Panel title="Partition lag" error={detail.error} loading={detail.isPending} hasData={detail.data !== undefined}>
         <table className="w-full text-left font-mono text-sm">
           <thead className="text-xs text-zinc-500">
             <tr><th className="py-1">topic</th><th>partition</th><th>committed</th><th>end</th><th>lag</th></tr>

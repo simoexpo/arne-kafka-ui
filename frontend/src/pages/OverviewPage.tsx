@@ -28,7 +28,7 @@ export function OverviewView({ cluster }: { cluster: string }) {
         <StalenessChip asOf={overview.data?.as_of ?? null} refreshing={overview.isFetching} failed={overview.isError} />
       </div>
       <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-        <Panel title="Cluster" error={overview.error} loading={overview.isPending}>
+        <Panel title="Cluster" error={overview.error} loading={overview.isPending} hasData={overview.data !== undefined}>
           {overview.data && (
             <dl className="grid grid-cols-3 gap-2 text-sm">
               <Stat label="topics" value={String(overview.data.topic_count)} />
@@ -38,7 +38,7 @@ export function OverviewView({ cluster }: { cluster: string }) {
             </dl>
           )}
         </Panel>
-        <Panel title="Brokers" error={overview.error} loading={overview.isPending}>
+        <Panel title="Brokers" error={overview.error} loading={overview.isPending} hasData={overview.data !== undefined}>
           <ul className="space-y-1 font-mono text-sm">
             {overview.data?.brokers.map((b) => (
               <li key={b.id}>
@@ -48,7 +48,7 @@ export function OverviewView({ cluster }: { cluster: string }) {
           </ul>
         </Panel>
       </div>
-      <Panel title="Top topics" error={topics.error} loading={topics.isPending}>
+      <Panel title="Top topics" error={topics.error} loading={topics.isPending} hasData={topics.data !== undefined}>
         <table className="w-full text-left text-sm">
           <thead className="text-xs text-zinc-500">
             <tr><th className="py-1">topic</th><th>partitions</th><th>messages</th></tr>

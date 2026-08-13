@@ -31,4 +31,25 @@ describe('Panel', () => {
     expect(screen.getByText('content here')).toBeInTheDocument()
     expect(screen.queryByRole('heading')).not.toBeInTheDocument()
   })
+  it('a failed refresh with existing data keeps the data visible and shows a compact banner', () => {
+    const err = new ApiError(504, 'kafka_timeout', 'fetch metadata timed out', 'prod', true)
+    render(<Panel title="Brokers" error={err} hasData>content here</Panel>)
+    expect(screen.getByText('content here')).toBeInTheDocument() // stale data stays
+    const banner = screen.getByTestId('panel-error-banner')
+    expect(banner).toHaveTextContent('kafka_timeout')
+    expect(banner).toHaveTextContent('fetch metadata timed out')
+    expect(screen.queryByText(/retriable/i)).not.toBeInTheDocument() // that's the full block's extra line, not the compact banner's
+  })
+  it('a cold-load failure (no data yet) still renders the full error block, not the banner', () => {
+    const err = new ApiError(504, 'kafka_timeout', 'fetch metadata timed out', 'prod', true)
+    render(<Panel title="Brokers" error={err}>content here</Panel>)
+    expect(screen.queryByTestId('panel-error-banner')).not.toBeInTheDocument()
+    expect(screen.queryByText('content here')).not.toBeInTheDocument()
+    expect(screen.getByText(/retriable/i)).toBeInTheDocument()
+  })
+  it('a background refetch with existing data does not skeleton over it', () => {
+    render(<Panel title="Brokers" loading hasData>content here</Panel>)
+    expect(screen.getByText('content here')).toBeInTheDocument()
+    expect(screen.queryByTestId('skeleton')).not.toBeInTheDocument()
+  })
 })

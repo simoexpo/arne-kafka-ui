@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { screen } from '@testing-library/react'
+import { screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { renderWithRouter } from '../test/utils'
 import { TopicsView } from './TopicsPage'
@@ -75,6 +75,20 @@ describe('TopicsView', () => {
     await renderWithRouter(<TopicsView cluster="prod" />)
     await screen.findByText('orders')
     expect(screen.getByText('RF')).toHaveAttribute('title', 'replication factor')
+  })
+
+  it('a failed background refresh keeps the topic list visible with a compact error banner', async () => {
+    vi.mocked(client.getTopics)
+      .mockResolvedValueOnce(topics)
+      .mockRejectedValueOnce(
+        new client.ApiError(504, 'kafka_timeout', 'fetch metadata timed out', 'prod', true),
+      )
+    const { queryClient } = await renderWithRouter(<TopicsView cluster="prod" />)
+    await screen.findByText('orders') // initial load succeeded
+    await queryClient.refetchQueries({ queryKey: ['topics', 'prod'] })
+    await waitFor(() => expect(screen.getByTestId('panel-error-banner')).toBeInTheDocument())
+    expect(screen.getByText('orders')).toBeInTheDocument() // stale data stays visible
+    expect(screen.queryByText(/retriable/i)).not.toBeInTheDocument() // banner, not the full-block takeover
   })
 
   it('copies the topic name without navigating when the row copy button is clicked', async () => {

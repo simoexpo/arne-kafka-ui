@@ -302,6 +302,7 @@ export function MessagesTab({ cluster, topic }: { cluster: string; topic: string
         title={panelTitle}
         error={isSearching || showTailView ? null : messages.error}
         loading={isSearching || showTailView ? false : messages.isPending}
+        hasData={messages.data !== undefined}
       >
         <MessageList messages={panelMessages} />
       </Panel>
