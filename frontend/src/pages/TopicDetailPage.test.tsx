@@ -51,6 +51,42 @@ describe('TopicDetailView', () => {
     expect(screen.getByTestId('stat-retention.bytes')).toHaveTextContent('∞')
   })
 
+  it('config tab summary swaps retention cards for delete.retention.ms on a compact-only topic', async () => {
+    vi.mocked(client.getTopicDetail).mockResolvedValue({
+      ...detail,
+      configs: [
+        { name: 'cleanup.policy', value: 'compact', is_default: false },
+        { name: 'delete.retention.ms', value: '86400000', is_default: true },
+        { name: 'retention.ms', value: '604800000', is_default: false },
+        { name: 'retention.bytes', value: '-1', is_default: true },
+      ],
+    })
+    renderWithQuery(<TopicDetailView cluster="prod" topic="orders" />)
+    await userEvent.click(screen.getByRole('button', { name: 'Config' }))
+    expect(await screen.findByTestId('stat-cleanup.policy')).toHaveTextContent('compact')
+    expect(screen.getByTestId('stat-delete.retention.ms')).toHaveTextContent('86400000 (1d)')
+    expect(screen.queryByTestId('stat-retention.ms')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('stat-retention.bytes')).not.toBeInTheDocument()
+  })
+
+  it('config tab summary keeps retention.ms/bytes when policy is compact,delete', async () => {
+    vi.mocked(client.getTopicDetail).mockResolvedValue({
+      ...detail,
+      configs: [
+        { name: 'cleanup.policy', value: 'compact,delete', is_default: false },
+        { name: 'delete.retention.ms', value: '86400000', is_default: true },
+        { name: 'retention.ms', value: '604800000', is_default: false },
+        { name: 'retention.bytes', value: '-1', is_default: true },
+      ],
+    })
+    renderWithQuery(<TopicDetailView cluster="prod" topic="orders" />)
+    await userEvent.click(screen.getByRole('button', { name: 'Config' }))
+    expect(await screen.findByTestId('stat-cleanup.policy')).toHaveTextContent('compact,delete')
+    expect(screen.getByTestId('stat-retention.ms')).toHaveTextContent('604800000 (7d)')
+    expect(screen.getByTestId('stat-retention.bytes')).toHaveTextContent('∞')
+    expect(screen.queryByTestId('stat-delete.retention.ms')).not.toBeInTheDocument()
+  })
+
   it('config tab summary shows a dash when cleanup.policy is absent', async () => {
     vi.mocked(client.getTopicDetail).mockResolvedValue({
       ...detail,

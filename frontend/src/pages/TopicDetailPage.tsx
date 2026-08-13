@@ -184,7 +184,15 @@ function ConfigTab({ data, error, loading }: { data?: TopicDetail; error: unknow
   const cleanupPolicy = configs.find((c) => c.name === 'cleanup.policy')
   const retentionMs = configs.find((c) => c.name === 'retention.ms')
   const retentionBytes = configs.find((c) => c.name === 'retention.bytes')
+  const deleteRetentionMs = configs.find((c) => c.name === 'delete.retention.ms')
   const retentionMsHintText = retentionMs ? retentionMsHint(retentionMs.value) : null
+  const deleteRetentionMsHintText = deleteRetentionMs ? retentionMsHint(deleteRetentionMs.value) : null
+  // retention.ms/retention.bytes only govern segment deletion, so they're
+  // inert on a compact-only topic (no "delete" in cleanup.policy) — swap
+  // them for delete.retention.ms, the knob that actually matters there.
+  // Any other/missing policy value keeps today's four cards.
+  const policies = (cleanupPolicy?.value ?? '').split(',').map((p) => p.trim()).filter(Boolean)
+  const isCompactOnly = policies.includes('compact') && !policies.includes('delete')
 
   return (
     <Panel title="Summary" error={error} loading={loading} hasData={data !== undefined}>
@@ -193,15 +201,30 @@ function ConfigTab({ data, error, loading }: { data?: TopicDetail; error: unknow
           <dl className="grid grid-cols-2 gap-4 sm:grid-cols-4">
             <Stat label="partitions" value={String(data.partitions.length)} />
             <Stat label="cleanup.policy" value={cleanupPolicy?.value ?? '—'} />
-            <Stat
-              label="retention.ms"
-              value={
-                retentionMs
-                  ? `${formatRetentionValue(retentionMs.value)}${retentionMsHintText ? ` (${retentionMsHintText})` : ''}`
-                  : '—'
-              }
-            />
-            <Stat label="retention.bytes" value={retentionBytes ? formatRetentionValue(retentionBytes.value) : '—'} />
+            {isCompactOnly
+              ? (
+                  <Stat
+                    label="delete.retention.ms"
+                    value={
+                      deleteRetentionMs
+                        ? `${formatRetentionValue(deleteRetentionMs.value)}${deleteRetentionMsHintText ? ` (${deleteRetentionMsHintText})` : ''}`
+                        : '—'
+                    }
+                  />
+                )
+              : (
+                  <>
+                    <Stat
+                      label="retention.ms"
+                      value={
+                        retentionMs
+                          ? `${formatRetentionValue(retentionMs.value)}${retentionMsHintText ? ` (${retentionMsHintText})` : ''}`
+                          : '—'
+                      }
+                    />
+                    <Stat label="retention.bytes" value={retentionBytes ? formatRetentionValue(retentionBytes.value) : '—'} />
+                  </>
+                )}
           </dl>
           <div>
             <h3 className="mb-2 text-xs font-medium text-zinc-500">Overridden values</h3>
