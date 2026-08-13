@@ -267,6 +267,52 @@ describe('useTimelinePage', () => {
     expect(result.current.state.exhausted.forward).toBe(true)
   })
 
+  it('reset() clears both cursors, exhausted flags, error, progress, loading, and closes any in-flight stream', () => {
+    const { result } = renderHook(() => useTimelinePage('prod', 'orders'))
+    act(() => {
+      result.current.loadPage({ direction: 'back', limit: 100, anchor: 'latest' }, vi.fn())
+    })
+    act(() => {
+      FakeEventSource.instances[0].emit('page_end', { cursor: 'c-back', exhausted: false })
+    })
+    expect(result.current.cursors.back).toBe('c-back')
+
+    // Start a second, still in-flight page (forward), then reset mid-flight.
+    act(() => {
+      result.current.loadPage({ direction: 'forward', limit: 100, cursor: 'c-back' }, vi.fn())
+    })
+    expect(result.current.state.loading).toBe(true)
+    const inFlight = FakeEventSource.instances.at(-1)!
+
+    act(() => {
+      result.current.reset()
+    })
+    expect(result.current.cursors).toEqual({ back: null, forward: null })
+    expect(result.current.state.exhausted).toEqual({ back: false, forward: false })
+    expect(result.current.state.error).toBeNull()
+    expect(result.current.state.progress).toBeNull()
+    expect(result.current.state.loading).toBe(false)
+    expect(inFlight.closed).toBe(true)
+  })
+
+  it('reset() kills the in-flight generation: a stale page_end after reset is ignored', () => {
+    const { result } = renderHook(() => useTimelinePage('prod', 'orders'))
+    act(() => {
+      result.current.loadPage({ direction: 'back', limit: 100, anchor: 'latest' }, vi.fn())
+    })
+    const es = FakeEventSource.instances[0]
+    act(() => {
+      result.current.reset()
+    })
+    const stateBefore = result.current.state
+    const cursorsBefore = result.current.cursors
+    act(() => {
+      es.emit('page_end', { cursor: 'ignored', exhausted: true })
+    })
+    expect(result.current.state).toBe(stateBefore)
+    expect(result.current.cursors).toBe(cursorsBefore)
+  })
+
   it('events on a superseded (closed) stream are ignored, even if the transport still fires them', () => {
     const { result } = renderHook(() => useTimelinePage('prod', 'orders'))
     const onMatchesA = vi.fn()

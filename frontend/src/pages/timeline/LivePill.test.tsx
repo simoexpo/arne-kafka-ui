@@ -14,10 +14,10 @@ describe('LivePill', () => {
     expect(screen.getByText('▲ 7 new')).toBeInTheDocument()
   })
 
-  it('shows the honest capped label once the buffer overflowed, instead of a raw number', () => {
-    render(<LivePill count={500} capped={true} onClick={vi.fn()} />)
-    expect(screen.getByText('500+ · older dropped')).toBeInTheDocument()
-    expect(screen.queryByText('▲ 500 new')).not.toBeInTheDocument()
+  it('keeps counting past the buffer cap and appends "· older dropped" once overflowed, rather than freezing at a fixed string', () => {
+    render(<LivePill count={612} capped={true} onClick={vi.fn()} />)
+    expect(screen.getByText('▲ 612 new · older dropped')).toBeInTheDocument()
+    expect(screen.queryByText('▲ 612 new')).not.toBeInTheDocument() // the suffix must be present, not a bare count
   })
 
   it('calls onClick when clicked', async () => {

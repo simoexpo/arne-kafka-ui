@@ -7,7 +7,11 @@
 
 export function LivePill({ count, capped, onClick }: { count: number; capped: boolean; onClick: () => void }) {
   if (count === 0) return null
-  const label = capped ? '500+ · older dropped' : `▲ ${count} new`
+  // `count` is the TOTAL received while paused, not the (500-)capped buffer
+  // size — it keeps counting honestly even past the cap. `capped` only
+  // controls whether the "· older dropped" suffix is appended, once the
+  // underlying buffer has actually started dropping its oldest entries.
+  const label = capped ? `▲ ${count} new · older dropped` : `▲ ${count} new`
   return (
     <button
       type="button"

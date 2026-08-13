@@ -50,6 +50,44 @@ async function emit(index: number, name: string, data: unknown) {
   })
 }
 
+// Spies on every `el.scrollTop = ...` assignment across the DOM (not just
+// one element) — necessary because a jump always unmounts/remounts
+// MessageList in between (see the pause-machinery/jump-control describe
+// blocks below): the store is cleared synchronously on click, so the
+// eventual scrollToEdge call lands on a BRAND NEW container whose default
+// scrollTop is already 0, making "did it get set to 0" indistinguishable
+// from "nothing happened" if we only read the final DOM value. Spying on
+// the assignment itself proves the call happened, regardless of which
+// physical node it landed on.
+function spyOnScrollTop() {
+  const original = Object.getOwnPropertyDescriptor(Element.prototype, 'scrollTop')!
+  const setter = vi.fn()
+  Object.defineProperty(Element.prototype, 'scrollTop', {
+    configurable: true,
+    get() {
+      return original.get!.call(this)
+    },
+    set(v: number) {
+      setter(v)
+      original.set!.call(this, v)
+    },
+  })
+  return { setter, restore: () => Object.defineProperty(Element.prototype, 'scrollTop', original) }
+}
+
+// Same idea for `scrollHeight`, which jsdom always reports as 0 (no real
+// layout) — stubbing it to a distinct value lets the "scroll to bottom"
+// (scrollTop = scrollHeight) case prove it actually read scrollHeight,
+// rather than coincidentally landing on 0 same as the "scroll to top" case.
+function stubScrollHeight(value: number) {
+  const original = Object.getOwnPropertyDescriptor(Element.prototype, 'scrollHeight')
+  Object.defineProperty(Element.prototype, 'scrollHeight', { configurable: true, get: () => value })
+  return () => {
+    if (original) Object.defineProperty(Element.prototype, 'scrollHeight', original)
+    else delete (Element.prototype as unknown as Record<string, unknown>).scrollHeight
+  }
+}
+
 describe('Timeline', () => {
   it('loads the latest page on mount and renders rows in store order', async () => {
     mockTail()
@@ -301,7 +339,7 @@ describe('Timeline', () => {
       expect(toggle).toHaveAttribute('aria-pressed', 'false')
     })
 
-    it('caps the buffer at 500, dropping the oldest, and shows the honest "500+ · older dropped" label', async () => {
+    it('keeps counting past the 500 buffer cap, drops the oldest buffered entries, and labels honestly', async () => {
       const tail = mockTail()
       const user = userEvent.setup()
       render(<Timeline cluster="prod" topic="orders" />)
@@ -311,14 +349,20 @@ describe('Timeline', () => {
       await act(async () => {
         for (let i = 0; i < 501; i++) tail.handlers().onMessage(mk(100 + i))
       })
-      expect(screen.getByText('500+ · older dropped')).toBeInTheDocument()
-      expect(screen.queryByText(/▲ \d+ new/)).not.toBeInTheDocument()
+      expect(screen.getByText('▲ 501 new · older dropped')).toBeInTheDocument()
+
+      // The count keeps growing past the cap rather than freezing at a
+      // fixed string once overflowed.
+      await act(async () => {
+        for (let i = 501; i < 612; i++) tail.handlers().onMessage(mk(100 + i))
+      })
+      expect(screen.getByText('▲ 612 new · older dropped')).toBeInTheDocument()
 
       await user.click(screen.getByTestId('live-pill'))
-      expect(screen.getByText('p0·600')).toBeInTheDocument() // newest kept
-      expect(screen.queryByText('p0·100')).not.toBeInTheDocument() // oldest dropped
-      // 1 initial row + exactly 500 buffered (the 501st push dropped the
-      // very oldest, keeping the cap honest rather than growing unbounded).
+      expect(screen.getByText('p0·711')).toBeInTheDocument() // newest kept
+      expect(screen.queryByText('p0·211')).not.toBeInTheDocument() // dropped
+      // 1 initial row + exactly 500 buffered (the cap holds regardless of
+      // how many arrived while paused).
       expect(screen.getByText('501 messages')).toBeInTheDocument()
     })
   })
@@ -407,6 +451,123 @@ describe('Timeline', () => {
       expect(FakeEventSource.instances[1].url).toBe(
         '/api/clusters/prod/topics/orders/timeline?direction=back&limit=100&anchor=timestamp&ts_ms=1700000000000',
       )
+    })
+
+    it('a jump resets BOTH directions: a stale pre-jump back cursor cannot leave load-older visible, and load-newer uses the fresh post-jump cursor', async () => {
+      mockTail()
+      const user = userEvent.setup()
+      render(<Timeline cluster="prod" topic="orders" />)
+      // latest page lands with a back cursor -> load-older visible.
+      await emit(0, 'match', mk(9))
+      await emit(0, 'page_end', { cursor: 'c1', exhausted: false })
+      expect(screen.getByTestId('load-older')).toBeInTheDocument()
+
+      // Page further back once, so the back cursor is now 'c2' (not just
+      // the initial page's cursor) — this is the reviewer's exact repro.
+      // (A match is included so this page doesn't trigger the empty-page
+      // auto-continue and open an extra, unrelated EventSource.)
+      await user.click(screen.getByTestId('load-older'))
+      await emit(1, 'match', mk(4))
+      await emit(1, 'page_end', { cursor: 'c2', exhausted: false })
+      expect(screen.getByTestId('load-older')).toBeInTheDocument()
+
+      // Jump to beginning: the old back cursor ('c2') must NOT survive —
+      // load-older must disappear immediately, before the new (forward)
+      // page has even landed.
+      await user.click(screen.getByTestId('jump-beginning'))
+      expect(screen.queryByTestId('load-older')).not.toBeInTheDocument()
+
+      // The beginning page lands and sets a fresh forward cursor.
+      await emit(2, 'match', mk(1))
+      await emit(2, 'page_end', { cursor: 'c-fwd-new', exhausted: false })
+      expect(screen.getByTestId('load-newer')).toBeInTheDocument()
+
+      // load-older must still be gone (exhausted.back/cursors.back were
+      // reset, not silently repopulated by the forward page's own update).
+      expect(screen.queryByTestId('load-older')).not.toBeInTheDocument()
+
+      // load-newer's request must carry the FRESH post-jump cursor, never
+      // the stale pre-jump back cursor ('c2').
+      await user.click(screen.getByTestId('load-newer'))
+      expect(FakeEventSource.instances[3].url).toBe(
+        '/api/clusters/prod/topics/orders/timeline?direction=forward&limit=100&cursor=c-fwd-new',
+      )
+    })
+
+    // Note on these tests: clearing the store synchronously on every jump
+    // (see handleJump) drops `hasData` to false for the click's commit,
+    // which Panel renders as a loading skeleton — unmounting MessageList
+    // (and its scroll container) until the jump's page lands (matches are
+    // batched and only flushed at page_end, per useTimelinePage, so the
+    // remount and the loading:false transition happen in the SAME commit).
+    // That means the scrollToEdge call always lands on a brand-new
+    // container whose default scrollTop is already 0 — checking the final
+    // DOM value can't distinguish "we scrolled to top" from "nothing
+    // happened". Spying on the assignment itself (spyOnScrollTop) sidesteps
+    // that entirely.
+    it("jump to now scrolls the viewport back to the top once the jump's first page lands", async () => {
+      mockTail()
+      const user = userEvent.setup()
+      render(<Timeline cluster="prod" topic="orders" />)
+      await emit(0, 'match', mk(9))
+      await emit(0, 'page_end', { cursor: 'c1', exhausted: false })
+
+      const scroll = spyOnScrollTop()
+      try {
+        await user.click(screen.getByTestId('jump-now'))
+        await emit(1, 'match', mk(20))
+        scroll.setter.mockClear()
+        await emit(1, 'page_end', { cursor: null, exhausted: true })
+        expect(scroll.setter).toHaveBeenCalledWith(0)
+      } finally {
+        scroll.restore()
+      }
+    })
+
+    it('jump to beginning scrolls the viewport to the bottom (oldest visible) once its first page lands', async () => {
+      mockTail()
+      const user = userEvent.setup()
+      render(<Timeline cluster="prod" topic="orders" />)
+      await emit(0, 'match', mk(9))
+      await emit(0, 'page_end', { cursor: 'c1', exhausted: false })
+
+      const restoreHeight = stubScrollHeight(4000)
+      const scroll = spyOnScrollTop()
+      try {
+        await user.click(screen.getByTestId('jump-beginning'))
+        await emit(1, 'match', mk(1))
+        scroll.setter.mockClear()
+        await emit(1, 'page_end', { cursor: 'c-fwd', exhausted: false })
+        // scrollTop = scrollHeight (the clamp-to-bottom trick) — asserting
+        // the stubbed 4000 (not a hardcoded 0) proves it read scrollHeight
+        // rather than coincidentally landing on the same value as "top".
+        expect(scroll.setter).toHaveBeenCalledWith(4000)
+      } finally {
+        scroll.restore()
+        restoreHeight()
+      }
+    })
+
+    it('jump to offset scrolls the viewport back to the top once its page lands', async () => {
+      mockTail()
+      const user = userEvent.setup()
+      render(<Timeline cluster="prod" topic="orders" />)
+      await emit(0, 'match', mk(9))
+      await emit(0, 'page_end', { cursor: 'c1', exhausted: false })
+
+      const scroll = spyOnScrollTop()
+      try {
+        await user.click(screen.getByTestId('jump-offset'))
+        await user.type(screen.getByTestId('jump-offset-partition-input'), '1')
+        await user.type(screen.getByTestId('jump-offset-value-input'), '77')
+        await user.click(screen.getByTestId('jump-offset-apply'))
+        await emit(1, 'match', mk(30))
+        scroll.setter.mockClear()
+        await emit(1, 'page_end', { cursor: null, exhausted: true })
+        expect(scroll.setter).toHaveBeenCalledWith(0)
+      } finally {
+        scroll.restore()
+      }
     })
   })
 })

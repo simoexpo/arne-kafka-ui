@@ -37,6 +37,14 @@ export interface UseTimelinePage {
   state: TimelineState
   cursors: TimelineCursors
   cancel(): void
+  // Full viewport reset for a jump: unlike loadPage (which only clears the
+  // exhaustion flag for the direction it's (re)loading), a jump invalidates
+  // BOTH directions at once — the old cursors describe a window the user is
+  // leaving entirely, not one they're paging within. Closing/bumping the
+  // generation here (same as cancel()) additionally guarantees a stale
+  // in-flight page from before the jump can never resurrect stale cursor
+  // state after the jump's own loadPage has started.
+  reset(): void
 }
 
 export function useTimelinePage(cluster: string, topic: string): UseTimelinePage {
@@ -65,6 +73,12 @@ export function useTimelinePage(cluster: string, topic: string): UseTimelinePage
 
   // Unmount cleanup: never leave a stream open past the component's life.
   useEffect(() => cancel, [cancel])
+
+  const reset = useCallback(() => {
+    cancel()
+    setCursors({ back: null, forward: null })
+    setState({ loading: false, progress: null, exhausted: { back: false, forward: false }, error: null })
+  }, [cancel])
 
   const loadPage = useCallback(
     (params: TimelinePageParams, onMatches: (m: MessageOut[]) => void) => {
@@ -157,5 +171,5 @@ export function useTimelinePage(cluster: string, topic: string): UseTimelinePage
     [cluster, topic],
   )
 
-  return { loadPage, state, cursors, cancel }
+  return { loadPage, state, cursors, cancel, reset }
 }

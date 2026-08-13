@@ -3,6 +3,7 @@ import { tailTopic } from '../../api/sse'
 import type { TimelinePageParams } from '../../api/sse'
 import type { MessageOut } from '../../api/types'
 import { MessageList } from '../../components/messages/MessageList'
+import type { MessageListHandle } from '../../components/messages/MessageList'
 import { Panel } from '../../components/Panel'
 import { StalenessChip } from '../../components/StalenessChip'
 import { parseFilterQuery } from '../../lib/filterQuery'
@@ -45,7 +46,7 @@ export function Timeline({ cluster, topic }: { cluster: string; topic: string })
   const storeRef = useRef(createTimelineStore())
   const [, bump] = useReducer((c: number) => c + 1, 0)
 
-  const { loadPage, state, cursors } = useTimelinePage(cluster, topic)
+  const { loadPage, state, cursors, reset } = useTimelinePage(cluster, topic)
 
   // Task 7 wires live-through-predicate with the EMPTY predicate (matches
   // everything) — the real filter box lands in Task 9 and will replace this
@@ -58,6 +59,17 @@ export function Timeline({ cluster, topic }: { cluster: string; topic: string })
   const wasLoadingRef = useRef(false)
   const [continueDirection, setContinueDirection] = useState<Direction | null>(null)
 
+  // Viewport repositioning after a jump: 'now'/'offset'/'timestamp' land
+  // looking at the top of the new window; 'beginning' lands at the start of
+  // history looking forward, so the bottom (oldest-visible) edge is what
+  // matters there. Tracked separately from pendingDirectionRef/wasLoadingRef
+  // (which drive the empty-page auto-continue) via its own "was loading"
+  // edge-detector, since the two concerns are independent and a jump's
+  // first page can itself be an empty page that auto-continues further.
+  const listRef = useRef<MessageListHandle>(null)
+  const pendingScrollEdgeRef = useRef<'top' | 'bottom' | null>(null)
+  const scrollWasLoadingRef = useRef(false)
+
   const [live, setLive] = useState(true)
   const [tailErrorText, setTailErrorText] = useState<string | null>(null)
   const tailHandleRef = useRef<{ close: () => void } | null>(null)
@@ -66,13 +78,17 @@ export function Timeline({ cluster, topic }: { cluster: string; topic: string })
   // time, like storeRef), mutated directly and paired with `bump()` so a
   // change is visible next render — same pattern as the store itself,
   // avoiding stale closures in the tail effect (which only runs once, on
-  // [cluster, topic]). bufferRef holds live messages held back while paused;
-  // bufferOverflowRef flips permanently (until the next flush) once the
-  // buffer has dropped an oldest entry, so the pill can show the honest
-  // "500+ · older dropped" label instead of a raw, increasingly meaningless
-  // count.
+  // [cluster, topic]). bufferRef holds the actual live messages held back
+  // while paused, capped at BUFFER_CAP (oldest dropped first) so flushing
+  // never inserts an unbounded backlog. bufferReceivedRef is a SEPARATE,
+  // uncapped counter — the pill keeps counting honestly past the cap
+  // (`"{n} new"`, n growing past 500) rather than freezing at a fixed
+  // string; bufferOverflowRef flips permanently (until the next flush) once
+  // the buffer has actually started dropping entries, which only gates the
+  // "· older dropped" suffix.
   const pauseReasonRef = useRef<PauseReason>('none')
   const bufferRef = useRef<MessageOut[]>([])
+  const bufferReceivedRef = useRef(0)
   const bufferOverflowRef = useRef(false)
 
   const flushBuffer = useCallback(() => {
@@ -80,6 +96,7 @@ export function Timeline({ cluster, topic }: { cluster: string; topic: string })
       storeRef.current.insert(bufferRef.current, 'live')
     }
     bufferRef.current = []
+    bufferReceivedRef.current = 0
     bufferOverflowRef.current = false
   }, [])
 
@@ -130,6 +147,22 @@ export function Timeline({ cluster, topic }: { cluster: string; topic: string })
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [state.loading, state.error, state.exhausted.back, state.exhausted.forward, cursors.back, cursors.forward])
 
+  // Jump viewport repositioning: fires on the very first loading:true ->
+  // false edge after a jump set pendingScrollEdgeRef (handleJump), whether
+  // or not that first page matched anything — a jump's job is to reposition
+  // the viewport for the new anchor, which doesn't depend on rows already
+  // being present. Cleared after firing once, so a subsequent empty-page
+  // auto-continue for the same jump doesn't re-trigger it.
+  useEffect(() => {
+    const wasLoading = scrollWasLoadingRef.current
+    scrollWasLoadingRef.current = state.loading
+    if (!wasLoading || state.loading) return
+    const edge = pendingScrollEdgeRef.current
+    if (edge === null) return
+    pendingScrollEdgeRef.current = null
+    listRef.current?.scrollToEdge(edge)
+  }, [state.loading])
+
   // Live tail: on by default, ON for the lifetime of the component. An
   // error (server-emitted or transport) stops it for good — Task 8 adds the
   // pause/resume affordance; Task 7 only needs the freeze-in-place pattern.
@@ -141,6 +174,7 @@ export function Timeline({ cluster, topic }: { cluster: string; topic: string })
           storeRef.current.insert([m], 'live')
         } else {
           bufferRef.current.push(m)
+          bufferReceivedRef.current += 1
           if (bufferRef.current.length > BUFFER_CAP) {
             bufferRef.current.shift() // drop the OLDEST buffered entry
             bufferOverflowRef.current = true
@@ -223,7 +257,20 @@ export function Timeline({ cluster, topic }: { cluster: string; topic: string })
   const handleJump = (target: JumpTarget) => {
     storeRef.current.clear()
     bufferRef.current = []
+    bufferReceivedRef.current = 0
     bufferOverflowRef.current = false
+    // A jump invalidates BOTH pagination directions, not just the one being
+    // (re)loaded: the old cursors describe a window the user is leaving
+    // entirely. reset() clears both cursors/exhausted flags (and kills any
+    // in-flight page) synchronously, BEFORE runPage starts the new one —
+    // without this, a stale opposite-direction cursor from before the jump
+    // could leave load-older/load-newer visible and pointing at the wrong
+    // window.
+    reset()
+    // 'beginning' lands at the start of history looking forward — the
+    // bottom (oldest-visible) edge is the meaningful anchor there. Every
+    // other jump lands looking at the top of its new window.
+    pendingScrollEdgeRef.current = target.kind === 'beginning' ? 'bottom' : 'top'
     switch (target.kind) {
       case 'now':
         pauseReasonRef.current = 'none'
@@ -273,7 +320,7 @@ export function Timeline({ cluster, topic }: { cluster: string; topic: string })
       <div className="flex items-center justify-between">
         <h2 className="text-sm font-medium text-zinc-500 dark:text-zinc-400">{rows.length} messages</h2>
         <div className="flex items-center gap-2">
-          <LivePill count={bufferRef.current.length} capped={bufferOverflowRef.current} onClick={handlePillClick} />
+          <LivePill count={bufferReceivedRef.current} capped={bufferOverflowRef.current} onClick={handlePillClick} />
           {live ? (
             <>
               {!paused && <span className="animate-pulse text-emerald-500">● live</span>}
@@ -308,7 +355,7 @@ export function Timeline({ cluster, topic }: { cluster: string; topic: string })
         )
       )}
       <Panel error={state.error} hasData={rows.length > 0} loading={state.loading && rows.length === 0}>
-        <MessageList messages={rows} onScroll={handleScroll} />
+        <MessageList ref={listRef} messages={rows} onScroll={handleScroll} />
       </Panel>
       {continueDirection === 'back' ? (
         <button
