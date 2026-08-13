@@ -928,6 +928,42 @@ async fn timeline_filter_budget_exhaustion_reports_and_continues() {
     assert_eq!(found, vec!["needle"]);
 }
 
+/// Code review fix: with multiple partitions, `per_partition_share`'s
+/// `.max(1)` floor (once `remaining_budget < active_partitions`) let a
+/// chunk's *potential* charge (`span * windows.len()`) exceed the actual
+/// remaining budget by up to `active_partitions - 1` records — the budget
+/// is a hard per-request cap, not a rough target, so a page must never
+/// report having scanned more than it was allowed to. Three partitions,
+/// plenty of real data in each (so none reach their own edge for many
+/// chunks), and a tiny budget of 4 force exactly the failure mode: chunk 0
+/// legitimately spends 3 (1 offset per partition), leaving 1 — but chunk
+/// 1's naive per-partition floor of 1 again times 3 partitions would spend
+/// 3 more, landing on 6 total against a budget of 4.
+#[tokio::test]
+async fn timeline_budget_never_overshoots_with_multiple_partitions() {
+    use betrachtung::config::Limits;
+    let bootstrap = start_kafka().await;
+    create_topic(&bootstrap, "tl-budget-multi-topic", 3).await;
+    for p in 0..3i32 {
+        let records: Vec<(String, String, i64)> = (0..20i64)
+            .map(|i| (format!("k{p}-{i}"), format!("v{p}-{i}"), 1000 + i))
+            .collect();
+        produce_at_many(&bootstrap, "tl-budget-multi-topic", p, &records).await;
+    }
+    let mut state = state_for(&bootstrap, vec![]);
+    state.limits = std::sync::Arc::new(Limits { timeline_scan_budget: 4, ..(*state.limits).clone() });
+
+    let events = collect_sse(app(state), "/api/clusters/test/topics/tl-budget-multi-topic/timeline?direction=back&limit=100&anchor=latest", 300).await;
+    let max_scanned = events.iter()
+        .filter(|(n, _)| n == "progress")
+        .map(|(_, v)| v["scanned"].as_u64().unwrap())
+        .max()
+        .unwrap_or(0);
+    assert!(max_scanned <= 4, "budget must never be overshot: max reported scanned = {max_scanned}, events: {events:?}");
+    let (_, end) = events.iter().find(|(n, _)| n == "page_end").unwrap().clone();
+    assert_eq!(end["exhausted"], false, "3x20 records over a budget of 4 cannot be exhausted: {end}");
+}
+
 /// Empty-page contract amendment: the scan budget bounds unfiltered hole
 /// traversal too, so a page whose first window is entirely a legitimate
 /// offset hole must keep chunk-scanning *within the same request* rather

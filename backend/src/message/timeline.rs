@@ -354,6 +354,36 @@ async fn decode_one(record: RawRecord, sr: Option<&super::schema_registry::Schem
     fetch::to_message_out(vec![record], sr).await.pop().expect("one in, one out")
 }
 
+/// Truncates `windows` — kept in their original order, which is
+/// `cur_positions`' own stable order — to a prefix whose total span does
+/// not exceed `budget_cap`, dropping any windows past that point entirely
+/// for this chunk. A dropped partition simply keeps its current position
+/// this iteration, exactly like any partition `run_page`'s cursor math
+/// already finds absent from `windows` (already-at-edge partitions get the
+/// same fallback).
+///
+/// Needed because `per_partition_share`'s `.max(1)` floor — reached once
+/// `remaining_budget < active_partitions` — otherwise lets one chunk's
+/// *potential* charge (`span * windows.len()`) exceed the real remaining
+/// budget by up to `windows.len() - 1` records: with 3 partitions and 1
+/// record of budget left, a naive per-partition span of 1 each would spend
+/// 3, not 1. The scan budget is a hard per-request cap, not an approximate
+/// target — `chunk_scanned` (bounded above by each window's own span) must
+/// never be able to exceed what was actually left.
+fn cap_windows_to_budget(windows: Vec<PartitionRange>, budget_cap: u64) -> Vec<PartitionRange> {
+    let mut total = 0u64;
+    let mut out = Vec::with_capacity(windows.len());
+    for w in windows {
+        let span = (w.end - w.start) as u64;
+        if total + span > budget_cap {
+            break;
+        }
+        total += span;
+        out.push(w);
+    }
+    out
+}
+
 /// Runs one timeline page — filtered or not, `filter: None` behaving as
 /// match-everything (the design's "filter-off = match-all, same code
 /// path"). Fetches fresh-enough windows, scans and decodes them, and emits
@@ -499,12 +529,33 @@ pub fn run_page(
             }
 
             let remaining_budget = budget - total_scanned;
-            let active_partitions = (cur_positions.len() as u64).max(1);
+            // Only partitions that would actually get a window this chunk
+            // (not already sitting at their edge in `direction`) compete
+            // for a share of the remaining budget — an edge partition
+            // contributes nothing and must not dilute everyone else's
+            // share.
+            let active_partitions = cur_positions
+                .iter()
+                .filter(|&&(p, pos)| {
+                    watermarks.iter().find(|(wp, _, _)| *wp == p).is_some_and(|&(_, lo, hi)| match direction {
+                        Direction::Back => pos != lo,
+                        Direction::Forward => pos != hi,
+                    })
+                })
+                .count() as u64;
+            let active_partitions = active_partitions.max(1);
             let per_partition_share = (remaining_budget / active_partitions).max(1);
             let base_span = if filter.is_none() && chunk_index == 0 { limit_u64 } else { CHUNK_SPAN };
             let span = base_span.min(per_partition_share).max(1);
 
             let windows = page_windows(&cur_positions, &watermarks, direction, span);
+            // Belt-and-braces against `per_partition_share`'s `.max(1)`
+            // floor: even after the per-partition span cap above, several
+            // partitions each getting a floored span of 1 can still add up
+            // to more than what's actually left — cap the chunk's total
+            // charge to the hard budget ceiling directly (see doc comment
+            // on `cap_windows_to_budget`).
+            let windows = cap_windows_to_budget(windows, remaining_budget);
             if windows.is_empty() {
                 // No partition has anything left in `direction`: the true
                 // topic edge, independent of the budget.
