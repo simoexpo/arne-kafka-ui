@@ -15,7 +15,7 @@ export function GroupsView({ cluster }: { cluster: string }) {
     <div className="space-y-4">
       <div className="flex items-center gap-3">
         <h1 className="text-lg font-semibold">Consumer groups</h1>
-        <StalenessChip asOf={groups.data?.as_of ?? null} />
+        <StalenessChip asOf={groups.data?.as_of ?? null} refreshing={groups.isFetching} />
       </div>
       <Panel title={`${groups.data?.groups.length ?? 0} groups`} error={groups.error} loading={groups.isPending}>
         <table className="w-full text-left text-sm">

@@ -25,7 +25,7 @@ export function OverviewView({ cluster }: { cluster: string }) {
     <div className="space-y-4">
       <div className="flex items-center gap-3">
         <h1 className="text-lg font-semibold">Overview</h1>
-        <StalenessChip asOf={overview.data?.as_of ?? null} />
+        <StalenessChip asOf={overview.data?.as_of ?? null} refreshing={overview.isFetching} />
       </div>
       <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
         <Panel title="Cluster" error={overview.error} loading={overview.isPending}>

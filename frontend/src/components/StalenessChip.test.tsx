@@ -28,4 +28,11 @@ describe('StalenessChip', () => {
     expect(chip).toHaveAttribute('data-staleness', 'stale')
     expect(chip.className).toMatch(/red/)
   })
+  it('stays quiet while refreshing even when the cached data is stale', () => {
+    render(<StalenessChip asOf={1_000_000} now={1_180_000} refreshing />)
+    const chip = screen.getByText('3m ago')
+    expect(chip).toHaveAttribute('data-staleness', 'refreshing')
+    expect(chip.className).not.toMatch(/red/)
+    expect(chip.className).not.toMatch(/amber/)
+  })
 })

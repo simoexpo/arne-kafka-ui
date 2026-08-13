@@ -29,7 +29,7 @@ export function TopicDetailView({ cluster, topic }: { cluster: string; topic: st
           {topic}
           <CopyButton text={topic} label={topic} />
         </h1>
-        <StalenessChip asOf={detail.data?.as_of ?? null} />
+        <StalenessChip asOf={detail.data?.as_of ?? null} refreshing={detail.isFetching} />
       </div>
       <div className="flex gap-1 border-b border-zinc-200 dark:border-zinc-800">
         {TABS.map((t) => (
@@ -114,12 +114,12 @@ export function ConsumersTab({ cluster, topic }: { cluster: string; topic: strin
             {current
               ? <span className="text-xl font-semibold">{current.msgs_per_sec.toFixed(1)} msg/s</span>
               : <span className="text-zinc-500">—</span>}
-            <div className="mt-1"><StalenessChip asOf={throughput.data?.as_of ?? null} /></div>
+            <div className="mt-1"><StalenessChip asOf={throughput.data?.as_of ?? null} refreshing={throughput.isFetching} /></div>
           </div>
         </div>
       </Panel>
       <Panel title="Consumer groups" error={consumers.error} loading={consumers.isPending}>
-        <div className="mb-2"><StalenessChip asOf={consumers.data?.as_of ?? null} /></div>
+        <div className="mb-2"><StalenessChip asOf={consumers.data?.as_of ?? null} refreshing={consumers.isFetching} /></div>
         {consumers.data && consumers.data.groups.length === 0 && (
           <p className="text-sm text-zinc-500">no consumer groups are reading this topic</p>
         )}

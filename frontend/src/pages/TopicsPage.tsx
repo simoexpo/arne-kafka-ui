@@ -27,7 +27,7 @@ export function TopicsView({ cluster }: { cluster: string }) {
     <div className="space-y-4">
       <div className="flex items-center gap-3">
         <h1 className="text-lg font-semibold">Topics</h1>
-        <StalenessChip asOf={topics.data?.as_of ?? null} />
+        <StalenessChip asOf={topics.data?.as_of ?? null} refreshing={topics.isFetching} />
       </div>
       <div className="flex items-center gap-4">
         <FilterInput value={filter} onChange={setFilter} placeholder="filter topics…" ariaLabel="filter topics" />

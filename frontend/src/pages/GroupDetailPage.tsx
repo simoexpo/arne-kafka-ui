@@ -15,7 +15,7 @@ export function GroupDetailView({ cluster, group }: { cluster: string; group: st
       <div className="flex items-center gap-3">
         <h1 className="font-mono text-lg font-semibold">{group}</h1>
         {detail.data && <span className="text-sm text-zinc-500">{detail.data.state}</span>}
-        <StalenessChip asOf={detail.data?.as_of ?? null} />
+        <StalenessChip asOf={detail.data?.as_of ?? null} refreshing={detail.isFetching} />
       </div>
       <Panel title="Members" error={detail.error} loading={detail.isPending}>
         {detail.data && detail.data.members.length === 0 && (
