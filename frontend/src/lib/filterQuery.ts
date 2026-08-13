@@ -1,7 +1,8 @@
+import type { TimelineFilterKind } from '../api/sse'
 import type { MessageOut } from '../api/types'
 
 export interface FilterQueryApi {
-  filter: string
+  filter: TimelineFilterKind
   q: string
   path?: string
 }

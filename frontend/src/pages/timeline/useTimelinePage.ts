@@ -69,6 +69,14 @@ export function useTimelinePage(cluster: string, topic: string): UseTimelinePage
     generationRef.current += 1
     handleRef.current?.close()
     handleRef.current = null
+    // A bare cancel (unlike reset()) is meant to stop an in-flight page
+    // while leaving whatever already loaded intact — cursors/exhausted/rows
+    // are untouched. But `loading` must still flip back to false, or a
+    // consumer driving a "cancel this scan" affordance off `state.loading`
+    // (Task 9's filtered-scan Cancel button) would be stuck showing it
+    // forever, since no further terminal event will ever arrive for a
+    // generation that's just been superseded.
+    setState((prev) => (prev.loading ? { ...prev, loading: false } : prev))
   }, [])
 
   // Unmount cleanup: never leave a stream open past the component's life.

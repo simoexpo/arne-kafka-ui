@@ -2,11 +2,12 @@ import { useCallback, useEffect, useReducer, useRef, useState } from 'react'
 import { tailTopic } from '../../api/sse'
 import type { TimelinePageParams } from '../../api/sse'
 import type { MessageOut } from '../../api/types'
+import { FilterInput } from '../../components/FilterInput'
 import { MessageList } from '../../components/messages/MessageList'
 import type { MessageListHandle } from '../../components/messages/MessageList'
 import { Panel } from '../../components/Panel'
 import { StalenessChip } from '../../components/StalenessChip'
-import { parseFilterQuery } from '../../lib/filterQuery'
+import { parseFilterQuery, type FilterQueryApi } from '../../lib/filterQuery'
 import { createTimelineStore } from '../../lib/timelineStore'
 import { JumpControl, type JumpTarget } from './JumpControl'
 import { LivePill, PlayPauseToggle } from './LivePill'
@@ -46,18 +47,42 @@ export function Timeline({ cluster, topic }: { cluster: string; topic: string })
   const storeRef = useRef(createTimelineStore())
   const [, bump] = useReducer((c: number) => c + 1, 0)
 
-  const { loadPage, state, cursors, reset } = useTimelinePage(cluster, topic)
+  const { loadPage, state, cursors, reset, cancel } = useTimelinePage(cluster, topic)
 
-  // Task 7 wires live-through-predicate with the EMPTY predicate (matches
-  // everything) — the real filter box lands in Task 9 and will replace this
-  // with a parsed query's predicate.
+  // The live-tail predicate: starts as match-all, replaced immediately (no
+  // debounce) whenever the debounced filter box settles — see applyFilter.
   const predicateRef = useRef(parseFilterQuery('').predicate)
+  // The currently active filter's server-side params (null = unfiltered).
+  // A page's cursor does NOT remember the filter it was scanned under (the
+  // backend's Cursor only encodes per-partition positions), so every
+  // subsequent page request — load-older/newer, a jump, or an
+  // auto-continued page — must resend it via withFilter for the filter to
+  // stay in effect until the user changes or clears it.
+  const activeFilterApiRef = useRef<FilterQueryApi | null>(null)
+  // Which anchor a settled filter change re-reads from. Kept deliberately
+  // simple per the brief: 'default' (back/latest) covers every case except
+  // right after a jump-to-beginning, which re-anchors forward/beginning so
+  // refiltering while viewing the start of the topic doesn't silently snap
+  // the user back to the live tail. offset/timestamp jumps fall back to
+  // 'default', same as no jump at all.
+  const anchorContextRef = useRef<'default' | 'beginning'>('default')
 
   const pendingDirectionRef = useRef<Direction | null>(null)
   const matchedRef = useRef(false)
   const iterationRef = useRef(0)
   const wasLoadingRef = useRef(false)
   const [continueDirection, setContinueDirection] = useState<Direction | null>(null)
+  // Running totals across an entire gesture: a user-issued page plus every
+  // auto-continued empty page that follows it. A single page's own
+  // `state.progress` resets to null at the start of each new page, so
+  // without this ref the progress row / cap affordance would misleadingly
+  // shrink back to a tiny number every time an empty page silently
+  // auto-continues, instead of showing a true running total. Only ever
+  // incremented with a PRIOR (already-ended) page's final numbers — see the
+  // auto-continue effect and the render-time formula below, which together
+  // keep this from double-counting the page currently in flight.
+  const gestureScannedRef = useRef(0)
+  const gestureMatchesRef = useRef(0)
 
   // Viewport repositioning after a jump: 'now'/'offset'/'timestamp' land
   // looking at the top of the new window; 'beginning' lands at the start of
@@ -102,7 +127,11 @@ export function Timeline({ cluster, topic }: { cluster: string; topic: string })
 
   const runPage = useCallback(
     (direction: Direction, params: TimelinePageParams, opts: { resetIteration: boolean }) => {
-      if (opts.resetIteration) iterationRef.current = 0
+      if (opts.resetIteration) {
+        iterationRef.current = 0
+        gestureScannedRef.current = 0
+        gestureMatchesRef.current = 0
+      }
       matchedRef.current = false
       pendingDirectionRef.current = direction
       setContinueDirection(null)
@@ -115,9 +144,66 @@ export function Timeline({ cluster, topic }: { cluster: string; topic: string })
     [loadPage],
   )
 
+  // Resends the currently active filter's server-side params (a no-op when
+  // unfiltered) onto any page request — see activeFilterApiRef.
+  const withFilter = useCallback((params: TimelinePageParams): TimelinePageParams => {
+    const api = activeFilterApiRef.current
+    if (!api) return params
+    return { ...params, filter: api.filter, q: api.q, ...(api.path !== undefined ? { path: api.path } : {}) }
+  }, [])
+
+  // The anchor a fresh (non-cursor) page request starts from, given the
+  // current anchor context — see anchorContextRef.
+  const baseAnchorParams = useCallback(
+    (): TimelinePageParams =>
+      anchorContextRef.current === 'beginning'
+        ? { direction: 'forward', limit: PAGE_LIMIT, anchor: 'beginning' }
+        : { direction: 'back', limit: PAGE_LIMIT, anchor: 'latest' },
+    [],
+  )
+
+  // A settled filter change (see the debounce effect below): switches the
+  // live-tail predicate immediately, drops the current viewport (store +
+  // any buffered live messages — same as a jump, since the loaded window no
+  // longer reflects the new filter), resets both pagination directions, and
+  // reloads the first page from the current anchor context with the parsed
+  // filter attached.
+  const applyFilter = useCallback(
+    (text: string) => {
+      const parsed = parseFilterQuery(text)
+      predicateRef.current = parsed.predicate
+      activeFilterApiRef.current = parsed.api
+      storeRef.current.clear()
+      bufferRef.current = []
+      bufferReceivedRef.current = 0
+      bufferOverflowRef.current = false
+      reset()
+      const base = baseAnchorParams()
+      runPage(base.direction, withFilter(base), { resetIteration: true })
+      bump()
+    },
+    [reset, runPage, baseAnchorParams, withFilter],
+  )
+
+  const [filterText, setFilterText] = useState('')
+  // Skip the very first run: the mount effect below already loads the
+  // initial (unfiltered) page — without this guard, filterText's initial
+  // '' value would debounce into a redundant clear+reload 500ms after every
+  // mount.
+  const isFirstFilterEffectRef = useRef(true)
+  useEffect(() => {
+    if (isFirstFilterEffectRef.current) {
+      isFirstFilterEffectRef.current = false
+      return
+    }
+    const id = setTimeout(() => applyFilter(filterText), 500)
+    return () => clearTimeout(id)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [filterText])
+
   // Initial page: latest 100, on mount only.
   useEffect(() => {
-    runPage('back', { direction: 'back', limit: PAGE_LIMIT, anchor: 'latest' }, { resetIteration: true })
+    runPage('back', withFilter({ direction: 'back', limit: PAGE_LIMIT, anchor: 'latest' }), { resetIteration: true })
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
@@ -138,12 +224,23 @@ export function Timeline({ cluster, topic }: { cluster: string; topic: string })
     if (state.exhausted[direction]) return
     const cursor = cursors[direction]
     if (cursor === null) return
+    // Fold this just-ended page's final progress into the gesture-wide
+    // running total BEFORE deciding whether to loop or cap — a filtered
+    // scan's progress resets per page, so without this the cap
+    // affordance/progress row would understate how much was actually
+    // scanned across every auto-continued page in this gesture. This is the
+    // ONLY place gestureScannedRef/MatchesRef are incremented, and only
+    // ever with a page that has already ended — see the render-time
+    // formula, which adds the CURRENT in-flight page's progress
+    // separately (and only while still loading) to avoid double-counting.
+    gestureScannedRef.current += state.progress?.scanned ?? 0
+    gestureMatchesRef.current += state.progress?.matches ?? 0
     if (iterationRef.current >= ITERATION_CAP) {
       setContinueDirection(direction)
       return
     }
     iterationRef.current += 1
-    runPage(direction, { direction, limit: PAGE_LIMIT, cursor }, { resetIteration: false })
+    runPage(direction, withFilter({ direction, limit: PAGE_LIMIT, cursor }), { resetIteration: false })
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [state.loading, state.error, state.exhausted.back, state.exhausted.forward, cursors.back, cursors.forward])
 
@@ -271,26 +368,30 @@ export function Timeline({ cluster, topic }: { cluster: string; topic: string })
     // bottom (oldest-visible) edge is the meaningful anchor there. Every
     // other jump lands looking at the top of its new window.
     pendingScrollEdgeRef.current = target.kind === 'beginning' ? 'bottom' : 'top'
+    // A jump re-anchors where a subsequent filter settle will re-read from
+    // (see anchorContextRef/applyFilter): only 'beginning' is tracked as
+    // its own anchor context, every other jump falls back to 'default'.
+    anchorContextRef.current = target.kind === 'beginning' ? 'beginning' : 'default'
     switch (target.kind) {
       case 'now':
         pauseReasonRef.current = 'none'
-        runPage('back', { direction: 'back', limit: PAGE_LIMIT, anchor: 'latest' }, { resetIteration: true })
+        runPage('back', withFilter({ direction: 'back', limit: PAGE_LIMIT, anchor: 'latest' }), { resetIteration: true })
         break
       case 'beginning':
         pauseReasonRef.current = 'auto'
-        runPage('forward', { direction: 'forward', limit: PAGE_LIMIT, anchor: 'beginning' }, { resetIteration: true })
+        runPage('forward', withFilter({ direction: 'forward', limit: PAGE_LIMIT, anchor: 'beginning' }), { resetIteration: true })
         break
       case 'offset':
         pauseReasonRef.current = 'auto'
         runPage(
           'back',
-          { direction: 'back', limit: PAGE_LIMIT, anchor: 'offset', partition: target.partition, offset: target.offset },
+          withFilter({ direction: 'back', limit: PAGE_LIMIT, anchor: 'offset', partition: target.partition, offset: target.offset }),
           { resetIteration: true },
         )
         break
       case 'timestamp':
         pauseReasonRef.current = 'auto'
-        runPage('back', { direction: 'back', limit: PAGE_LIMIT, anchor: 'timestamp', ts_ms: target.ts_ms }, { resetIteration: true })
+        runPage('back', withFilter({ direction: 'back', limit: PAGE_LIMIT, anchor: 'timestamp', ts_ms: target.ts_ms }), { resetIteration: true })
         break
     }
     bump()
@@ -298,22 +399,42 @@ export function Timeline({ cluster, topic }: { cluster: string; topic: string })
 
   const loadOlder = () => {
     if (cursors.back === null) return
-    runPage('back', { direction: 'back', limit: PAGE_LIMIT, cursor: cursors.back }, { resetIteration: true })
+    runPage('back', withFilter({ direction: 'back', limit: PAGE_LIMIT, cursor: cursors.back }), { resetIteration: true })
   }
   const loadNewer = () => {
     if (cursors.forward === null) return
-    runPage('forward', { direction: 'forward', limit: PAGE_LIMIT, cursor: cursors.forward }, { resetIteration: true })
+    runPage('forward', withFilter({ direction: 'forward', limit: PAGE_LIMIT, cursor: cursors.forward }), { resetIteration: true })
   }
+  // Cancels the in-flight filtered page (leaving already-loaded rows
+  // intact) without letting the empty-page auto-continue effect
+  // immediately relaunch another page: clearing pendingDirectionRef BEFORE
+  // cancel() makes that effect's "direction === null" guard bail out on the
+  // loading:true -> false edge cancel() itself triggers.
+  const handleCancelScan = () => {
+    pendingDirectionRef.current = null
+    cancel()
+  }
+
   const continueScan = () => {
     if (continueDirection === null) return
     const cursor = cursors[continueDirection]
     if (cursor === null) return
-    runPage(continueDirection, { direction: continueDirection, limit: PAGE_LIMIT, cursor }, { resetIteration: true })
+    runPage(continueDirection, withFilter({ direction: continueDirection, limit: PAGE_LIMIT, cursor }), { resetIteration: true })
   }
 
   const showLoadOlder = cursors.back !== null && !state.exhausted.back
   const showLoadNewer = cursors.forward !== null && !state.exhausted.forward
   const paused = pauseReasonRef.current !== 'none'
+  const filterActive = activeFilterApiRef.current !== null
+  // The current page's own progress is only added while it's actually in
+  // flight — once a page ends (whether it looped again or hit the cap), its
+  // final numbers have already been folded into the gesture refs above, so
+  // adding it again here would double-count it.
+  const progressScanned = gestureScannedRef.current + (state.loading ? (state.progress?.scanned ?? 0) : 0)
+  const progressMatches = gestureMatchesRef.current + (state.loading ? (state.progress?.matches ?? 0) : 0)
+  const continueScanLabel = filterActive
+    ? `scanned ${progressScanned} records · ${progressMatches} matches — continue`
+    : 'scanned far, nothing found here — continue'
 
   return (
     <div className="space-y-3">
@@ -331,6 +452,22 @@ export function Timeline({ cluster, topic }: { cluster: string; topic: string })
           )}
         </div>
       </div>
+      <div className="flex flex-wrap items-center gap-3">
+        <FilterInput value={filterText} onChange={setFilterText} placeholder="filter messages…" ariaLabel="filter messages" />
+        {filterActive && state.loading && (
+          <div data-testid="filter-progress" className="flex items-center gap-2 text-xs text-zinc-500 dark:text-zinc-400">
+            <span>{`scanned ${progressScanned} · ${progressMatches} matches`}</span>
+            <button
+              type="button"
+              data-testid="cancel-scan"
+              onClick={handleCancelScan}
+              className="rounded border border-zinc-300 px-2 py-0.5 text-zinc-600 hover:bg-zinc-100 dark:border-zinc-700 dark:text-zinc-400 dark:hover:bg-zinc-800"
+            >
+              Cancel
+            </button>
+          </div>
+        )}
+      </div>
       <JumpControl onJump={handleJump} />
       {tailErrorText && (
         <p className="text-sm text-amber-600 dark:text-amber-400">{`live stopped — ${tailErrorText}`}</p>
@@ -341,7 +478,7 @@ export function Timeline({ cluster, topic }: { cluster: string; topic: string })
           onClick={continueScan}
           className="w-full rounded border border-amber-400 py-1 text-xs text-amber-600 dark:border-amber-600 dark:text-amber-400"
         >
-          scanned far, nothing found here — continue
+          {continueScanLabel}
         </button>
       ) : (
         showLoadNewer && (
@@ -363,7 +500,7 @@ export function Timeline({ cluster, topic }: { cluster: string; topic: string })
           onClick={continueScan}
           className="w-full rounded border border-amber-400 py-1 text-xs text-amber-600 dark:border-amber-600 dark:text-amber-400"
         >
-          scanned far, nothing found here — continue
+          {continueScanLabel}
         </button>
       ) : state.exhausted.back ? (
         <p className="py-2 text-center text-xs text-zinc-400">— beginning of topic —</p>
