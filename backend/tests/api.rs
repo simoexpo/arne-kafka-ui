@@ -1,5 +1,6 @@
 mod support;
 
+use axum::http::StatusCode;
 use betrachtung::api::app;
 use support::*;
 use tower::ServiceExt;
@@ -55,6 +56,34 @@ async fn topic_detail_shows_partitions_offsets_and_configs() {
     assert!(!parts[0]["isr"].as_array().unwrap().is_empty());
     let configs = body["configs"].as_array().unwrap();
     assert!(configs.iter().any(|c| c["name"] == "retention.ms"), "expected retention.ms in configs");
+}
+
+/// Regression: `describe_configs` inside `topic_detail` must carry the same
+/// explicit ADMIN_TIMEOUT as every other Kafka call. Without it, librdkafka's
+/// default request timeout (~60s) applies, so a dead broker makes this
+/// endpoint stall far longer than any other admin call and far longer than
+/// the frontend's own 15s timeout — which then misreports "backend
+/// unreachable" instead of a Kafka-side timeout/error.
+#[tokio::test]
+async fn topic_detail_on_dead_cluster_fails_fast() {
+    let bootstrap = start_kafka().await;
+    let state = state_for(&bootstrap, vec![cluster_cfg("dead", "localhost:1")]);
+    let start = std::time::Instant::now();
+    let (status, body) = get_json(app(state), "/api/clusters/dead/topics/some-topic").await;
+    let elapsed = start.elapsed();
+    assert!(
+        elapsed < std::time::Duration::from_millis(15_000),
+        "topic_detail on a dead cluster must fail within the same ADMIN_TIMEOUT bound as \
+         other admin calls (< 15s), took {elapsed:?}: body={body}"
+    );
+    assert!(
+        status == StatusCode::BAD_GATEWAY || status == StatusCode::GATEWAY_TIMEOUT,
+        "expected 502 or 504, got {status}: body={body}"
+    );
+    assert!(
+        body["code"] == "kafka_error" || body["code"] == "kafka_timeout",
+        "expected kafka_error or kafka_timeout, got: {body}"
+    );
 }
 
 #[tokio::test]

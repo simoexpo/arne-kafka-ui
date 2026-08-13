@@ -84,8 +84,11 @@ pub async fn topic_detail(handle: Arc<ClusterHandle>, topic: String) -> Result<T
     let cfg_handle = handle.clone();
     let cfg_topic = topic.clone();
     let configs_fut = async move {
+        let opts = AdminOptions::new()
+            .operation_timeout(Some(ADMIN_TIMEOUT))
+            .request_timeout(Some(ADMIN_TIMEOUT));
         let res = cfg_handle.admin()
-            .describe_configs(&[ResourceSpecifier::Topic(&cfg_topic)], &AdminOptions::new())
+            .describe_configs(&[ResourceSpecifier::Topic(&cfg_topic)], &opts)
             .await
             .map_err(|e| error::from_kafka(&cfg_handle.name, "describe configs", &e))?;
         let mut out = Vec::new();
