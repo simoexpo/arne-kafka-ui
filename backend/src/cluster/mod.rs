@@ -10,11 +10,16 @@ use rdkafka::consumer::{BaseConsumer, Consumer};
 use rdkafka::error::KafkaResult;
 use rdkafka::ClientConfig;
 use serde::Serialize;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 pub const ADMIN_TIMEOUT: Duration = Duration::from_secs(10);
 pub const HEALTH_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Consecutive health-check failures before probing whether a freshly built
+/// client can reach the cluster the resident one cannot.
+pub const RECOVERY_THRESHOLD: u32 = 2;
 
 pub fn build_client_config(cfg: &ClusterConfig) -> ClientConfig {
     let mut cc = ClientConfig::new();
@@ -50,6 +55,8 @@ pub struct ClusterHandle {
     pub schema_registry: Option<Arc<SchemaRegistry>>,
     consumer: RwLock<Arc<BaseConsumer>>,
     admin: RwLock<Arc<AdminClient<DefaultClientContext>>>,
+    health_failures: AtomicU32,
+    probe_in_flight: AtomicBool,
 }
 
 impl std::fmt::Debug for ClusterHandle {
@@ -82,6 +89,8 @@ impl ClusterHandle {
             schema_registry,
             consumer: RwLock::new(Arc::new(consumer)),
             admin: RwLock::new(Arc::new(admin)),
+            health_failures: AtomicU32::new(0),
+            probe_in_flight: AtomicBool::new(false),
         })
     }
 
@@ -115,13 +124,53 @@ impl ClusterHandle {
     pub async fn health(self: &Arc<Self>) -> ClusterHealth {
         let this = self.clone();
         let res = tokio::task::spawn_blocking(move || {
-            this.consumer().fetch_metadata(None, HEALTH_TIMEOUT).map(|md| md.brokers().len())
+            match this.consumer().fetch_metadata(None, HEALTH_TIMEOUT) {
+                Ok(md) => {
+                    this.health_failures.store(0, Ordering::SeqCst);
+                    Ok(md.brokers().len())
+                }
+                Err(e) => {
+                    let failures = this.health_failures.fetch_add(1, Ordering::SeqCst) + 1;
+                    if failures >= RECOVERY_THRESHOLD
+                        && let Some(brokers) = this.try_recover()
+                    {
+                        return Ok(brokers);
+                    }
+                    Err(e)
+                }
+            }
         }).await;
         match res {
             Ok(Ok(brokers)) => ClusterHealth { status: HealthStatus::Healthy, broker_count: Some(brokers), error: None },
             Ok(Err(e)) => ClusterHealth { status: HealthStatus::Unreachable, broker_count: None, error: Some(e.to_string()) },
             Err(e) => ClusterHealth { status: HealthStatus::Unreachable, broker_count: None, error: Some(e.to_string()) },
         }
+    }
+
+    /// The resident client keeps failing; find out whether the path itself is
+    /// dead or only the client is. Build a fresh pair from config, probe it, and
+    /// swap it in ONLY on a successful probe — so recovery can never mask a real
+    /// outage. Single-flight; runs on the blocking pool (caller is inside
+    /// spawn_blocking). Returns the fresh broker count when it healed.
+    fn try_recover(&self) -> Option<usize> {
+        if self.probe_in_flight
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
+            return None;
+        }
+        let healed = (|| {
+            let cc = build_client_config(&self.config);
+            let consumer: BaseConsumer = cc.create().ok()?;
+            let brokers = consumer.fetch_metadata(None, HEALTH_TIMEOUT).ok()?.brokers().len();
+            let admin: AdminClient<DefaultClientContext> = cc.create().ok()?;
+            self.swap_clients(consumer, admin);
+            self.health_failures.store(0, Ordering::SeqCst);
+            tracing::warn!(cluster = %self.name, "stale kafka connection replaced with a fresh one");
+            Some(brokers)
+        })();
+        self.probe_in_flight.store(false, Ordering::SeqCst);
+        healed
     }
 }
 
@@ -183,5 +232,13 @@ mod tests {
         assert!(!Arc::ptr_eq(&before, &after), "swap must install a new client");
         // the old Arc is still usable by in-flight work
         let _still_alive: &BaseConsumer = &before;
+    }
+
+    #[test]
+    fn concurrent_probe_is_single_flight() {
+        let handle = ClusterHandle::connect(base("a")).expect("lazy create");
+        handle.probe_in_flight.store(true, std::sync::atomic::Ordering::SeqCst);
+        // a probe already in flight => try_recover declines immediately
+        assert_eq!(handle.try_recover(), None);
     }
 }

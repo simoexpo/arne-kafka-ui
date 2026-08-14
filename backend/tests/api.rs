@@ -2,6 +2,8 @@ mod support;
 
 use axum::http::StatusCode;
 use betrachtung::api::app;
+use betrachtung::cluster::{ClusterHandle, HealthStatus};
+use std::sync::Arc;
 use support::*;
 use tower::ServiceExt;
 
@@ -975,6 +977,33 @@ async fn old_endpoints_are_gone() {
     assert_eq!(res.status(), 200);
     let ct = res.headers().get("content-type").unwrap().to_str().unwrap().to_string();
     assert!(ct.starts_with("text/html"), "/search must be gone (SPA fallback), got content-type {ct}");
+}
+
+#[tokio::test]
+async fn health_self_heals_a_stale_client() {
+    // support::start_kafka() returns the shared reused test broker's
+    // bootstrap; support::cluster_cfg builds a ClusterConfig for it
+    let bootstrap = start_kafka().await;
+    let handle = Arc::new(ClusterHandle::connect(cluster_cfg("self-heal", &bootstrap)).unwrap());
+    assert_eq!(handle.health().await.status, HealthStatus::Healthy, "sanity");
+
+    // resident clients now point at a dead port; config still points at the
+    // live broker — the stale-client wedge in miniature
+    handle.replace_clients_with_bootstrap("127.0.0.1:1").unwrap();
+
+    // first failure stays honest (below threshold)
+    let first = handle.health().await;
+    assert_eq!(first.status, HealthStatus::Unreachable);
+    assert!(first.error.is_some());
+
+    // second failure reaches RECOVERY_THRESHOLD: probe fresh client from
+    // config, swap, and report Healthy in the same call
+    let second = handle.health().await;
+    assert_eq!(second.status, HealthStatus::Healthy, "self-heal must land in-call");
+    assert!(second.broker_count.is_some());
+
+    // healed for real: subsequent checks stay healthy
+    assert_eq!(handle.health().await.status, HealthStatus::Healthy);
 }
 
 #[tokio::test]
