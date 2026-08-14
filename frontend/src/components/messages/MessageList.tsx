@@ -57,16 +57,25 @@ export const MessageList = forwardRef<
       className="max-h-[32rem] overflow-auto"
     >
       <div style={{ height: virtualizer.getTotalSize(), position: 'relative' }}>
-        {virtualizer.getVirtualItems().map((item) => (
-          <div
-            key={`${messages[item.index].partition}-${messages[item.index].offset}-${item.index}`}
-            ref={typeof ResizeObserver !== 'undefined' ? virtualizer.measureElement : undefined}
-            data-index={item.index}
-            style={{ position: 'absolute', top: 0, left: 0, width: '100%', transform: `translateY(${item.start}px)` }}
-          >
-            <MessageRow message={messages[item.index]} />
-          </div>
-        ))}
+        {virtualizer.getVirtualItems().map((item) => {
+          const m = messages[item.index]
+          const prev = item.index > 0 ? messages[item.index - 1] : null
+          const tsInverted =
+            prev !== null &&
+            m.timestamp_ms !== null &&
+            prev.timestamp_ms !== null &&
+            m.timestamp_ms > prev.timestamp_ms
+          return (
+            <div
+              key={`${m.partition}-${m.offset}-${item.index}`}
+              ref={typeof ResizeObserver !== 'undefined' ? virtualizer.measureElement : undefined}
+              data-index={item.index}
+              style={{ position: 'absolute', top: 0, left: 0, width: '100%', transform: `translateY(${item.start}px)` }}
+            >
+              <MessageRow message={m} tsInverted={tsInverted} />
+            </div>
+          )
+        })}
       </div>
     </div>
   )

@@ -3,7 +3,7 @@ import type { MessageOut } from '../../api/types'
 import { EncodingBadge } from './EncodingBadge'
 import { PayloadView } from './PayloadView'
 
-export function MessageRow({ message }: { message: MessageOut }) {
+export function MessageRow({ message, tsInverted = false }: { message: MessageOut; tsInverted?: boolean }) {
   const [open, setOpen] = useState(false)
   const ts = message.timestamp_ms === null ? '—' : new Date(message.timestamp_ms).toISOString()
   const preview = message.value === null ? '∅ null' : message.value.text.replaceAll('\n', ' ')
@@ -16,6 +16,22 @@ export function MessageRow({ message }: { message: MessageOut }) {
     >
       <div className="flex items-center gap-3">
         <span className="whitespace-nowrap text-zinc-500">{ts}</span>
+        {tsInverted && (
+          <svg
+            data-testid="ts-inversion"
+            role="img"
+            viewBox="0 0 16 16"
+            fill="currentColor"
+            className="h-3.5 w-3.5 shrink-0 text-amber-500"
+          >
+            <title>
+              Out-of-order timestamp: newer than the message above it. Messages in
+              the same partition keep their same-partition order (by offset), even
+              when producer timestamps disagree.
+            </title>
+            <path d="M8 1.5 15 14H1L8 1.5Zm0 4.5a.75.75 0 0 0-.75.75v3a.75.75 0 0 0 1.5 0v-3A.75.75 0 0 0 8 6Zm0 6a1 1 0 1 0 0 2 1 1 0 0 0 0-2Z" />
+          </svg>
+        )}
         <span className="whitespace-nowrap text-zinc-500">{`p${message.partition}·${message.offset}`}</span>
         <span className="max-w-40 truncate">{message.key?.text ?? '∅'}</span>
         <span className={`min-w-0 flex-1 truncate ${isError ? 'text-red-600 dark:text-red-400' : ''}`}>
