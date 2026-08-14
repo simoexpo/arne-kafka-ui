@@ -11,6 +11,17 @@ export interface MessageListHandle {
   // scrollTop = scrollHeight is the standard clamp-to-bottom trick (a real
   // browser clamps any out-of-range value to the max scrollable offset).
   scrollToEdge(edge: 'top' | 'bottom'): void
+  // Scroll anchoring (design spec v1.3 "Scroll anchoring"): reads the raw
+  // scrollTop/scrollHeight off the real scroll element so a caller can
+  // capture "before" metrics ahead of a prepend and diff them against
+  // "after" metrics once the new rows have rendered. Returns null before
+  // the element exists (e.g. mid-jump, while Panel shows a loading
+  // skeleton and MessageList itself is unmounted).
+  scrollMetrics(): { top: number; height: number } | null
+  // Nudges scrollTop by `delta` (added, not set) — compensates for a
+  // height change that happened above the viewport (a prepend) so the
+  // reader's visual position doesn't silently shift.
+  adjustScrollTop(delta: number): void
 }
 
 export const MessageList = forwardRef<
@@ -42,6 +53,16 @@ export const MessageList = forwardRef<
         const el = parentRef.current
         if (!el) return
         el.scrollTop = edge === 'top' ? 0 : el.scrollHeight
+      },
+      scrollMetrics() {
+        const el = parentRef.current
+        if (!el) return null
+        return { top: el.scrollTop, height: el.scrollHeight }
+      },
+      adjustScrollTop(delta) {
+        const el = parentRef.current
+        if (!el) return
+        el.scrollTop = el.scrollTop + delta
       },
     }),
     [],

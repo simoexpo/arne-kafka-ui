@@ -88,6 +88,27 @@ function stubScrollHeight(value: number) {
   }
 }
 
+// Scroll-anchoring's capture (before insert) and its compensating read
+// (after render) both happen inside the SAME synchronous flush — a real
+// browser's scrollHeight would genuinely differ between those two reads
+// (layout recomputes once the new rows actually land), but jsdom does no
+// layout at all, so a single static value can't tell the two reads apart.
+// This stub answers the FIRST read with `values[0]` and every read after
+// with the last entry — simulating "the DOM grew between capture and
+// render" without needing real layout.
+function stubScrollHeightSequence(values: number[]) {
+  const original = Object.getOwnPropertyDescriptor(Element.prototype, 'scrollHeight')
+  let i = 0
+  Object.defineProperty(Element.prototype, 'scrollHeight', {
+    configurable: true,
+    get: () => values[Math.min(i++, values.length - 1)],
+  })
+  return () => {
+    if (original) Object.defineProperty(Element.prototype, 'scrollHeight', original)
+    else delete (Element.prototype as unknown as Record<string, unknown>).scrollHeight
+  }
+}
+
 // Same idea for `clientHeight` (also always 0 in jsdom, no real layout) —
 // needed alongside `stubScrollHeight` to construct a "near the bottom"
 // scroll position for the bottom-sentinel (scroll-triggered pagination)
@@ -470,6 +491,53 @@ describe('Timeline', () => {
       expect(FakeEventSource.instances[2].url).toBe(
         '/api/clusters/prod/topics/orders/timeline?direction=forward&limit=100&cursor=c9',
       )
+    })
+
+    // Scroll anchoring (design spec v1.3, owner feedback 2026-08-15): a
+    // forward page's rows rank newer, so they land near the TOP of the
+    // newest-first merge — i.e. they prepend above whatever the reader was
+    // looking at. Without compensation, scrollTop stays numerically
+    // unchanged, which silently relocates the reader to the top of the
+    // newly loaded page instead of keeping them at the junction where they
+    // were reading. This only matters when the reader wasn't pinned to the
+    // very top by the time the page lands (pinned-top is today's correct
+    // behavior — they want to see the incoming content, same as the
+    // live-attached case).
+    it('a forward page that lands while the reader is mid-scroll anchors the viewport at the junction by height delta', async () => {
+      mockTail()
+      const user = userEvent.setup()
+      render(<Timeline cluster="prod" topic="orders" />)
+      await emit(0, 'match', mk(9))
+      await emit(0, 'page_end', { cursor: 'c1', exhausted: false })
+
+      await user.click(screen.getByTestId('jump-beginning'))
+      await emit(1, 'match', mk(2))
+      await emit(1, 'page_end', { cursor: 'c9', exhausted: false })
+
+      scrollToTop() // fires the forward page request (instance[2])
+      expect(FakeEventSource.instances).toHaveLength(3)
+
+      // While that page is in flight, the reader keeps reading — scrolled
+      // away from the exact top edge by the time the page lands.
+      fireEvent.scroll(screen.getByTestId('timeline-scroll'), { target: { scrollTop: 500 } })
+
+      // A (2000) is what the pre-insert capture reads; B (2400) is what the
+      // post-render layout effect reads once the new rows are in — see
+      // stubScrollHeightSequence.
+      const restoreHeight = stubScrollHeightSequence([2000, 2400])
+      const scroll = spyOnScrollTop()
+      try {
+        await emit(2, 'match', mk(3))
+        scroll.setter.mockClear()
+        await emit(2, 'page_end', { cursor: 'c-fwd', exhausted: false })
+        // Anchored at the junction: scrollTop nudged by exactly B - A
+        // (2400 - 2000 = 400), landing on 500 + 400 = 900 — never left at
+        // the numerically-unchanged 500.
+        expect(scroll.setter).toHaveBeenCalledWith(900)
+      } finally {
+        scroll.restore()
+        restoreHeight()
+      }
     })
   })
 

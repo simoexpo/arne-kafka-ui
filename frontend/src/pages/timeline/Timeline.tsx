@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useReducer, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useReducer, useRef, useState } from 'react'
 import { tailTopic } from '../../api/sse'
 import type { TimelinePageParams } from '../../api/sse'
 import type { MessageOut } from '../../api/types'
@@ -111,6 +111,20 @@ export function Timeline({ cluster, topic }: { cluster: string; topic: string })
   const pendingScrollEdgeRef = useRef<'top' | 'bottom' | null>(null)
   const scrollWasLoadingRef = useRef(false)
 
+  // Scroll anchoring (design spec v1.3 "Scroll anchoring", owner feedback
+  // 2026-08-15): a forward page's matches rank newer, so they land near the
+  // top of the newest-first merge — i.e. they prepend above whatever the
+  // reader was looking at. Left alone, scrollTop stays numerically
+  // unchanged after the prepend, which silently relocates the reader to
+  // the top of the NEWLY loaded page instead of keeping them at the
+  // junction they were reading. runPage's onMatches captures pre-insert
+  // metrics here (see below) — only when the reader wasn't pinned to the
+  // very top at that moment (pinned-top means they want to see the
+  // incoming content, today's existing/correct behavior — same case as a
+  // live-attached top-pin). Not used for 'back' (appends below, doesn't
+  // move the viewport) or 'live' (attached-pinned-top case above).
+  const pendingAnchorRef = useRef<{ top: number; height: number } | null>(null)
+
   const [live, setLive] = useState(true)
   const [tailErrorText, setTailErrorText] = useState<string | null>(null)
   const tailHandleRef = useRef<{ close: () => void } | null>(null)
@@ -187,6 +201,18 @@ export function Timeline({ cluster, topic }: { cluster: string; topic: string })
       loadPage(params, (msgs: MessageOut[]) => {
         matchedRef.current = true
         pageMatchesRef.current += msgs.length
+        // Scroll anchoring: capture "before" metrics for a forward-origin
+        // prepend, but only when the reader isn't pinned to the very top
+        // right now — see pendingAnchorRef's comment. A page's matches can
+        // flush in several batches (useTimelinePage's BATCH_SIZE), so this
+        // runs per flush; the effect below consumes and clears it after
+        // each one.
+        if (direction === 'forward') {
+          const metrics = listRef.current?.scrollMetrics() ?? null
+          if (metrics && metrics.top >= TOP_PIN_THRESHOLD) {
+            pendingAnchorRef.current = metrics
+          }
+        }
         storeRef.current.insert(msgs, direction)
         bump()
       })
@@ -330,6 +356,23 @@ export function Timeline({ cluster, topic }: { cluster: string; topic: string })
     pendingScrollEdgeRef.current = null
     listRef.current?.scrollToEdge(edge)
   }, [state.loading])
+
+  // Scroll anchoring: consumes whatever runPage's onMatches just captured
+  // (see pendingAnchorRef) after the corresponding rows have rendered, and
+  // nudges scrollTop by the height delta so the viewport stays at the
+  // junction instead of drifting with the newly prepended content. No
+  // dependency array — a forward page's matches can flush in several
+  // batches, each its own bump()/render/capture, and this must run after
+  // every one of them; the ref-guard (cleared immediately) makes every
+  // other render a no-op.
+  useLayoutEffect(() => {
+    const anchor = pendingAnchorRef.current
+    if (!anchor) return
+    pendingAnchorRef.current = null
+    const metrics = listRef.current?.scrollMetrics()
+    if (!metrics) return
+    listRef.current?.adjustScrollTop(metrics.height - anchor.height)
+  })
 
   // Re-attach: fires on the false -> true edge of `state.exhausted.forward`
   // while detached — the reader forward-paginated a historical window all
