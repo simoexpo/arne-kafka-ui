@@ -75,6 +75,19 @@ function stubClientHeight(value: number) {
   }
 }
 
+// Scroll is the ONLY pagination affordance (no load-older/load-newer
+// buttons) — mirrors the identical helper in Timeline.test.tsx.
+function scrollToBottom() {
+  const restoreScrollHeight = stubScrollHeight(810)
+  const restoreClientHeight = stubClientHeight(600)
+  try {
+    fireEvent.scroll(screen.getByTestId('timeline-scroll'), { target: { scrollTop: 200 } })
+  } finally {
+    restoreScrollHeight()
+    restoreClientHeight()
+  }
+}
+
 async function settle(ms = 500) {
   await act(async () => {
     vi.advanceTimersByTime(ms)
@@ -311,7 +324,7 @@ describe('Timeline filter box', () => {
     expect(screen.getByText('scanned 5000 · 1 matches')).toBeInTheDocument()
   })
 
-  it('withFilter merges the active filter onto load-older requests and jumps, and drops it after clearing', async () => {
+  it('withFilter merges the active filter onto scroll-triggered pagination and jumps, and drops it after clearing', async () => {
     mockTail()
     await mountAndSettleInitial()
 
@@ -323,8 +336,8 @@ describe('Timeline filter box', () => {
 
     // A filtered page with 1 match (fewer than a full page) and a non-null,
     // non-exhausted cursor is the I2 partial-match budget-stop case: the
-    // continue affordance shows instead of a plain load-older, but clicking
-    // it drives the exact same withFilter-merged request.
+    // continue affordance shows instead of plain scroll-triggered paging,
+    // but clicking it drives the exact same withFilter-merged request.
     fireEvent.click(screen.getByTestId('continue-scan'))
     expect(FakeEventSource.instances.at(-1)!.url).toBe(
       '/api/clusters/prod/topics/orders/timeline?direction=back&limit=100&cursor=c1&filter=json_eq&q=42&path=user.id',
@@ -346,7 +359,7 @@ describe('Timeline filter box', () => {
     await emit(clearedIdx, 'match', mk(1))
     await emit(clearedIdx, 'page_end', { cursor: 'c4', exhausted: false })
 
-    fireEvent.click(screen.getByTestId('load-older'))
+    scrollToBottom()
     expect(FakeEventSource.instances.at(-1)!.url).toBe(
       '/api/clusters/prod/topics/orders/timeline?direction=back&limit=100&cursor=c4',
     )

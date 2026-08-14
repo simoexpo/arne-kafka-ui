@@ -144,7 +144,7 @@ export function Timeline({ cluster, topic }: { cluster: string; topic: string })
       direction: Direction,
       params: TimelinePageParams,
       // resetIteration: restarts the auto-continue cap counter (every fresh
-      // page request needs this — a load-older click, a jump, or the
+      // page request needs this — a load-older scroll, a jump, or the
       // continue-scan button all get a new run at the cap). resetGesture:
       // zeroes the running scanned/matches totals; defaults to
       // resetIteration's value, EXCEPT continueScan explicitly passes
@@ -270,8 +270,8 @@ export function Timeline({ cluster, topic }: { cluster: string; topic: string })
     gestureMatchesRef.current += state.progress?.matches ?? 0
     if (matchedRef.current) {
       // A page that filled all the way to PAGE_LIMIT is a normal, complete
-      // page — the existing load-older/load-newer button already covers
-      // continuing from there. One that matched *something* but stopped
+      // page — the scroll sentinels already cover continuing from there.
+      // One that matched *something* but stopped
       // short of a full page (the scan budget ran out before finding
       // PAGE_LIMIT matches, cursor non-null, not exhausted) must say so and
       // offer to continue rather than end quietly (spec: no silent stops) —
@@ -389,7 +389,7 @@ export function Timeline({ cluster, topic }: { cluster: string; topic: string })
     // entirely. reset() clears both cursors/exhausted flags (and kills any
     // in-flight page) synchronously, BEFORE runPage starts the new one —
     // without this, a stale opposite-direction cursor from before the jump
-    // could leave load-older/load-newer visible and pointing at the wrong
+    // could let a scroll sentinel fire a request pointed at the wrong
     // window.
     reset()
     // 'beginning' lands at the start of history looking forward — the
@@ -441,17 +441,14 @@ export function Timeline({ cluster, topic }: { cluster: string; topic: string })
   // automatic: an explicit pause overrides top-pinning entirely.
   //
   // Also the scroll-triggered pagination sentinels (spec: "scroll down ->
-  // next 100 older"): a bottom-sentinel reaching the last row loads the next
-  // older page automatically, mirroring the load-older button's own guards
-  // (a non-null back cursor, not already exhausted, not already loading —
-  // `loadOlder`/`loadNewer` already no-op on a null cursor, so the loading
-  // guard is the only one that needs restating here). The symmetric top
-  // edge only ever matters once a beginning-jump has opened a forward
-  // cursor (that's the only time `load-newer` is ever shown) — reusing the
-  // same top-pin check that already drives live-pause auto-resume. The
-  // manual load-older/load-newer buttons remain as a fallback affordance and
-  // the only way jsdom-driven tests can trigger paging (jsdom never
-  // actually scrolls).
+  // next 100 older") — scroll is the ONLY pagination affordance, there is no
+  // load-older/load-newer button: a bottom-sentinel reaching the last row
+  // loads the next older page automatically, guarded by a non-null back
+  // cursor, not already exhausted, not already loading (`loadOlder`/
+  // `loadNewer` already no-op on a null cursor, so the loading guard is the
+  // only one that needs restating here). The symmetric top edge only ever
+  // matters once a beginning-jump has opened a forward cursor — reusing the
+  // same top-pin check that already drives live-pause auto-resume.
   //
   // When the continue affordance (I2's partial-match budget stop, or the
   // iteration-cap stop) is showing for a direction, the sentinel must drive
@@ -504,8 +501,6 @@ export function Timeline({ cluster, topic }: { cluster: string; topic: string })
     })
   }
 
-  const showLoadOlder = cursors.back !== null && !state.exhausted.back
-  const showLoadNewer = cursors.forward !== null && !state.exhausted.forward
   const paused = pauseReasonRef.current !== 'none'
   const filterActive = activeFilterApiRef.current !== null
   // The current page's own progress is only added while it's actually in
@@ -554,7 +549,7 @@ export function Timeline({ cluster, topic }: { cluster: string; topic: string })
       {tailErrorText && (
         <p className="text-sm text-amber-600 dark:text-amber-400">{`live stopped — ${tailErrorText}`}</p>
       )}
-      {continueDirection === 'forward' ? (
+      {continueDirection === 'forward' && (
         <button
           data-testid="continue-scan"
           onClick={continueScan}
@@ -562,16 +557,6 @@ export function Timeline({ cluster, topic }: { cluster: string; topic: string })
         >
           {continueScanLabel}
         </button>
-      ) : (
-        showLoadNewer && (
-          <button
-            data-testid="load-newer"
-            onClick={loadNewer}
-            className="w-full rounded border border-zinc-300 py-1 text-xs text-zinc-500 dark:border-zinc-700"
-          >
-            load newer
-          </button>
-        )
       )}
       <Panel error={state.error} hasData={rows.length > 0} loading={state.loading && rows.length === 0}>
         <MessageList ref={listRef} messages={rows} onScroll={handleScroll} />
@@ -584,18 +569,8 @@ export function Timeline({ cluster, topic }: { cluster: string; topic: string })
         >
           {continueScanLabel}
         </button>
-      ) : state.exhausted.back ? (
-        <p className="py-2 text-center text-xs text-zinc-400">— beginning of topic —</p>
       ) : (
-        showLoadOlder && (
-          <button
-            data-testid="load-older"
-            onClick={loadOlder}
-            className="w-full rounded border border-zinc-300 py-1 text-xs text-zinc-500 dark:border-zinc-700"
-          >
-            load older
-          </button>
-        )
+        state.exhausted.back && <p className="py-2 text-center text-xs text-zinc-400">— beginning of topic —</p>
       )}
     </div>
   )

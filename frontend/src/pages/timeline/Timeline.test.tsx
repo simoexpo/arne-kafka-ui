@@ -90,7 +90,7 @@ function stubScrollHeight(value: number) {
 
 // Same idea for `clientHeight` (also always 0 in jsdom, no real layout) —
 // needed alongside `stubScrollHeight` to construct a "near the bottom"
-// scroll position for the bottom-sentinel (scroll-triggered load-older)
+// scroll position for the bottom-sentinel (scroll-triggered pagination)
 // tests below.
 function stubClientHeight(value: number) {
   const original = Object.getOwnPropertyDescriptor(Element.prototype, 'clientHeight')
@@ -99,6 +99,26 @@ function stubClientHeight(value: number) {
     if (original) Object.defineProperty(Element.prototype, 'clientHeight', original)
     else delete (Element.prototype as unknown as Record<string, unknown>).clientHeight
   }
+}
+
+// Scroll is the ONLY pagination affordance (no load-older/load-newer
+// buttons) — these two helpers drive the bottom/top sentinels the same way
+// a real scroll would. `scrollToBottom` stubs scrollHeight/clientHeight so
+// the "near the bottom" arithmetic (see Timeline's BOTTOM_PIN_THRESHOLD)
+// reads a real gap rather than jsdom's default 0/0; `scrollToTop` just needs
+// scrollTop back under TOP_PIN_THRESHOLD.
+function scrollToBottom() {
+  const restoreScrollHeight = stubScrollHeight(810)
+  const restoreClientHeight = stubClientHeight(600)
+  try {
+    fireEvent.scroll(screen.getByTestId('timeline-scroll'), { target: { scrollTop: 200 } })
+  } finally {
+    restoreScrollHeight()
+    restoreClientHeight()
+  }
+}
+function scrollToTop() {
+  fireEvent.scroll(screen.getByTestId('timeline-scroll'), { target: { scrollTop: 0 } })
 }
 
 describe('Timeline', () => {
@@ -130,15 +150,17 @@ describe('Timeline', () => {
     expect(screen.getByText('p0·5')).toBeInTheDocument()
   })
 
-  it('clicking load-older requests the next back page by cursor and appends rows', async () => {
+  it('scrolling to the bottom requests the next back page by cursor and appends rows', async () => {
     mockTail()
-    const user = userEvent.setup()
     render(<Timeline cluster="prod" topic="orders" />)
     await emit(0, 'match', mk(9))
     await emit(0, 'page_end', { cursor: 'c1', exhausted: false })
     expect(screen.getByText('p0·9')).toBeInTheDocument()
+    // Scroll is the only pagination affordance — no button, even though a
+    // back cursor exists and the direction isn't exhausted.
+    expect(screen.queryByTestId('load-older')).not.toBeInTheDocument()
 
-    await user.click(screen.getByTestId('load-older'))
+    scrollToBottom()
     expect(FakeEventSource.instances[1].url).toBe(
       '/api/clusters/prod/topics/orders/timeline?direction=back&limit=100&cursor=c1',
     )
@@ -183,13 +205,16 @@ describe('Timeline', () => {
     expect(screen.queryByTestId('continue-scan')).not.toBeInTheDocument()
   })
 
-  it('hides load-older and shows the beginning-of-topic caption once exhausted', async () => {
+  it('shows the beginning-of-topic caption once exhausted, and a further bottom-scroll fires no request', async () => {
     mockTail()
     render(<Timeline cluster="prod" topic="orders" />)
     await emit(0, 'match', mk(1))
     await emit(0, 'page_end', { cursor: null, exhausted: true })
     expect(screen.queryByTestId('load-older')).not.toBeInTheDocument()
     expect(screen.getByText('— beginning of topic —')).toBeInTheDocument()
+
+    scrollToBottom()
+    expect(FakeEventSource.instances).toHaveLength(1) // no request: back is exhausted, cursor is null
   })
 
   it('a tail error stops live and shows the stopped caption', async () => {
@@ -205,13 +230,12 @@ describe('Timeline', () => {
 
   it('a page error renders as a banner while keeping already-loaded rows visible', async () => {
     mockTail()
-    const user = userEvent.setup()
     render(<Timeline cluster="prod" topic="orders" />)
     await emit(0, 'match', mk(1))
     await emit(0, 'page_end', { cursor: 'c1', exhausted: false })
     expect(screen.getByText('p0·1')).toBeInTheDocument()
 
-    await user.click(screen.getByTestId('load-older'))
+    scrollToBottom()
     await emit(1, 'error', { code: 'kafka_error', message: 'broker gone', cluster: 'prod', retriable: true })
 
     expect(screen.getByTestId('panel-error-banner')).toBeInTheDocument()
@@ -220,12 +244,11 @@ describe('Timeline', () => {
 
   it('classifies a kafka page error as Kafka-unreachable, not a generic connection-lost banner', async () => {
     mockTail()
-    const user = userEvent.setup()
     render(<Timeline cluster="prod" topic="orders" />)
     await emit(0, 'match', mk(1))
     await emit(0, 'page_end', { cursor: 'c1', exhausted: false })
 
-    await user.click(screen.getByTestId('load-older'))
+    scrollToBottom()
     await emit(1, 'error', {
       code: 'kafka_timeout',
       message: 'fetch metadata timed out',
@@ -239,12 +262,11 @@ describe('Timeline', () => {
 
   it('a page transport error still shows the generic connection-lost banner', async () => {
     mockTail()
-    const user = userEvent.setup()
     render(<Timeline cluster="prod" topic="orders" />)
     await emit(0, 'match', mk(1))
     await emit(0, 'page_end', { cursor: 'c1', exhausted: false })
 
-    await user.click(screen.getByTestId('load-older'))
+    scrollToBottom()
     await act(async () => {
       FakeEventSource.instances[1].fireTransportError()
     })
@@ -381,31 +403,19 @@ describe('Timeline', () => {
   })
 
   describe('scroll-triggered pagination', () => {
-    // Spec: "Scroll down -> next 100 older (cursor pagination)" — the
-    // manual load-older button is a fallback affordance (and the only way
-    // jsdom-driven tests can trigger paging, since jsdom never actually
-    // scrolls), not the only path. jsdom reports scrollHeight/clientHeight
-    // as 0 with no real layout, so the "near the bottom" position has to be
-    // constructed by stubbing both alongside a scrollTop.
-    it('scrolling near the bottom loads the next older page automatically, without a button click', async () => {
+    // Spec: "Scroll down -> next 100 older (cursor pagination)" — scroll is
+    // the ONLY pagination affordance (no load-older/load-newer buttons).
+    // jsdom reports scrollHeight/clientHeight as 0 with no real layout, so
+    // scrollToBottom stubs both alongside a scrollTop to construct a
+    // meaningful "near the bottom" position — see the helper above.
+    it('scrolling near the bottom loads the next older page automatically', async () => {
       mockTail()
       render(<Timeline cluster="prod" topic="orders" />)
       await emit(0, 'match', mk(9))
       await emit(0, 'page_end', { cursor: 'c1', exhausted: false })
       expect(FakeEventSource.instances).toHaveLength(1)
 
-      const restoreScrollHeight = stubScrollHeight(810)
-      const restoreClientHeight = stubClientHeight(600)
-      try {
-        // scrollHeight(810) - (scrollTop(200) + clientHeight(600)) = 10,
-        // comfortably inside the bottom sentinel's threshold; scrollTop is
-        // well clear of the top-pin threshold too, so this only exercises
-        // the bottom edge.
-        fireEvent.scroll(screen.getByTestId('timeline-scroll'), { target: { scrollTop: 200 } })
-      } finally {
-        restoreScrollHeight()
-        restoreClientHeight()
-      }
+      scrollToBottom()
 
       expect(FakeEventSource.instances).toHaveLength(2)
       expect(FakeEventSource.instances[1].url).toBe(
@@ -420,43 +430,28 @@ describe('Timeline', () => {
       await emit(0, 'page_end', { cursor: null, exhausted: true })
       expect(FakeEventSource.instances).toHaveLength(1)
 
-      const restoreScrollHeight = stubScrollHeight(810)
-      const restoreClientHeight = stubClientHeight(600)
-      try {
-        fireEvent.scroll(screen.getByTestId('timeline-scroll'), { target: { scrollTop: 200 } })
-      } finally {
-        restoreScrollHeight()
-        restoreClientHeight()
-      }
+      scrollToBottom()
 
       expect(FakeEventSource.instances).toHaveLength(1) // no new request issued
     })
 
     it('scrolling near the bottom while a page is already loading does not issue a second request', async () => {
       mockTail()
-      const user = userEvent.setup()
       render(<Timeline cluster="prod" topic="orders" />)
       await emit(0, 'match', mk(9))
       await emit(0, 'page_end', { cursor: 'c1', exhausted: false })
 
-      await user.click(screen.getByTestId('load-older')) // instance[1] now in flight, loading:true
+      scrollToBottom() // instance[1] now in flight, loading:true
       expect(FakeEventSource.instances).toHaveLength(2)
 
-      const restoreScrollHeight = stubScrollHeight(810)
-      const restoreClientHeight = stubClientHeight(600)
-      try {
-        fireEvent.scroll(screen.getByTestId('timeline-scroll'), { target: { scrollTop: 200 } })
-      } finally {
-        restoreScrollHeight()
-        restoreClientHeight()
-      }
+      scrollToBottom() // in-flight guard: no second request
 
       expect(FakeEventSource.instances).toHaveLength(2) // still just the one in-flight request
     })
 
-    // Symmetric top edge: "load newer" only ever exists after a
-    // beginning-jump opens a forward cursor — mirrors the load-older
-    // button's own guard (forward cursor present, not exhausted).
+    // Symmetric top edge: the forward/"load newer" sentinel only ever fires
+    // after a beginning-jump opens a forward cursor — mirrors the back
+    // sentinel's own guard (forward cursor present, not exhausted).
     it('after jumping to beginning, scrolling to the top loads the next newer page automatically', async () => {
       mockTail()
       const user = userEvent.setup()
@@ -469,7 +464,7 @@ describe('Timeline', () => {
       await emit(1, 'page_end', { cursor: 'c9', exhausted: false })
       expect(FakeEventSource.instances).toHaveLength(2)
 
-      fireEvent.scroll(screen.getByTestId('timeline-scroll'), { target: { scrollTop: 0 } })
+      scrollToTop()
 
       expect(FakeEventSource.instances).toHaveLength(3)
       expect(FakeEventSource.instances[2].url).toBe(
@@ -564,42 +559,49 @@ describe('Timeline', () => {
       )
     })
 
-    it('a jump resets BOTH directions: a stale pre-jump back cursor cannot leave load-older visible, and load-newer uses the fresh post-jump cursor', async () => {
+    it('a jump resets BOTH directions: a stale pre-jump back cursor cannot fire a request, and a post-jump top-scroll uses the fresh cursor', async () => {
       mockTail()
       const user = userEvent.setup()
       render(<Timeline cluster="prod" topic="orders" />)
-      // latest page lands with a back cursor -> load-older visible.
+      // latest page lands with a back cursor -> bottom-scroll pagination is live.
       await emit(0, 'match', mk(9))
       await emit(0, 'page_end', { cursor: 'c1', exhausted: false })
-      expect(screen.getByTestId('load-older')).toBeInTheDocument()
+      expect(screen.queryByTestId('load-older')).not.toBeInTheDocument() // no button — scroll only
 
       // Page further back once, so the back cursor is now 'c2' (not just
       // the initial page's cursor) — this is the reviewer's exact repro.
       // (A match is included so this page doesn't trigger the empty-page
       // auto-continue and open an extra, unrelated EventSource.)
-      await user.click(screen.getByTestId('load-older'))
+      scrollToBottom()
+      expect(FakeEventSource.instances).toHaveLength(2)
       await emit(1, 'match', mk(4))
       await emit(1, 'page_end', { cursor: 'c2', exhausted: false })
-      expect(screen.getByTestId('load-older')).toBeInTheDocument()
 
-      // Jump to beginning: the old back cursor ('c2') must NOT survive —
-      // load-older must disappear immediately, before the new (forward)
-      // page has even landed.
+      // Jump to beginning: the old back cursor ('c2') must NOT survive. Note:
+      // a bottom-scroll can't even be attempted in this exact window — the
+      // store is cleared synchronously on click, so Panel shows a loading
+      // skeleton (no `timeline-scroll` element) until the new page lands, a
+      // real user couldn't scroll here either. The request-level proof that
+      // the stale cursor is really gone (not just visually hidden) comes
+      // right below, the moment the list is scrollable again.
       await user.click(screen.getByTestId('jump-beginning'))
-      expect(screen.queryByTestId('load-older')).not.toBeInTheDocument()
+      expect(FakeEventSource.instances).toHaveLength(3) // the beginning page itself
 
       // The beginning page lands and sets a fresh forward cursor.
       await emit(2, 'match', mk(1))
       await emit(2, 'page_end', { cursor: 'c-fwd-new', exhausted: false })
-      expect(screen.getByTestId('load-newer')).toBeInTheDocument()
+      expect(screen.queryByTestId('load-newer')).not.toBeInTheDocument() // no button — scroll only
 
-      // load-older must still be gone (exhausted.back/cursors.back were
-      // reset, not silently repopulated by the forward page's own update).
-      expect(screen.queryByTestId('load-older')).not.toBeInTheDocument()
+      // Back cursor is still gone (exhausted.back/cursors.back were reset,
+      // not silently repopulated by the forward page's own update) —
+      // another bottom-scroll still fires no request.
+      scrollToBottom()
+      expect(FakeEventSource.instances).toHaveLength(3)
 
-      // load-newer's request must carry the FRESH post-jump cursor, never
+      // A top-scroll's request must carry the FRESH post-jump cursor, never
       // the stale pre-jump back cursor ('c2').
-      await user.click(screen.getByTestId('load-newer'))
+      scrollToTop()
+      expect(FakeEventSource.instances).toHaveLength(4)
       expect(FakeEventSource.instances[3].url).toBe(
         '/api/clusters/prod/topics/orders/timeline?direction=forward&limit=100&cursor=c-fwd-new',
       )
