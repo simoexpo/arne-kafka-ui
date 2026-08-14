@@ -126,6 +126,13 @@ export function Timeline({ cluster, topic }: { cluster: string; topic: string })
   const pendingAnchorRef = useRef<{ top: number; height: number } | null>(null)
 
   const [live, setLive] = useState(true)
+  // When THIS WINDOW was last successfully read from Kafka — the honest
+  // sample timestamp for the detached chip (owner feedback 2026-08-15):
+  // history is old by definition, so showing the newest loaded row's age
+  // ("1 day ago") alarms about nothing; "read just now" is the truth that
+  // matters. Updated on every page completion that wasn't an error.
+  const [lastFetchAt, setLastFetchAt] = useState<number | null>(null)
+  const fetchWasLoadingRef = useRef(false)
   const [tailErrorText, setTailErrorText] = useState<string | null>(null)
   const tailHandleRef = useRef<{ close: () => void } | null>(null)
 
@@ -207,9 +214,15 @@ export function Timeline({ cluster, topic }: { cluster: string; topic: string })
         // flush in several batches (useTimelinePage's BATCH_SIZE), so this
         // runs per flush; the effect below consumes and clears it after
         // each one.
+        // Capture unconditionally for forward inserts: the top sentinel
+        // fires precisely when the reader is at/near the top, so a
+        // "skip when pinned to top" exclusion (first attempt, owner-bounced)
+        // skipped the exact case anchoring exists for. Live inserts are
+        // direction 'live' and never pass here — the attached pinned-top
+        // prepend behavior is untouched.
         if (direction === 'forward') {
           const metrics = listRef.current?.scrollMetrics() ?? null
-          if (metrics && metrics.top >= TOP_PIN_THRESHOLD) {
+          if (metrics) {
             pendingAnchorRef.current = metrics
           }
         }
@@ -359,6 +372,12 @@ export function Timeline({ cluster, topic }: { cluster: string; topic: string })
     pendingScrollEdgeRef.current = null
     listRef.current?.scrollToEdge(edge)
   }, [state.loading])
+
+  useEffect(() => {
+    const was = fetchWasLoadingRef.current
+    fetchWasLoadingRef.current = state.loading
+    if (was && !state.loading && !state.error) setLastFetchAt(Date.now())
+  }, [state.loading, state.error])
 
   // Scroll anchoring: consumes whatever runPage's onMatches just captured
   // (see pendingAnchorRef) after the corresponding rows have rendered, and
@@ -654,7 +673,7 @@ export function Timeline({ cluster, topic }: { cluster: string; topic: string })
             // stale; this chip communicates position in history, not
             // freshness, so it never trips the aging/alarm colors no
             // matter how old the newest loaded row is.
-            <StalenessChip asOf={rows[0]?.timestamp_ms ?? null} failed={false} neutral />
+            <StalenessChip asOf={lastFetchAt} failed={false} neutral />
           ) : (
             // Attached but live has died: this alarm is honest (new data
             // is genuinely missing) — keep today's aging/alarm tiers.

@@ -922,6 +922,10 @@ describe('Timeline', () => {
 
       const chip = container.querySelector('[data-staleness]')
       expect(chip).toHaveAttribute('data-staleness', 'neutral')
+      // …and it shows when the window was READ, not how old its messages
+      // are: mk(2)'s timestamp is ancient, but the page just landed, so the
+      // chip must say "just now" (the fetch is the honest sample time).
+      expect(chip).toHaveTextContent(/just now/i)
     })
 
     // Contrast case: the live stream dying while still ATTACHED is a
