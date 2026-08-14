@@ -159,18 +159,30 @@ impl ClusterHandle {
         {
             return None;
         }
-        let healed = (|| {
-            let cc = build_client_config(&self.config);
-            let consumer: BaseConsumer = cc.create().ok()?;
-            let brokers = consumer.fetch_metadata(None, HEALTH_TIMEOUT).ok()?.brokers().len();
-            let admin: AdminClient<DefaultClientContext> = cc.create().ok()?;
-            self.swap_clients(consumer, admin);
-            self.health_failures.store(0, Ordering::SeqCst);
-            tracing::warn!(cluster = %self.name, "stale kafka connection replaced with a fresh one");
-            Some(brokers)
-        })();
-        self.probe_in_flight.store(false, Ordering::SeqCst);
-        healed
+        // Guarantees the flag is released on every exit path, including an
+        // unwinding panic inside the closure below (e.g. a poisoned lock in
+        // `swap_clients`) — without it, a panic here would latch
+        // `probe_in_flight` at `true` forever, silently disabling self-heal.
+        let _guard = ProbeGuard(&self.probe_in_flight);
+        let cc = build_client_config(&self.config);
+        let consumer: BaseConsumer = cc.create().ok()?;
+        let brokers = consumer.fetch_metadata(None, HEALTH_TIMEOUT).ok()?.brokers().len();
+        let admin: AdminClient<DefaultClientContext> = cc.create().ok()?;
+        self.swap_clients(consumer, admin);
+        self.health_failures.store(0, Ordering::SeqCst);
+        tracing::warn!(cluster = %self.name, "stale kafka connection replaced with a fresh one");
+        Some(brokers)
+    }
+}
+
+/// Releases `probe_in_flight` when dropped — on a normal return, an early
+/// `?` bailout, or an unwinding panic alike, so a single-flight probe can
+/// never be left permanently latched.
+struct ProbeGuard<'a>(&'a AtomicBool);
+
+impl Drop for ProbeGuard<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
     }
 }
 
@@ -181,6 +193,10 @@ mod tests {
 
     fn base(name: &str) -> ClusterConfig {
         ClusterConfig { name: name.into(), bootstrap: "b:9092".into(), sasl: None, schema_registry: None }
+    }
+
+    fn base_with_bootstrap(bootstrap: &str) -> ClusterConfig {
+        ClusterConfig { name: "a".into(), bootstrap: bootstrap.into(), sasl: None, schema_registry: None }
     }
 
     #[test]
@@ -240,5 +256,15 @@ mod tests {
         handle.probe_in_flight.store(true, std::sync::atomic::Ordering::SeqCst);
         // a probe already in flight => try_recover declines immediately
         assert_eq!(handle.try_recover(), None);
+    }
+
+    #[test]
+    fn failed_probe_releases_guard_and_keeps_resident_client() {
+        // config points at a dead endpoint: probe must fail, not swap
+        let handle = ClusterHandle::connect(base_with_bootstrap("127.0.0.1:1")).expect("lazy create");
+        let before = handle.consumer();
+        assert_eq!(handle.try_recover(), None, "probe against a dead endpoint must not heal");
+        assert!(!handle.probe_in_flight.load(std::sync::atomic::Ordering::SeqCst), "guard must be released after a failed probe");
+        assert!(Arc::ptr_eq(&before, &handle.consumer()), "failed probe must not swap the resident client");
     }
 }
