@@ -24,6 +24,26 @@ async fn clusters_endpoint_reports_health_per_cluster() {
     assert!(clusters[1]["error"].is_string());
 }
 
+/// Two unreachable clusters: sequential health checks cost ~2x HEALTH_TIMEOUT,
+/// parallel ~1x. The bound sits between the two (a failure bound, not a
+/// green-path sleep) — proves `/api/clusters` fans health checks out instead
+/// of awaiting them one at a time.
+#[tokio::test]
+async fn clusters_health_checks_run_in_parallel() {
+    let state = state_for("127.0.0.1:1", vec![cluster_cfg("dead-2", "127.0.0.1:2")]);
+    let started = std::time::Instant::now();
+    let (status, body) = get_json(app(state), "/api/clusters").await;
+    let elapsed = started.elapsed();
+    assert_eq!(status, StatusCode::OK);
+    let clusters = body["clusters"].as_array().unwrap();
+    assert_eq!(clusters.len(), 2);
+    assert!(clusters.iter().all(|c| c["status"] == "unreachable"));
+    assert!(
+        elapsed < std::time::Duration::from_millis(3500),
+        "health checks must fan out in parallel, took {elapsed:?}"
+    );
+}
+
 #[tokio::test]
 async fn topics_inventory_lists_topic_with_message_estimate() {
     let bootstrap = start_kafka().await;
