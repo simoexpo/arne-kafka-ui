@@ -118,11 +118,11 @@ export function Timeline({ cluster, topic }: { cluster: string; topic: string })
   // unchanged after the prepend, which silently relocates the reader to
   // the top of the NEWLY loaded page instead of keeping them at the
   // junction they were reading. runPage's onMatches captures pre-insert
-  // metrics here (see below) — only when the reader wasn't pinned to the
-  // very top at that moment (pinned-top means they want to see the
-  // incoming content, today's existing/correct behavior — same case as a
-  // live-attached top-pin). Not used for 'back' (appends below, doesn't
-  // move the viewport) or 'live' (attached-pinned-top case above).
+  // metrics here (see below) for EVERY forward insert — the top sentinel
+  // fires precisely at the top, so there is no "pinned means show me the
+  // new" case for forward pages (that logic belongs to 'live' inserts,
+  // which never pass through here). Not used for 'back' (appends below,
+  // doesn't move the viewport).
   const pendingAnchorRef = useRef<{ top: number; height: number } | null>(null)
 
   const [live, setLive] = useState(true)
