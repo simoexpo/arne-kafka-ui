@@ -126,13 +126,6 @@ export function Timeline({ cluster, topic }: { cluster: string; topic: string })
   const pendingAnchorRef = useRef<{ top: number; height: number } | null>(null)
 
   const [live, setLive] = useState(true)
-  // When THIS WINDOW was last successfully read from Kafka — the honest
-  // sample timestamp for the detached chip (owner feedback 2026-08-15):
-  // history is old by definition, so showing the newest loaded row's age
-  // ("1 day ago") alarms about nothing; "read just now" is the truth that
-  // matters. Updated on every page completion that wasn't an error.
-  const [lastFetchAt, setLastFetchAt] = useState<number | null>(null)
-  const fetchWasLoadingRef = useRef(false)
   const [tailErrorText, setTailErrorText] = useState<string | null>(null)
   const tailHandleRef = useRef<{ close: () => void } | null>(null)
 
@@ -373,12 +366,6 @@ export function Timeline({ cluster, topic }: { cluster: string; topic: string })
     listRef.current?.scrollToEdge(edge)
   }, [state.loading])
 
-  useEffect(() => {
-    const was = fetchWasLoadingRef.current
-    fetchWasLoadingRef.current = state.loading
-    if (was && !state.loading && !state.error) setLastFetchAt(Date.now())
-  }, [state.loading, state.error])
-
   // Scroll anchoring: consumes whatever runPage's onMatches just captured
   // (see pendingAnchorRef) after the corresponding rows have rendered, and
   // nudges scrollTop by the height delta so the viewport stays at the
@@ -485,10 +472,20 @@ export function Timeline({ cluster, topic }: { cluster: string; topic: string })
     bump()
   }
 
-  // The explicit play/pause toggle: pausing always forces 'explicit'
-  // (overriding whatever auto/none state was in effect); un-pausing always
-  // flushes + resumes fully, regardless of how it got paused.
+  // The explicit play/pause toggle: while DETACHED the toggle is only ever
+  // shown lit paused (see the header render below — live rendering is off
+  // by definition there), so the only honest click is the same jump-to-now
+  // the pill offers (design spec v1.3, owner ruling 2026-08-15) — flushing
+  // in place would recreate the false seam a historical window exists to
+  // avoid, same reasoning as handlePillClick. While ATTACHED: pausing
+  // always forces 'explicit' (overriding whatever auto/none state was in
+  // effect); un-pausing always flushes + resumes fully, regardless of how
+  // it got paused.
   const handlePlayPauseToggle = () => {
+    if (!attachedRef.current) {
+      handleJump({ kind: 'now' })
+      return
+    }
     if (pauseReasonRef.current === 'none') {
       pauseReasonRef.current = 'explicit'
     } else {
@@ -667,13 +664,15 @@ export function Timeline({ cluster, topic }: { cluster: string; topic: string })
               <PlayPauseToggle paused={paused} onClick={handlePlayPauseToggle} />
             </>
           ) : !attached ? (
-            // Detached (there is nothing live to pause here — the pill is
-            // the affordance back to now): design spec v1.3 — the chip is
-            // NEUTRAL. A historical window is immutable and cannot go
-            // stale; this chip communicates position in history, not
-            // freshness, so it never trips the aging/alarm colors no
-            // matter how old the newest loaded row is.
-            <StalenessChip asOf={lastFetchAt} failed={false} neutral />
+            // Detached (design spec v1.3, owner ruling 2026-08-15): the
+            // toggle IS the mode signal — always shown lit paused (live
+            // rendering is off by definition while detached, regardless of
+            // pauseReason, which keeps driving buffering underneath), no
+            // pulsing "● live", and no staleness chip — a historical page is
+            // immutable, there is nothing to be stale about. Clicking the
+            // toggle here jumps to now (handlePlayPauseToggle), same as the
+            // pill.
+            <PlayPauseToggle paused={!attached || paused} onClick={handlePlayPauseToggle} />
           ) : (
             // Attached but live has died: this alarm is honest (new data
             // is genuinely missing) — keep today's aging/alarm tiers.

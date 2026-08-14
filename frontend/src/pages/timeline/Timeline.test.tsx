@@ -885,11 +885,12 @@ describe('Timeline', () => {
       await act(async () => tail.handlers().onMessage(mk(50)))
       expect(screen.queryByText('p0·50')).not.toBeInTheDocument()
       expect(screen.getByText('▲ 1 new')).toBeInTheDocument()
-      expect(screen.queryByTestId('play-pause-toggle')).not.toBeInTheDocument()
-      expect(container.querySelector('[data-staleness]')).not.toBeNull()
+      const toggle = screen.getByTestId('play-pause-toggle')
+      expect(toggle).toHaveAttribute('aria-pressed', 'true')
+      expect(container.querySelector('[data-staleness]')).toBeNull()
     })
 
-    it('detached header: no toggle, no live pulse, staleness chip present', async () => {
+    it('detached header: toggle shows paused, no chip, no live pulse', async () => {
       mockTail()
       const user = userEvent.setup()
       const { container } = render(<Timeline cluster="prod" topic="orders" />)
@@ -900,19 +901,17 @@ describe('Timeline', () => {
       await emit(1, 'match', mk(2))
       await emit(1, 'page_end', { cursor: 'c9', exhausted: false })
 
-      expect(screen.queryByTestId('play-pause-toggle')).not.toBeInTheDocument()
+      const toggle = screen.getByTestId('play-pause-toggle')
+      expect(toggle).toHaveAttribute('aria-pressed', 'true')
+      expect(screen.getByTestId('icon-pause')).toHaveClass('text-amber-500')
       expect(screen.queryByText('● live')).not.toBeInTheDocument()
-      expect(container.querySelector('[data-staleness]')).not.toBeNull()
+      expect(container.querySelector('[data-staleness]')).toBeNull()
     })
 
-    // Design spec v1.3 ("the detached chip is NEUTRAL"): a historical page
-    // is immutable and cannot go stale, so the chip shown while DETACHED
-    // must never trip the aging/alarm colors — regardless of how old the
-    // loaded window's newest row actually is.
-    it('detached header: the staleness chip is neutral, never aging/alarm colors', async () => {
-      mockTail()
+    it('clicking the toggle while detached jumps to now', async () => {
+      const tail = mockTail()
       const user = userEvent.setup()
-      const { container } = render(<Timeline cluster="prod" topic="orders" />)
+      render(<Timeline cluster="prod" topic="orders" />)
       await emit(0, 'match', mk(9))
       await emit(0, 'page_end', { cursor: 'c1', exhausted: false })
 
@@ -920,18 +919,28 @@ describe('Timeline', () => {
       await emit(1, 'match', mk(2))
       await emit(1, 'page_end', { cursor: 'c9', exhausted: false })
 
-      const chip = container.querySelector('[data-staleness]')
-      expect(chip).toHaveAttribute('data-staleness', 'neutral')
-      // …and it shows when the window was READ, not how old its messages
-      // are: mk(2)'s timestamp is ancient, but the page just landed, so the
-      // chip must say "just now" (the fetch is the honest sample time).
-      expect(chip).toHaveTextContent(/just now/i)
+      await user.click(screen.getByTestId('play-pause-toggle'))
+      // Abandons the historical window in place, same as the pill click.
+      expect(screen.queryByText('p0·2')).not.toBeInTheDocument()
+      expect(FakeEventSource.instances.at(-1)!.url).toBe(
+        '/api/clusters/prod/topics/orders/timeline?direction=back&limit=100&anchor=latest',
+      )
+
+      const idx = FakeEventSource.instances.length - 1
+      await emit(idx, 'match', mk(20))
+      await emit(idx, 'page_end', { cursor: null, exhausted: true })
+
+      // Re-attached: a subsequent tail message inserts straight into the
+      // store — proving live merging actually resumed.
+      await act(async () => tail.handlers().onMessage(mk(11)))
+      expect(screen.getByText('p0·11')).toBeInTheDocument()
     })
 
     // Contrast case: the live stream dying while still ATTACHED is a
-    // genuinely honest alarm (new data really is missing) — that chip must
-    // keep today's aging/alarm tiers, not go neutral.
-    it('the !live-while-attached chip keeps its aging/alarm tiers (not neutral)', async () => {
+    // genuinely honest alarm (new data really is missing) — this chip keeps
+    // the normal aging/alarm tiers (unlike the detached header, which shows
+    // no chip at all — see the toggle tests above).
+    it('the !live-while-attached chip keeps its aging/alarm tiers', async () => {
       const tail = mockTail()
       const { container } = render(<Timeline cluster="prod" topic="orders" />)
       await emit(0, 'match', mk(9))
@@ -941,8 +950,7 @@ describe('Timeline', () => {
       })
       // mk(9)'s timestamp_ms (1009) is ancient next to real wall-clock time
       // (this chip gets no `now` override, unlike the unit tests above), so
-      // it genuinely reads as 'stale' — the point is that it's a real
-      // age-based tier, never 'neutral'.
+      // it genuinely reads as a real age-based 'stale' tier.
       const chip = container.querySelector('[data-staleness]')
       expect(chip).toHaveAttribute('data-staleness', 'stale')
     })

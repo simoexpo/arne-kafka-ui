@@ -53,18 +53,4 @@ describe('StalenessChip', () => {
     expect(chip).toHaveAttribute('data-staleness', 'failed')
     expect(chip.className).toMatch(/red/)
   })
-  it('neutral renders zinc for an old timestamp that would otherwise be red', () => {
-    render(<StalenessChip asOf={1_000_000} now={1_180_000} neutral />)
-    const chip = screen.getByText('3m ago')
-    expect(chip).toHaveAttribute('data-staleness', 'neutral')
-    expect(chip.className).not.toMatch(/red/)
-    expect(chip.className).not.toMatch(/amber/)
-    expect(chip.className).toMatch(/zinc/)
-  })
-  it('failed wins over neutral when both are true', () => {
-    render(<StalenessChip asOf={1_000_000} now={1_180_000} neutral failed />)
-    const chip = screen.getByText('3m ago')
-    expect(chip).toHaveAttribute('data-staleness', 'failed')
-    expect(chip.className).toMatch(/red/)
-  })
 })
