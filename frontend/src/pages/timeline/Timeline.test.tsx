@@ -504,13 +504,18 @@ describe('Timeline', () => {
       await emit(0, 'match', mk(9))
       await emit(0, 'page_end', { cursor: 'c1', exhausted: false })
 
-      // Get into a paused state first via a beginning jump.
+      // Get into a paused (detached) state first via a beginning jump — the
+      // forward cursor must stay open (not exhausted) here, since a forward
+      // page landing exhausted immediately would legitimately re-attach
+      // (caught the tail already) rather than staying paused.
       await user.click(screen.getByTestId('jump-beginning'))
-      await emit(1, 'page_end', { cursor: null, exhausted: true })
+      await emit(1, 'match', mk(2))
+      await emit(1, 'page_end', { cursor: 'c-fwd', exhausted: false })
       await act(async () => tail.handlers().onMessage(mk(3)))
       expect(screen.getByText('▲ 1 new')).toBeInTheDocument()
 
       await user.click(screen.getByTestId('jump-now'))
+      expect(screen.queryByText('p0·2')).not.toBeInTheDocument() // store cleared
       expect(screen.queryByText('p0·3')).not.toBeInTheDocument() // store + buffer cleared
       expect(screen.queryByTestId('live-pill')).not.toBeInTheDocument()
       expect(FakeEventSource.instances[2].url).toBe(
@@ -683,6 +688,132 @@ describe('Timeline', () => {
       } finally {
         scroll.restore()
       }
+    })
+  })
+
+  describe('attached vs detached windows', () => {
+    it('after a beginning jump, live messages never merge — even when pinned to top', async () => {
+      const tail = mockTail()
+      const user = userEvent.setup()
+      render(<Timeline cluster="prod" topic="orders" />)
+      await emit(0, 'match', mk(9))
+      await emit(0, 'page_end', { cursor: 'c1', exhausted: false })
+
+      await user.click(screen.getByTestId('jump-beginning'))
+      await emit(1, 'match', mk(2))
+      await emit(1, 'page_end', { cursor: 'c9', exhausted: false })
+      expect(screen.getByText('p0·2')).toBeInTheDocument()
+
+      scrollToTop() // pinned to top of the DETACHED window — must not resume live
+      await act(async () => tail.handlers().onMessage(mk(50)))
+      expect(screen.queryByText('p0·50')).not.toBeInTheDocument()
+      expect(screen.getByText('▲ 1 new')).toBeInTheDocument()
+    })
+
+    it('pill click while detached jumps to now', async () => {
+      const tail = mockTail()
+      const user = userEvent.setup()
+      render(<Timeline cluster="prod" topic="orders" />)
+      await emit(0, 'match', mk(9))
+      await emit(0, 'page_end', { cursor: 'c1', exhausted: false })
+
+      await user.click(screen.getByTestId('jump-beginning'))
+      await emit(1, 'match', mk(2))
+      await emit(1, 'page_end', { cursor: 'c9', exhausted: false })
+
+      await act(async () => tail.handlers().onMessage(mk(50)))
+      expect(screen.getByText('▲ 1 new')).toBeInTheDocument()
+
+      const scroll = spyOnScrollTop()
+      try {
+        await user.click(screen.getByTestId('live-pill'))
+        // Abandons the historical window in place — does NOT flush the
+        // buffer into it (that would recreate the false seam).
+        expect(screen.queryByText('p0·2')).not.toBeInTheDocument()
+        expect(screen.queryByText('p0·50')).not.toBeInTheDocument()
+        expect(FakeEventSource.instances.at(-1)!.url).toBe(
+          '/api/clusters/prod/topics/orders/timeline?direction=back&limit=100&anchor=latest',
+        )
+
+        const idx = FakeEventSource.instances.length - 1
+        await emit(idx, 'match', mk(20))
+        scroll.setter.mockClear()
+        await emit(idx, 'page_end', { cursor: null, exhausted: true })
+        expect(scroll.setter).toHaveBeenCalledWith(0)
+
+        await act(async () => tail.handlers().onMessage(mk(11)))
+        expect(screen.getByText('p0·11')).toBeInTheDocument()
+      } finally {
+        scroll.restore()
+      }
+    })
+
+    it('catching the tail re-attaches', async () => {
+      const tail = mockTail()
+      const user = userEvent.setup()
+      render(<Timeline cluster="prod" topic="orders" />)
+      await emit(0, 'match', mk(9))
+      await emit(0, 'page_end', { cursor: 'c1', exhausted: false })
+
+      await user.click(screen.getByTestId('jump-beginning'))
+      await emit(1, 'match', mk(2))
+      await emit(1, 'page_end', { cursor: 'c9', exhausted: false }) // forward cursor open, not exhausted yet
+
+      await act(async () => tail.handlers().onMessage(mk(50)))
+      expect(screen.getByText('▲ 1 new')).toBeInTheDocument()
+
+      // Forward-paginate toward the tail (top-scroll sentinel, independent of
+      // the live-resume gate).
+      scrollToTop()
+      expect(FakeEventSource.instances).toHaveLength(3)
+      await emit(2, 'match', mk(3))
+      await emit(2, 'page_end', { cursor: null, exhausted: true }) // caught the tail
+
+      // Re-attached: buffered message flushes in (deduped with anything
+      // already loaded) and the header goes back to live.
+      expect(screen.getByText('p0·50')).toBeInTheDocument()
+      expect(screen.queryByTestId('live-pill')).not.toBeInTheDocument()
+      expect(screen.getByText('● live')).toBeInTheDocument()
+
+      await act(async () => tail.handlers().onMessage(mk(60)))
+      expect(screen.getByText('p0·60')).toBeInTheDocument()
+    })
+
+    it('offset jump detaches too', async () => {
+      const tail = mockTail()
+      const user = userEvent.setup()
+      const { container } = render(<Timeline cluster="prod" topic="orders" />)
+      await emit(0, 'match', mk(9))
+      await emit(0, 'page_end', { cursor: 'c1', exhausted: false })
+
+      await user.click(screen.getByTestId('jump-offset'))
+      await user.type(screen.getByTestId('jump-offset-partition-input'), '1')
+      await user.type(screen.getByTestId('jump-offset-value-input'), '77')
+      await user.click(screen.getByTestId('jump-offset-apply'))
+      await emit(1, 'match', mk(5))
+      await emit(1, 'page_end', { cursor: 'c2', exhausted: false })
+
+      await act(async () => tail.handlers().onMessage(mk(50)))
+      expect(screen.queryByText('p0·50')).not.toBeInTheDocument()
+      expect(screen.getByText('▲ 1 new')).toBeInTheDocument()
+      expect(screen.queryByTestId('play-pause-toggle')).not.toBeInTheDocument()
+      expect(container.querySelector('[data-staleness]')).not.toBeNull()
+    })
+
+    it('detached header: no toggle, no live pulse, staleness chip present', async () => {
+      mockTail()
+      const user = userEvent.setup()
+      const { container } = render(<Timeline cluster="prod" topic="orders" />)
+      await emit(0, 'match', mk(9))
+      await emit(0, 'page_end', { cursor: 'c1', exhausted: false })
+
+      await user.click(screen.getByTestId('jump-beginning'))
+      await emit(1, 'match', mk(2))
+      await emit(1, 'page_end', { cursor: 'c9', exhausted: false })
+
+      expect(screen.queryByTestId('play-pause-toggle')).not.toBeInTheDocument()
+      expect(screen.queryByText('● live')).not.toBeInTheDocument()
+      expect(container.querySelector('[data-staleness]')).not.toBeNull()
     })
   })
 })

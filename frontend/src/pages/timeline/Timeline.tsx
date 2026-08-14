@@ -39,9 +39,11 @@ const TOP_PIN_THRESHOLD = 20
 const BOTTOM_PIN_THRESHOLD = 20
 
 type Direction = 'back' | 'forward'
-// 'none': live inserts straight into the store. 'auto': paused by scrolling
-// off the top — returning to the top resumes. 'explicit': paused via the
-// play/pause pill — overrides top-pinning, only the pill itself resumes it.
+// 'none': live inserts straight into the store (only takes effect while
+// ATTACHED — see `attached` below). 'auto': paused by scrolling off the top
+// — returning to the top resumes, but only while attached. 'explicit':
+// paused via the play/pause pill — overrides top-pinning, only the pill
+// itself resumes it.
 type PauseReason = 'none' | 'auto' | 'explicit'
 
 export function Timeline({ cluster, topic }: { cluster: string; topic: string }) {
@@ -112,6 +114,24 @@ export function Timeline({ cluster, topic }: { cluster: string; topic: string })
   const [live, setLive] = useState(true)
   const [tailErrorText, setTailErrorText] = useState<string | null>(null)
   const tailHandleRef = useRef<{ close: () => void } | null>(null)
+
+  // Attached vs detached windows (design spec v1.3): the loaded window is
+  // either ATTACHED to now (opened at latest, or forward-paginated until the
+  // topic reported exhausted) or DETACHED (any historical jump — beginning,
+  // offset, timestamp — or a filter settle that re-reads from the
+  // 'beginning' anchor context). While detached, live tail messages never
+  // merge into the list — they only ever buffer — so the rendered list can
+  // never show live rows adjacent to a historical window with unloaded pages
+  // between them. `attached` is real React state (the header renders from
+  // it); `attachedRef` mirrors it for the tail SSE callback closure (that
+  // effect only runs once, on [cluster, topic], same reason pauseReasonRef
+  // is a ref rather than state).
+  const [attached, setAttachedState] = useState(true)
+  const attachedRef = useRef(true)
+  const setAttached = useCallback((value: boolean) => {
+    attachedRef.current = value
+    setAttachedState(value)
+  }, [])
 
   // Pause machinery: pauseReasonRef is the source of truth (read at render
   // time, like storeRef), mutated directly and paired with `bump()` so a
@@ -209,10 +229,14 @@ export function Timeline({ cluster, topic }: { cluster: string; topic: string })
       bufferOverflowRef.current = false
       reset()
       const base = baseAnchorParams()
+      // The settled window's anchor decides attached/detached exactly like a
+      // jump would: re-reading from 'beginning' is a historical window
+      // (detached); re-reading from 'default' (back/latest) is attached.
+      setAttached(anchorContextRef.current !== 'beginning')
       runPage(base.direction, withFilter(base), { resetIteration: true })
       bump()
     },
-    [reset, runPage, baseAnchorParams, withFilter],
+    [reset, runPage, baseAnchorParams, withFilter, setAttached],
   )
 
   const [filterText, setFilterText] = useState('')
@@ -307,6 +331,28 @@ export function Timeline({ cluster, topic }: { cluster: string; topic: string })
     listRef.current?.scrollToEdge(edge)
   }, [state.loading])
 
+  // Re-attach: fires on the false -> true edge of `state.exhausted.forward`
+  // while detached — the reader forward-paginated a historical window all
+  // the way to the topic's current edge, i.e. caught the tail. Buffered live
+  // messages flush in (store dedup makes the overlap with anything already
+  // loaded safe) and live merging resumes, unless the pause was explicit.
+  // Guarded to only fire on that specific edge (not on every render where
+  // forward happens to already be exhausted) and only while detached (an
+  // attached window reaching forward-exhausted, e.g. mount, is a no-op).
+  // `reset()` (called by every jump and by applyFilter) clears exhausted
+  // back to false first, so a subsequent jump re-arms this edge naturally.
+  const prevExhaustedForwardRef = useRef(false)
+  useEffect(() => {
+    const wasExhausted = prevExhaustedForwardRef.current
+    prevExhaustedForwardRef.current = state.exhausted.forward
+    if (wasExhausted || !state.exhausted.forward) return
+    if (attachedRef.current) return
+    setAttached(true)
+    flushBuffer()
+    pauseReasonRef.current = pauseReasonRef.current === 'explicit' ? 'explicit' : 'none'
+    bump()
+  }, [state.exhausted.forward, flushBuffer, setAttached])
+
   // Live tail: on by default, ON for the lifetime of the component. An
   // error (server-emitted or transport) stops it for good — Task 8 adds the
   // pause/resume affordance; Task 7 only needs the freeze-in-place pattern.
@@ -314,7 +360,11 @@ export function Timeline({ cluster, topic }: { cluster: string; topic: string })
     const handle = tailTopic(cluster, topic, {
       onMessage: (m) => {
         if (!predicateRef.current(m)) return
-        if (pauseReasonRef.current === 'none') {
+        // While detached, live messages ALWAYS buffer — merging them would
+        // recreate the false seam a historical window exists to avoid, even
+        // if pauseReasonRef happens to read 'none' (it never should while
+        // detached, but attached is the authoritative gate here).
+        if (attachedRef.current && pauseReasonRef.current === 'none') {
           storeRef.current.insert([m], 'live')
         } else {
           bufferRef.current.push(m)
@@ -349,10 +399,18 @@ export function Timeline({ cluster, topic }: { cluster: string; topic: string })
 
   const rows = storeRef.current.rows()
 
-  // Clicking the "▲ n new" pill always flushes; it only resumes when the
-  // pause was automatic — an explicit pause stays paused (the pill just
+  // Clicking the "▲ n new" pill: while DETACHED, flushing in place would
+  // recreate the false seam the historical window exists to avoid — so
+  // instead the pill jumps to now (fresh latest page, scrolled to top, live
+  // resumed), abandoning the historical reading position by design (an
+  // explicit click). While ATTACHED, it always flushes; it only resumes when
+  // the pause was automatic — an explicit pause stays paused (the pill just
   // clears what had built up so far).
   const handlePillClick = () => {
+    if (!attachedRef.current) {
+      handleJump({ kind: 'now' })
+      return
+    }
     flushBuffer()
     if (pauseReasonRef.current === 'auto') pauseReasonRef.current = 'none'
     bump()
@@ -373,12 +431,14 @@ export function Timeline({ cluster, topic }: { cluster: string; topic: string })
 
   // A jump repositions the viewport: the current window is no longer
   // meaningful, so the store and any buffered live messages are dropped
-  // outright (not flushed — they belong to the OLD viewport). 'now' is the
-  // only jump that lands pinned at the true top, so it's the only one that
-  // resumes live; the others land mid-topic or at the tail end, where an
-  // unpaused live prepend would immediately scroll the user's new anchor
-  // out of view — so they enter paused-auto (the pill counts, top-pinning
-  // still resumes normally from there on).
+  // outright (not flushed — they belong to the OLD viewport). 'now' attaches
+  // (live tail merges straight in again); every other jump — beginning,
+  // offset, timestamp — DETACHES: it lands mid-topic or at the tail end,
+  // where merging live rows in would create a false seam with the unloaded
+  // pages between the historical window and now. Detached windows enter
+  // paused-auto (the pill counts; while detached, top-pinning does NOT
+  // resume live — only re-attaching, via catching the tail or jumping to
+  // now, does).
   const handleJump = (target: JumpTarget) => {
     storeRef.current.clear()
     bufferRef.current = []
@@ -403,14 +463,17 @@ export function Timeline({ cluster, topic }: { cluster: string; topic: string })
     switch (target.kind) {
       case 'now':
         pauseReasonRef.current = 'none'
+        setAttached(true)
         runPage('back', withFilter({ direction: 'back', limit: PAGE_LIMIT, anchor: 'latest' }), { resetIteration: true })
         break
       case 'beginning':
         pauseReasonRef.current = 'auto'
+        setAttached(false)
         runPage('forward', withFilter({ direction: 'forward', limit: PAGE_LIMIT, anchor: 'beginning' }), { resetIteration: true })
         break
       case 'offset':
         pauseReasonRef.current = 'auto'
+        setAttached(false)
         runPage(
           'back',
           withFilter({ direction: 'back', limit: PAGE_LIMIT, anchor: 'offset', partition: target.partition, offset: target.offset }),
@@ -419,6 +482,7 @@ export function Timeline({ cluster, topic }: { cluster: string; topic: string })
         break
       case 'timestamp':
         pauseReasonRef.current = 'auto'
+        setAttached(false)
         runPage('back', withFilter({ direction: 'back', limit: PAGE_LIMIT, anchor: 'timestamp', ts_ms: target.ts_ms }), { resetIteration: true })
         break
     }
@@ -438,7 +502,11 @@ export function Timeline({ cluster, topic }: { cluster: string; topic: string })
   // don't bubble, so this can't live on a wrapper). Scrolling off the top
   // auto-pauses (only from 'none' — 'auto'/'explicit' are already paused).
   // Returning to the top auto-flushes + resumes, but ONLY if the pause was
-  // automatic: an explicit pause overrides top-pinning entirely.
+  // automatic (an explicit pause overrides top-pinning entirely) AND the
+  // window is attached — while detached, top-of-window ≠ now, so being
+  // pinned to the top of a historical window does nothing; re-attaching only
+  // happens via catching the tail (forward-exhausted effect) or jumping to
+  // now (jump / pill click).
   //
   // Also the scroll-triggered pagination sentinels (spec: "scroll down ->
   // next 100 older") — scroll is the ONLY pagination affordance, there is no
@@ -459,7 +527,7 @@ export function Timeline({ cluster, topic }: { cluster: string; topic: string })
   const handleScroll = (scrollTop: number, scrollHeight: number, clientHeight: number) => {
     const pinnedTop = scrollTop < TOP_PIN_THRESHOLD
     if (pinnedTop) {
-      if (pauseReasonRef.current === 'auto') {
+      if (attachedRef.current && pauseReasonRef.current === 'auto') {
         flushBuffer()
         pauseReasonRef.current = 'none'
         bump()
@@ -519,12 +587,16 @@ export function Timeline({ cluster, topic }: { cluster: string; topic: string })
         <h2 className="text-sm font-medium text-zinc-500 dark:text-zinc-400">{rows.length} messages</h2>
         <div className="flex items-center gap-2">
           <LivePill count={bufferReceivedRef.current} capped={bufferOverflowRef.current} onClick={handlePillClick} />
-          {live ? (
+          {live && attached ? (
+            // Attached: the normal live indicator/toggle cluster.
             <>
               {!paused && <span className="animate-pulse text-emerald-500">● live</span>}
               <PlayPauseToggle paused={paused} onClick={handlePlayPauseToggle} />
             </>
           ) : (
+            // Detached (there is nothing live to pause here — the pill is the
+            // affordance back to now) or live has stopped entirely: same
+            // staleness chip, keyed to the newest loaded row, either way.
             <StalenessChip asOf={rows[0]?.timestamp_ms ?? null} failed={false} />
           )}
         </div>
