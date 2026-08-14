@@ -23,12 +23,29 @@ describe('timelineStore', () => {
   it('cap drops opposite the origin and counts', () => {
     const s = createTimelineStore(3)
     s.insert([mk(0, 1, 100), mk(0, 2, 200), mk(0, 3, 300)], 'back')
-    s.insert([mk(0, 4, 400)], 'live')
+    const r1 = s.insert([mk(0, 4, 400)], 'live')
     expect(s.rows().map((m) => m.offset)).toEqual([4, 3, 2])
+    expect(r1).toEqual({ droppedTop: 0, droppedBottom: 1 })
     expect(s.dropped().bottom).toBe(1)
-    s.insert([mk(0, 0, 50)], 'back')
+    const r2 = s.insert([mk(0, 0, 50)], 'back')
     expect(s.rows().map((m) => m.offset)).toEqual([3, 2, 0])
+    expect(r2).toEqual({ droppedTop: 1, droppedBottom: 0 })
     expect(s.dropped().top).toBe(1)
+  })
+  it('insert returns a per-call drop delta, not the cumulative total', () => {
+    const s = createTimelineStore(2)
+    s.insert([mk(0, 1, 100), mk(0, 2, 200)], 'back')
+    const r1 = s.insert([mk(0, 3, 300)], 'live')
+    expect(r1).toEqual({ droppedTop: 0, droppedBottom: 1 })
+    const r2 = s.insert([mk(0, 4, 400)], 'live')
+    expect(r2).toEqual({ droppedTop: 0, droppedBottom: 1 })
+    // Cumulative counter keeps growing even though each call's own delta is 1.
+    expect(s.dropped().bottom).toBe(2)
+  })
+  it('an insert that stays within cap returns a zero delta', () => {
+    const s = createTimelineStore(5)
+    const r = s.insert([mk(0, 1, 100)], 'back')
+    expect(r).toEqual({ droppedTop: 0, droppedBottom: 0 })
   })
   it('within_partition_offset_order_beats_timestamp', () => {
     const s = createTimelineStore()

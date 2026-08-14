@@ -955,4 +955,103 @@ describe('Timeline', () => {
       expect(chip).toHaveAttribute('data-staleness', 'stale')
     })
   })
+
+  // Window cap honesty (design spec v1.4, owner ruling 2026-08-15): the
+  // 2000-row default cap is too large to exercise here, so these tests pass
+  // a small `windowCap` prop (test-only — production always uses the
+  // default) to force drops with just a handful of messages.
+  describe('window cap honesty', () => {
+    it('top drops while attached detach the window', async () => {
+      const tail = mockTail()
+      render(<Timeline cluster="prod" topic="orders" windowCap={3} />)
+      await emit(0, 'match', mk(9))
+      await emit(0, 'match', mk(8))
+      await emit(0, 'page_end', { cursor: 'c1', exhausted: false })
+      expect(screen.getByText('p0·9')).toBeInTheDocument()
+      expect(screen.getByText('p0·8')).toBeInTheDocument()
+
+      // A back page adds 2 older rows on top of the 2 already loaded — 4
+      // rows against a cap of 3, so the newest row (p0·9) drops off the top.
+      scrollToBottom()
+      await emit(1, 'match', mk(7))
+      await emit(1, 'match', mk(6))
+      await emit(1, 'page_end', { cursor: 'c2', exhausted: false })
+
+      expect(screen.queryByText('p0·9')).not.toBeInTheDocument() // dropped off the top
+      expect(screen.getByText('p0·8')).toBeInTheDocument()
+
+      // Top drop -> detach, even though nothing told this window's live
+      // tail to stop: the toggle flips to its paused/amber state.
+      const toggle = screen.getByTestId('play-pause-toggle')
+      expect(toggle).toHaveAttribute('aria-pressed', 'true')
+
+      // Detached: a live tail message buffers into the pill instead of
+      // merging — a flush could otherwise merge against the truncated top.
+      await act(async () => tail.handlers().onMessage(mk(50)))
+      expect(screen.queryByText('p0·50')).not.toBeInTheDocument()
+      expect(screen.getByText('▲ 1 new')).toBeInTheDocument()
+    })
+
+    it('bottom drops invalidate the back cursor: next bottom scroll repositions by timestamp', async () => {
+      const tail = mockTail()
+      render(<Timeline cluster="prod" topic="orders" windowCap={3} />)
+      await emit(0, 'match', mk(11))
+      await emit(0, 'match', mk(10))
+      await emit(0, 'page_end', { cursor: 'c1', exhausted: false })
+      expect(screen.getByText('p0·11')).toBeInTheDocument()
+      expect(screen.getByText('p0·10')).toBeInTheDocument()
+
+      // Two live inserts push the store past cap(3): the oldest row
+      // (p0·10) drops off the bottom, invalidating the back cursor ('c1')
+      // that still points at (now past) it.
+      await act(async () => tail.handlers().onMessage(mk(12)))
+      await act(async () => tail.handlers().onMessage(mk(13)))
+      expect(screen.queryByText('p0·10')).not.toBeInTheDocument() // dropped off the bottom
+      expect(screen.getByText('p0·11')).toBeInTheDocument() // now the bottom row
+
+      scrollToBottom()
+      // Must NOT follow the stale cursor — reposition via a fresh
+      // timestamp-anchored back page at the (new) bottom row's timestamp.
+      const req = FakeEventSource.instances.at(-1)!.url
+      expect(req).toBe(
+        '/api/clusters/prod/topics/orders/timeline?direction=back&limit=100&anchor=timestamp&ts_ms=1011',
+      )
+      expect(req).not.toContain('cursor=')
+
+      const idx = FakeEventSource.instances.length - 1
+      await emit(idx, 'match', mk(20))
+      await emit(idx, 'page_end', { cursor: 'c9', exhausted: false })
+      // Store cleared: the old (pre-reposition) rows are gone, only the
+      // fresh page's rows remain.
+      expect(screen.queryByText('p0·11')).not.toBeInTheDocument()
+      expect(screen.queryByText('p0·13')).not.toBeInTheDocument()
+      expect(screen.getByText('p0·20')).toBeInTheDocument()
+    })
+
+    it('reposition resets drop flags: subsequent pagination uses cursors again', async () => {
+      const tail = mockTail()
+      render(<Timeline cluster="prod" topic="orders" windowCap={3} />)
+      await emit(0, 'match', mk(11))
+      await emit(0, 'match', mk(10))
+      await emit(0, 'page_end', { cursor: 'c1', exhausted: false })
+
+      await act(async () => tail.handlers().onMessage(mk(12)))
+      await act(async () => tail.handlers().onMessage(mk(13))) // bottom drop
+
+      scrollToBottom() // repositions via timestamp instead of the stale cursor
+      const repositionIdx = FakeEventSource.instances.length - 1
+      expect(FakeEventSource.instances[repositionIdx].url).toContain('anchor=timestamp')
+
+      await emit(repositionIdx, 'match', mk(20))
+      await emit(repositionIdx, 'page_end', { cursor: 'c9', exhausted: false })
+
+      // Fresh window landed with a real cursor and no further drops: the
+      // next bottom-scroll goes back to normal cursor-based pagination.
+      scrollToBottom()
+      const nextIdx = FakeEventSource.instances.length - 1
+      expect(FakeEventSource.instances[nextIdx].url).toBe(
+        '/api/clusters/prod/topics/orders/timeline?direction=back&limit=100&cursor=c9',
+      )
+    })
+  })
 })

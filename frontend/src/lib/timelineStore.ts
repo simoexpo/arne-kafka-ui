@@ -7,8 +7,17 @@ export interface Dropped {
   bottom: number
 }
 
+// What THIS insert call dropped (a delta), as opposed to `dropped()`'s
+// running cumulative total — the Timeline needs the delta to know whether
+// *this* insert invalidated an edge (see the v1.4 window-cap-honesty
+// ruling), which a cumulative counter can't answer on its own.
+export interface InsertResult {
+  droppedTop: number
+  droppedBottom: number
+}
+
 export interface TimelineStore {
-  insert(msgs: MessageOut[], origin: InsertOrigin): void
+  insert(msgs: MessageOut[], origin: InsertOrigin): InsertResult
   rows(): readonly MessageOut[]
   dropped(): Dropped
   clear(): void
@@ -91,21 +100,25 @@ export function createTimelineStore(cap = 2000): TimelineStore {
     seen.delete(partitionKey(msg.partition, msg.offset))
   }
 
-  function enforceCap(origin: InsertOrigin): void {
+  function enforceCap(origin: InsertOrigin): InsertResult {
     const excess = totalCount() - cap
-    if (excess <= 0) return
+    if (excess <= 0) return { droppedTop: 0, droppedBottom: 0 }
     const merged = mergeRows() // newest-first
+    let result: InsertResult
     if (origin === 'back') {
       // Backward-fill overflow drops from the top (newest end) — the
       // opposite end from where 'back' inserts (older messages).
       for (let i = 0; i < excess; i++) removeMessage(merged[i])
       dropCounts.top += excess
+      result = { droppedTop: excess, droppedBottom: 0 }
     } else {
       // live/forward overflow drops from the bottom (oldest end).
       for (let i = 0; i < excess; i++) removeMessage(merged[merged.length - 1 - i])
       dropCounts.bottom += excess
+      result = { droppedTop: 0, droppedBottom: excess }
     }
     cachedRows = null
+    return result
   }
 
   return {
@@ -129,7 +142,7 @@ export function createTimelineStore(cap = 2000): TimelineStore {
         changed = true
       }
       if (changed) cachedRows = null
-      enforceCap(origin)
+      return enforceCap(origin)
     },
     rows() {
       // Freeze the memoized array so a consumer's in-place sort/splice can't

@@ -46,13 +46,48 @@ type Direction = 'back' | 'forward'
 // itself resumes it.
 type PauseReason = 'none' | 'auto' | 'explicit'
 
-export function Timeline({ cluster, topic }: { cluster: string; topic: string }) {
+// Window cap honesty (design spec v1.4): the timestamp a reposition anchors
+// on, read from whichever edge row (top or bottom) the sentinel just found
+// invalidated. Most rows carry a real timestamp, but it's nullable in
+// principle (see MessageOut) — falling back to the nearest neighbor toward
+// the OTHER edge keeps the anchor close to the true edge instead of
+// guessing from an arbitrary row. Returns null only in the pathological
+// case where every row in the window lacks a timestamp, telling the caller
+// to leave the sentinel inert rather than fabricate an anchor.
+function findAnchorTs(rows: readonly MessageOut[], edge: 'top' | 'bottom'): number | null {
+  if (edge === 'bottom') {
+    for (let i = rows.length - 1; i >= 0; i--) {
+      const ts = rows[i].timestamp_ms
+      if (ts !== null) return ts
+    }
+  } else {
+    for (let i = 0; i < rows.length; i++) {
+      const ts = rows[i].timestamp_ms
+      if (ts !== null) return ts
+    }
+  }
+  return null
+}
+
+export function Timeline({
+  cluster,
+  topic,
+  windowCap,
+}: {
+  cluster: string
+  topic: string
+  // Test-only override of the store's default 2000-row cap: production
+  // code never passes this. It exists purely so the window-cap-honesty
+  // tests (design spec v1.4) can force top/bottom drops with a handful of
+  // messages instead of needing to insert thousands of rows.
+  windowCap?: number
+}) {
   // The store is mutable (merge-native insert/rows), so it lives in a ref;
   // `bump` forces a re-render whenever an insert changes what rows() would
   // return. `Timeline` is remounted (via a key) whenever cluster/topic
   // changes, so a fresh store per mount is correct — no reset-on-prop-change
   // logic needed here.
-  const storeRef = useRef(createTimelineStore())
+  const storeRef = useRef(createTimelineStore(windowCap))
   const [, bump] = useReducer((c: number) => c + 1, 0)
 
   const { loadPage, state, cursors, reset, cancel } = useTimelinePage(cluster, topic)
@@ -164,14 +199,48 @@ export function Timeline({ cluster, topic }: { cluster: string; topic: string })
   const bufferReceivedRef = useRef(0)
   const bufferOverflowRef = useRef(false)
 
+  // Window cap honesty (design spec v1.4, owner ruling 2026-08-15): the
+  // store's cap (see timelineStore's enforceCap) silently drops rows at the
+  // end opposite the insert origin once the window is full. These two refs
+  // track whether THIS window has ever had a drop at that edge since it was
+  // last (re)loaded — reset alongside pendingAnchorRef everywhere the window
+  // is cleared (handleJump, applyFilter, reposition below). A top drop means
+  // the window no longer includes the tail (see topDroppedRef's use at the
+  // insert call sites below, which also detaches immediately); a bottom
+  // drop means the back cursor now points at a range the window slid past —
+  // both make their respective cursor unsafe to follow, which the scroll
+  // sentinels check before pagination below.
+  const topDroppedRef = useRef(false)
+  const bottomDroppedRef = useRef(false)
+
+  // Called after every store insert (live, buffer flush, page match) with
+  // that insert's OWN drop delta (never the cumulative total — see
+  // InsertResult). A top drop detaches the window right away: "attached"
+  // means the window includes the tail, and a top drop just made that
+  // false. A bottom drop only marks the back cursor unsafe; it doesn't
+  // change attachment on its own (the reposition, when the reader actually
+  // pushes past it, is what detaches — see `reposition` below).
+  const noteDrops = useCallback(
+    (result: { droppedTop: number; droppedBottom: number }) => {
+      if (result.droppedTop > 0) {
+        topDroppedRef.current = true
+        if (attachedRef.current) setAttached(false)
+      }
+      if (result.droppedBottom > 0) {
+        bottomDroppedRef.current = true
+      }
+    },
+    [setAttached],
+  )
+
   const flushBuffer = useCallback(() => {
     if (bufferRef.current.length > 0) {
-      storeRef.current.insert(bufferRef.current, 'live')
+      noteDrops(storeRef.current.insert(bufferRef.current, 'live'))
     }
     bufferRef.current = []
     bufferReceivedRef.current = 0
     bufferOverflowRef.current = false
-  }, [])
+  }, [noteDrops])
 
   const runPage = useCallback(
     (
@@ -219,11 +288,11 @@ export function Timeline({ cluster, topic }: { cluster: string; topic: string })
             pendingAnchorRef.current = metrics
           }
         }
-        storeRef.current.insert(msgs, direction)
+        noteDrops(storeRef.current.insert(msgs, direction))
         bump()
       })
     },
-    [loadPage],
+    [loadPage, noteDrops],
   )
 
   // Resends the currently active filter's server-side params (a no-op when
@@ -262,6 +331,10 @@ export function Timeline({ cluster, topic }: { cluster: string; topic: string })
       bufferRef.current = []
       bufferReceivedRef.current = 0
       bufferOverflowRef.current = false
+      // Same reasoning: a drop recorded against the window being replaced
+      // says nothing about the freshly re-read one.
+      topDroppedRef.current = false
+      bottomDroppedRef.current = false
       reset()
       const base = baseAnchorParams()
       // The settled window's anchor decides attached/detached exactly like a
@@ -418,7 +491,7 @@ export function Timeline({ cluster, topic }: { cluster: string; topic: string })
         // re-attach set it, then a filter settle from the 'beginning'
         // context detached again): attached is the authoritative gate.
         if (attachedRef.current && pauseReasonRef.current === 'none') {
-          storeRef.current.insert([m], 'live')
+          noteDrops(storeRef.current.insert([m], 'live'))
         } else {
           bufferRef.current.push(m)
           bufferReceivedRef.current += 1
@@ -514,6 +587,10 @@ export function Timeline({ cluster, topic }: { cluster: string; topic: string })
     bufferRef.current = []
     bufferReceivedRef.current = 0
     bufferOverflowRef.current = false
+    // Same reasoning as pendingAnchorRef: a drop recorded against the OLD
+    // window says nothing about the fresh one a jump is about to load.
+    topDroppedRef.current = false
+    bottomDroppedRef.current = false
     // A jump invalidates BOTH pagination directions, not just the one being
     // (re)loaded: the old cursors describe a window the user is leaving
     // entirely. reset() clears both cursors/exhausted flags (and kills any
@@ -559,6 +636,39 @@ export function Timeline({ cluster, topic }: { cluster: string; topic: string })
     bump()
   }
 
+  // Window cap honesty (design spec v1.4, owner ruling 2026-08-15): pushing
+  // past a dropped edge repositions instead of accreting against a stale
+  // cursor — a reposition IS a jump (same clear/reset/detach machinery as
+  // handleJump above), just anchored at the edge row's own timestamp
+  // instead of a user-picked target. `direction` is the SAME direction the
+  // sentinel that triggered this was already pursuing ('back' for the
+  // bottom sentinel, 'forward' for the top one) — landing edge mirrors
+  // handleJump's own rule (forward lands looking from the bottom, i.e. the
+  // 'beginning' jump's edge; every other direction lands from the top).
+  const reposition = useCallback(
+    (direction: Direction, tsMs: number) => {
+      storeRef.current.clear()
+      pendingAnchorRef.current = null
+      bufferRef.current = []
+      bufferReceivedRef.current = 0
+      bufferOverflowRef.current = false
+      // A fresh window can't have a stale drop anymore — a seam is
+      // unconstructible in a window that was just cleared and reloaded.
+      topDroppedRef.current = false
+      bottomDroppedRef.current = false
+      reset()
+      pendingScrollEdgeRef.current = direction === 'forward' ? 'bottom' : 'top'
+      anchorContextRef.current = 'default'
+      pauseReasonRef.current = 'auto'
+      setAttached(false)
+      runPage(direction, withFilter({ direction, limit: PAGE_LIMIT, anchor: 'timestamp', ts_ms: tsMs }), {
+        resetIteration: true,
+      })
+      bump()
+    },
+    [reset, runPage, withFilter, setAttached],
+  )
+
   const loadOlder = () => {
     if (cursors.back === null) return
     runPage('back', withFilter({ direction: 'back', limit: PAGE_LIMIT, cursor: cursors.back }), { resetIteration: true })
@@ -602,18 +712,39 @@ export function Timeline({ cluster, topic }: { cluster: string; topic: string })
         pauseReasonRef.current = 'none'
         bump()
       }
-      if (cursors.forward !== null && !state.exhausted.forward && !state.loading) {
-        if (continueDirection === 'forward') continueScan()
-        else loadNewer()
+      if (!state.loading) {
+        // Window cap honesty: a top drop already invalidated the forward
+        // cursor (it describes rows this window slid past) — following it
+        // would recreate exactly the false seam the drop-detach exists to
+        // avoid. Reposition forward from the current top row's own
+        // timestamp instead (only reachable while detached, since any top
+        // drop detaches immediately).
+        if (topDroppedRef.current) {
+          const ts = findAnchorTs(rows, 'top')
+          if (ts !== null) reposition('forward', ts)
+          // else: no row in the window carries a timestamp — pathological;
+          // stay inert rather than guess an anchor.
+        } else if (cursors.forward !== null && !state.exhausted.forward) {
+          if (continueDirection === 'forward') continueScan()
+          else loadNewer()
+        }
       }
     } else if (pauseReasonRef.current === 'none') {
       pauseReasonRef.current = 'auto'
       bump()
     }
     const nearBottom = scrollHeight - (scrollTop + clientHeight) < BOTTOM_PIN_THRESHOLD
-    if (nearBottom && cursors.back !== null && !state.exhausted.back && !state.loading) {
-      if (continueDirection === 'back') continueScan()
-      else loadOlder()
+    if (nearBottom && !state.loading) {
+      // Symmetric case: a bottom drop invalidated the back cursor —
+      // reposition backward from the current bottom row's timestamp
+      // instead of following it into a false seam.
+      if (bottomDroppedRef.current) {
+        const ts = findAnchorTs(rows, 'bottom')
+        if (ts !== null) reposition('back', ts)
+      } else if (cursors.back !== null && !state.exhausted.back) {
+        if (continueDirection === 'back') continueScan()
+        else loadOlder()
+      }
     }
   }
 
