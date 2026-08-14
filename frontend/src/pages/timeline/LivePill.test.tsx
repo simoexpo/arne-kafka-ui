@@ -30,18 +30,39 @@ describe('LivePill', () => {
 })
 
 describe('PlayPauseToggle', () => {
-  it('shows aria-pressed=false and a pause icon while live (not paused)', () => {
+  it('shows aria-pressed=false while live (not paused)', () => {
     render(<PlayPauseToggle paused={false} onClick={vi.fn()} />)
     const btn = screen.getByTestId('play-pause-toggle')
     expect(btn).toHaveAttribute('aria-pressed', 'false')
-    expect(screen.getByTestId('icon-pause')).toBeInTheDocument()
   })
 
-  it('shows aria-pressed=true and a play icon while paused', () => {
+  it('shows aria-pressed=true while paused', () => {
     render(<PlayPauseToggle paused={true} onClick={vi.fn()} />)
     const btn = screen.getByTestId('play-pause-toggle')
     expect(btn).toHaveAttribute('aria-pressed', 'true')
-    expect(screen.getByTestId('icon-play')).toBeInTheDocument()
+  })
+
+  // The lit icon must mirror the CURRENT state, not the click action: a lit
+  // pause icon reads as "paused" to a user, so pause can only be lit while
+  // actually paused, and play only while actually live.
+  it('while live: play icon is lit emerald, pause icon is unlit zinc', () => {
+    render(<PlayPauseToggle paused={false} onClick={vi.fn()} />)
+    expect(screen.getByTestId('icon-play')).toHaveClass('text-emerald-500')
+    expect(screen.getByTestId('icon-pause')).toHaveClass('text-zinc-400')
+  })
+
+  it('while paused: pause icon is lit amber, play icon is unlit zinc', () => {
+    render(<PlayPauseToggle paused={true} onClick={vi.fn()} />)
+    expect(screen.getByTestId('icon-pause')).toHaveClass('text-amber-500')
+    expect(screen.getByTestId('icon-play')).toHaveClass('text-zinc-400')
+  })
+
+  it('renders the play icon before the pause icon (left-to-right order)', () => {
+    render(<PlayPauseToggle paused={false} onClick={vi.fn()} />)
+    const btn = screen.getByTestId('play-pause-toggle')
+    const icons = btn.querySelectorAll('svg')
+    expect(icons[0]).toHaveAttribute('data-testid', 'icon-play')
+    expect(icons[1]).toHaveAttribute('data-testid', 'icon-pause')
   })
 
   it('calls onClick when clicked', async () => {
