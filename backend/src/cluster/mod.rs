@@ -10,7 +10,7 @@ use rdkafka::consumer::{BaseConsumer, Consumer};
 use rdkafka::error::KafkaResult;
 use rdkafka::ClientConfig;
 use serde::Serialize;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 pub const ADMIN_TIMEOUT: Duration = Duration::from_secs(10);
@@ -48,8 +48,8 @@ pub struct ClusterHandle {
     pub config: ClusterConfig,
     pub sampler: Arc<sampler::SamplerStore>,
     pub schema_registry: Option<Arc<SchemaRegistry>>,
-    consumer: Arc<BaseConsumer>,
-    admin: AdminClient<DefaultClientContext>,
+    consumer: RwLock<Arc<BaseConsumer>>,
+    admin: RwLock<Arc<AdminClient<DefaultClientContext>>>,
 }
 
 impl std::fmt::Debug for ClusterHandle {
@@ -80,18 +80,42 @@ impl ClusterHandle {
             config,
             sampler: Arc::new(sampler::SamplerStore::new(360)),
             schema_registry,
-            consumer: Arc::new(consumer),
-            admin,
+            consumer: RwLock::new(Arc::new(consumer)),
+            admin: RwLock::new(Arc::new(admin)),
         })
     }
 
-    pub fn consumer(&self) -> &BaseConsumer { &self.consumer }
-    pub fn admin(&self) -> &AdminClient<DefaultClientContext> { &self.admin }
+    pub fn consumer(&self) -> Arc<BaseConsumer> {
+        self.consumer.read().expect("consumer lock poisoned").clone()
+    }
+
+    pub fn admin(&self) -> Arc<AdminClient<DefaultClientContext>> {
+        self.admin.read().expect("admin lock poisoned").clone()
+    }
+
+    fn swap_clients(&self, consumer: BaseConsumer, admin: AdminClient<DefaultClientContext>) {
+        *self.consumer.write().expect("consumer lock poisoned") = Arc::new(consumer);
+        *self.admin.write().expect("admin lock poisoned") = Arc::new(admin);
+    }
+
+    /// Test hook: rebuild the resident client pair against a different
+    /// bootstrap while `self.config` keeps the real one — simulates a stale
+    /// resident client over a healthy path (the wedge this module heals).
+    #[doc(hidden)]
+    pub fn replace_clients_with_bootstrap(&self, bootstrap: &str) -> KafkaResult<()> {
+        let mut cfg = self.config.clone();
+        cfg.bootstrap = bootstrap.to_string();
+        let cc = build_client_config(&cfg);
+        let consumer: BaseConsumer = cc.create()?;
+        let admin: AdminClient<DefaultClientContext> = cc.create()?;
+        self.swap_clients(consumer, admin);
+        Ok(())
+    }
 
     pub async fn health(self: &Arc<Self>) -> ClusterHealth {
         let this = self.clone();
         let res = tokio::task::spawn_blocking(move || {
-            this.consumer.fetch_metadata(None, HEALTH_TIMEOUT).map(|md| md.brokers().len())
+            this.consumer().fetch_metadata(None, HEALTH_TIMEOUT).map(|md| md.brokers().len())
         }).await;
         match res {
             Ok(Ok(brokers)) => ClusterHealth { status: HealthStatus::Healthy, broker_count: Some(brokers), error: None },
@@ -148,5 +172,16 @@ mod tests {
     fn keepalive_enabled_on_every_client() {
         let cc = build_client_config(&base("a"));
         assert_eq!(cc.get("socket.keepalive.enable"), Some("true"));
+    }
+
+    #[test]
+    fn swap_replaces_client_identity() {
+        let handle = ClusterHandle::connect(base("a")).expect("lazy create");
+        let before = handle.consumer();
+        handle.replace_clients_with_bootstrap("127.0.0.1:1").expect("lazy create");
+        let after = handle.consumer();
+        assert!(!Arc::ptr_eq(&before, &after), "swap must install a new client");
+        // the old Arc is still usable by in-flight work
+        let _still_alive: &BaseConsumer = &before;
     }
 }
