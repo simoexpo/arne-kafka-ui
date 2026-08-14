@@ -208,8 +208,13 @@ export function Timeline({
   // the window no longer includes the tail (see topDroppedRef's use at the
   // insert call sites below, which also detaches immediately); a bottom
   // drop means the back cursor now points at a range the window slid past —
-  // both make their respective cursor unsafe to follow, which the scroll
-  // sentinels check before pagination below.
+  // both make their respective cursor unsafe to follow — checked by
+  // repositionIfDropped below, which every cursor-follower (loadOlder,
+  // loadNewer, continueScan, the auto-continue effect) calls before
+  // touching cursors.back/cursors.forward (review round 1, F1: the check
+  // must live on the followers themselves, not just the scroll sentinels
+  // that usually trigger them — a drop can land while a page is already in
+  // flight, after the sentinel that started it has already run).
   const topDroppedRef = useRef(false)
   const bottomDroppedRef = useRef(false)
 
@@ -302,6 +307,69 @@ export function Timeline({
     if (!api) return params
     return { ...params, filter: api.filter, q: api.q, ...(api.path !== undefined ? { path: api.path } : {}) }
   }, [])
+
+  // Window cap honesty (design spec v1.4, owner ruling 2026-08-15): pushing
+  // past a dropped edge repositions instead of accreting against a stale
+  // cursor — a reposition IS a jump (same clear/reset/detach machinery as
+  // handleJump below), just anchored at the edge row's own timestamp
+  // instead of a user-picked target. `direction` is the SAME direction the
+  // caller was already pursuing ('back' for the bottom edge, 'forward' for
+  // the top one) — landing edge mirrors handleJump's own rule (forward
+  // lands looking from the bottom, i.e. the 'beginning' jump's edge; every
+  // other direction lands from the top).
+  const reposition = useCallback(
+    (direction: Direction, tsMs: number) => {
+      storeRef.current.clear()
+      pendingAnchorRef.current = null
+      bufferRef.current = []
+      bufferReceivedRef.current = 0
+      bufferOverflowRef.current = false
+      // A fresh window can't have a stale drop anymore — a seam is
+      // unconstructible in a window that was just cleared and reloaded.
+      topDroppedRef.current = false
+      bottomDroppedRef.current = false
+      reset()
+      pendingScrollEdgeRef.current = direction === 'forward' ? 'bottom' : 'top'
+      anchorContextRef.current = 'default'
+      pauseReasonRef.current = 'auto'
+      setAttached(false)
+      runPage(direction, withFilter({ direction, limit: PAGE_LIMIT, anchor: 'timestamp', ts_ms: tsMs }), {
+        resetIteration: true,
+      })
+      bump()
+    },
+    [reset, runPage, withFilter, setAttached],
+  )
+
+  // Review round 1 (F1, High): the drop-flag gate belongs on every
+  // CURSOR-FOLLOWER, not just the scroll sentinels — loadOlder/loadNewer,
+  // continueScan (both the sentinel-driven and the button-driven call), and
+  // the empty-page auto-continue effect all follow cursors.back/
+  // cursors.forward directly, and each one is an independent path that can
+  // reach a drop-invalidated cursor (e.g. a live drop landing mid-scan,
+  // or a pill-flush drop landing while a page is already in flight — the
+  // sentinel that kicked off that in-flight page has no way to gate a
+  // decision that hasn't happened yet). Centralizing the check+reposition
+  // here means every follower gets it by construction rather than by
+  // remembering to duplicate it. Returns true when it took the reposition
+  // branch (caller must treat this as "handled, do not also follow the
+  // cursor"); false means the edge is clean and the caller should proceed
+  // normally. Reads the store directly (not the render-time `rows` const)
+  // so it's safe to call from the auto-continue effect too, whose closure
+  // may be older than the current render.
+  const repositionIfDropped = useCallback(
+    (direction: Direction): boolean => {
+      const dropped = direction === 'back' ? bottomDroppedRef.current : topDroppedRef.current
+      if (!dropped) return false
+      const ts = findAnchorTs(storeRef.current.rows(), direction === 'back' ? 'bottom' : 'top')
+      if (ts !== null) reposition(direction, ts)
+      // Pathological (no row in the window carries a timestamp): stay
+      // inert rather than guess an anchor OR fall back to the stale
+      // cursor — either would be dishonest, unlike doing nothing.
+      return true
+    },
+    [reposition],
+  )
 
   // The anchor a fresh (non-cursor) page request starts from, given the
   // current anchor context — see anchorContextRef.
@@ -414,6 +482,18 @@ export function Timeline({
       }
       return
     }
+    // F1 (review round 1): this loop follows cursors[direction] directly,
+    // same hazard as loadOlder/loadNewer/continueScan — a drop can land
+    // WHILE this page was in flight (e.g. a pill flush mid-scroll-load; see
+    // the auto-continue drop test), invalidating the very cursor this page
+    // just returned. Chosen variant: trigger the reposition directly rather
+    // than merely stopping and waiting for a later user gesture — it fixes
+    // the seam proactively, and gesture totals stay honest for free: a
+    // reposition's own runPage call always passes resetIteration:true with
+    // no resetGesture override, so gestureScanned/MatchesRef reset to 0
+    // (same as every other genuinely-new-gesture call site) instead of
+    // carrying a stale total into a window that didn't earn it.
+    if (repositionIfDropped(direction)) return
     if (iterationRef.current >= ITERATION_CAP) {
       setContinueDirection(direction)
       return
@@ -636,45 +716,18 @@ export function Timeline({
     bump()
   }
 
-  // Window cap honesty (design spec v1.4, owner ruling 2026-08-15): pushing
-  // past a dropped edge repositions instead of accreting against a stale
-  // cursor — a reposition IS a jump (same clear/reset/detach machinery as
-  // handleJump above), just anchored at the edge row's own timestamp
-  // instead of a user-picked target. `direction` is the SAME direction the
-  // sentinel that triggered this was already pursuing ('back' for the
-  // bottom sentinel, 'forward' for the top one) — landing edge mirrors
-  // handleJump's own rule (forward lands looking from the bottom, i.e. the
-  // 'beginning' jump's edge; every other direction lands from the top).
-  const reposition = useCallback(
-    (direction: Direction, tsMs: number) => {
-      storeRef.current.clear()
-      pendingAnchorRef.current = null
-      bufferRef.current = []
-      bufferReceivedRef.current = 0
-      bufferOverflowRef.current = false
-      // A fresh window can't have a stale drop anymore — a seam is
-      // unconstructible in a window that was just cleared and reloaded.
-      topDroppedRef.current = false
-      bottomDroppedRef.current = false
-      reset()
-      pendingScrollEdgeRef.current = direction === 'forward' ? 'bottom' : 'top'
-      anchorContextRef.current = 'default'
-      pauseReasonRef.current = 'auto'
-      setAttached(false)
-      runPage(direction, withFilter({ direction, limit: PAGE_LIMIT, anchor: 'timestamp', ts_ms: tsMs }), {
-        resetIteration: true,
-      })
-      bump()
-    },
-    [reset, runPage, withFilter, setAttached],
-  )
-
+  // Scroll is the only pagination affordance (no load-older/load-newer
+  // buttons): each checks repositionIfDropped FIRST (F1, review round 1) —
+  // a drop at this edge means the cursor below is stale, and following it
+  // would recreate exactly the false seam the drop-detach exists to avoid.
   const loadOlder = () => {
-    if (cursors.back === null) return
+    if (repositionIfDropped('back')) return
+    if (cursors.back === null || state.exhausted.back) return
     runPage('back', withFilter({ direction: 'back', limit: PAGE_LIMIT, cursor: cursors.back }), { resetIteration: true })
   }
   const loadNewer = () => {
-    if (cursors.forward === null) return
+    if (repositionIfDropped('forward')) return
+    if (cursors.forward === null || state.exhausted.forward) return
     runPage('forward', withFilter({ direction: 'forward', limit: PAGE_LIMIT, cursor: cursors.forward }), { resetIteration: true })
   }
 
@@ -691,12 +744,13 @@ export function Timeline({
   // Also the scroll-triggered pagination sentinels (spec: "scroll down ->
   // next 100 older") — scroll is the ONLY pagination affordance, there is no
   // load-older/load-newer button: a bottom-sentinel reaching the last row
-  // loads the next older page automatically, guarded by a non-null back
-  // cursor, not already exhausted, not already loading (`loadOlder`/
-  // `loadNewer` already no-op on a null cursor, so the loading guard is the
-  // only one that needs restating here). The symmetric top edge only ever
-  // matters once a beginning-jump has opened a forward cursor — reusing the
-  // same top-pin check that already drives live-pause auto-resume.
+  // loads the next older page automatically, guarded by not already loading
+  // (`loadOlder`/`loadNewer` themselves no-op on a null cursor, an exhausted
+  // direction, or — window cap honesty, F1 — a dropped edge, reposition-ing
+  // instead; the loading guard is the only one that needs restating here).
+  // The symmetric top edge only ever matters once a beginning-jump has
+  // opened a forward cursor — reusing the same top-pin check that already
+  // drives live-pause auto-resume.
   //
   // When the continue affordance (I2's partial-match budget stop, or the
   // iteration-cap stop) is showing for a direction, the sentinel must drive
@@ -712,22 +766,12 @@ export function Timeline({
         pauseReasonRef.current = 'none'
         bump()
       }
+      // Window cap honesty: the drop-flag gate lives in loadNewer/
+      // continueScan themselves now (see repositionIfDropped) — the
+      // sentinel just decides WHICH follower to call, same as before.
       if (!state.loading) {
-        // Window cap honesty: a top drop already invalidated the forward
-        // cursor (it describes rows this window slid past) — following it
-        // would recreate exactly the false seam the drop-detach exists to
-        // avoid. Reposition forward from the current top row's own
-        // timestamp instead (only reachable while detached, since any top
-        // drop detaches immediately).
-        if (topDroppedRef.current) {
-          const ts = findAnchorTs(rows, 'top')
-          if (ts !== null) reposition('forward', ts)
-          // else: no row in the window carries a timestamp — pathological;
-          // stay inert rather than guess an anchor.
-        } else if (cursors.forward !== null && !state.exhausted.forward) {
-          if (continueDirection === 'forward') continueScan()
-          else loadNewer()
-        }
+        if (continueDirection === 'forward') continueScan()
+        else loadNewer()
       }
     } else if (pauseReasonRef.current === 'none') {
       pauseReasonRef.current = 'auto'
@@ -735,16 +779,8 @@ export function Timeline({
     }
     const nearBottom = scrollHeight - (scrollTop + clientHeight) < BOTTOM_PIN_THRESHOLD
     if (nearBottom && !state.loading) {
-      // Symmetric case: a bottom drop invalidated the back cursor —
-      // reposition backward from the current bottom row's timestamp
-      // instead of following it into a false seam.
-      if (bottomDroppedRef.current) {
-        const ts = findAnchorTs(rows, 'bottom')
-        if (ts !== null) reposition('back', ts)
-      } else if (cursors.back !== null && !state.exhausted.back) {
-        if (continueDirection === 'back') continueScan()
-        else loadOlder()
-      }
+      if (continueDirection === 'back') continueScan()
+      else loadOlder()
     }
   }
 
@@ -760,6 +796,12 @@ export function Timeline({
 
   const continueScan = () => {
     if (continueDirection === null) return
+    // F1 (review round 1): reachable from BOTH the scroll sentinel above
+    // and the standalone continue-scan button in the JSX below — a drop can
+    // land while the button is showing (the reviewer's exact repro: a
+    // filtered scan stops, live traffic drops the edge, THEN the button is
+    // clicked), so the gate has to live here, not just on the sentinel path.
+    if (repositionIfDropped(continueDirection)) return
     const cursor = cursors[continueDirection]
     if (cursor === null) return
     // resetGesture: false — continuing past the cap is the SAME gesture,
@@ -852,7 +894,14 @@ export function Timeline({
           {continueScanLabel}
         </button>
       ) : (
-        state.exhausted.back && <p className="py-2 text-center text-xs text-zinc-400">— beginning of topic —</p>
+        // F2 (review round 1): the caption claims the window's oldest row
+        // IS the topic's first message — a bottom drop makes that false
+        // even while state.exhausted.back is still (stale) true from
+        // before the drop, so it must not render until a reposition
+        // (which resets bottomDroppedRef) genuinely re-earns exhaustion.
+        state.exhausted.back && !bottomDroppedRef.current && (
+          <p className="py-2 text-center text-xs text-zinc-400">— beginning of topic —</p>
+        )
       )}
     </div>
   )

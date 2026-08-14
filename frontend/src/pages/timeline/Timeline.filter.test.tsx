@@ -248,6 +248,43 @@ describe('Timeline filter box', () => {
     expect(btn).toHaveTextContent('scanned 5000 records · 2 matches — continue')
   })
 
+  // F1 regression (window-cap-honesty review round 1, trace a): a filtered
+  // scan can stop with the continue-scan button showing, then live traffic
+  // (which still passes the filter predicate) drops the store's oldest row
+  // off the bottom before the button is ever clicked — the button's cursor
+  // now points at a range the window slid past. Clicking it must reposition
+  // by timestamp, never follow that stale cursor into an invisible gap.
+  it('a bottom drop while the continue-scan button is showing repositions on click instead of following the stale cursor', async () => {
+    const tail = mockTail()
+    render(<Timeline cluster="prod" topic="orders" windowCap={3} />)
+    await emit(0, 'page_end', { cursor: null, exhausted: true })
+
+    typeFilter('value:needle')
+    await settle()
+    const idx = FakeEventSource.instances.length - 1
+    await emit(idx, 'match', mk(1))
+    await emit(idx, 'match', mk(2))
+    await emit(idx, 'progress', { scanned: 5000, matches: 2, budget: 5000 })
+    await emit(idx, 'page_end', { cursor: 'c1', exhausted: false })
+    expect(screen.getByTestId('continue-scan')).toBeInTheDocument()
+
+    // Live traffic (must pass the "value:needle" predicate to merge at all)
+    // pushes the store past cap(3): the oldest matched row (p0·1) drops off
+    // the bottom — the continue button's cursor ('c1') now points past it.
+    await act(async () => {
+      tail.handlers().onMessage(mk(3, { value: { encoding: 'utf8', text: 'needle-3', schema_id: null, error: null } }))
+    })
+    await act(async () => {
+      tail.handlers().onMessage(mk(4, { value: { encoding: 'utf8', text: 'needle-4', schema_id: null, error: null } }))
+    })
+    expect(screen.queryByText('p0·1')).not.toBeInTheDocument()
+
+    fireEvent.click(screen.getByTestId('continue-scan'))
+    const req = FakeEventSource.instances.at(-1)!.url
+    expect(req).toContain('anchor=timestamp')
+    expect(req).not.toContain('cursor=')
+  })
+
   it('clearing the filter (×) reloads unfiltered', async () => {
     mockTail()
     await mountAndSettleInitial()

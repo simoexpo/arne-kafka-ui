@@ -142,6 +142,25 @@ function scrollToTop() {
   fireEvent.scroll(screen.getByTestId('timeline-scroll'), { target: { scrollTop: 0 } })
 }
 
+// Same "top" gesture as scrollToTop, but with scrollHeight/clientHeight
+// stubbed far apart so the BOTTOM sentinel's own arithmetic reads a real,
+// non-zero gap (jsdom's default 0/0 would otherwise make `nearBottom` true
+// too — see BOTTOM_PIN_THRESHOLD — firing an unrelated bottom-sentinel
+// request in the same scroll event). Needed whenever a test's back cursor
+// is still live and not exhausted at the moment of the top gesture (the
+// plain `scrollToTop` above only works in scenarios where the back cursor
+// is already null/exhausted, so the bottom sentinel is a guaranteed no-op).
+function scrollToTopFarFromBottom() {
+  const restoreScrollHeight = stubScrollHeight(2000)
+  const restoreClientHeight = stubClientHeight(600)
+  try {
+    fireEvent.scroll(screen.getByTestId('timeline-scroll'), { target: { scrollTop: 0 } })
+  } finally {
+    restoreScrollHeight()
+    restoreClientHeight()
+  }
+}
+
 describe('Timeline', () => {
   it('loads the latest page on mount and renders rows in store order', async () => {
     mockTail()
@@ -963,6 +982,7 @@ describe('Timeline', () => {
   describe('window cap honesty', () => {
     it('top drops while attached detach the window', async () => {
       const tail = mockTail()
+      const user = userEvent.setup()
       render(<Timeline cluster="prod" topic="orders" windowCap={3} />)
       await emit(0, 'match', mk(9))
       await emit(0, 'match', mk(8))
@@ -972,6 +992,12 @@ describe('Timeline', () => {
 
       // A back page adds 2 older rows on top of the 2 already loaded — 4
       // rows against a cap of 3, so the newest row (p0·9) drops off the top.
+      // NOTE: scrollToBottom() itself scrolls off the top (scrollTop: 200),
+      // which independently sets pauseReason to 'auto' — a real side effect
+      // of scrolling, NOT of the drop. This means `paused` alone (and thus
+      // the toggle's aria-pressed) is already true before the drop even
+      // happens, so it can't be used below to prove detach actually fired;
+      // see the pill-based assertions instead.
       scrollToBottom()
       await emit(1, 'match', mk(7))
       await emit(1, 'match', mk(6))
@@ -980,16 +1006,27 @@ describe('Timeline', () => {
       expect(screen.queryByText('p0·9')).not.toBeInTheDocument() // dropped off the top
       expect(screen.getByText('p0·8')).toBeInTheDocument()
 
-      // Top drop -> detach, even though nothing told this window's live
-      // tail to stop: the toggle flips to its paused/amber state.
-      const toggle = screen.getByTestId('play-pause-toggle')
-      expect(toggle).toHaveAttribute('aria-pressed', 'true')
-
       // Detached: a live tail message buffers into the pill instead of
       // merging — a flush could otherwise merge against the truncated top.
       await act(async () => tail.handlers().onMessage(mk(50)))
       expect(screen.queryByText('p0·50')).not.toBeInTheDocument()
       expect(screen.getByText('▲ 1 new')).toBeInTheDocument()
+
+      // Pin the DETACH itself, not merely "paused" (which the scroll above
+      // already produces on its own via auto-pause, attached or not): the
+      // pill's aria-label only reads this way while attached=false — an
+      // attached-but-auto-paused window's pill instead offers "flush
+      // buffered live messages" (see LivePill). Clicking it must issue a
+      // brand new jump-to-now request — an attached pill click flushes in
+      // place and never issues any request at all, so seeing one here is
+      // conclusive proof the window really detached.
+      expect(screen.getByTestId('live-pill')).toHaveAttribute('aria-label', 'jump to now and show new messages')
+      const requestsBefore = FakeEventSource.instances.length
+      await user.click(screen.getByTestId('live-pill'))
+      expect(FakeEventSource.instances.length).toBe(requestsBefore + 1)
+      expect(FakeEventSource.instances.at(-1)!.url).toBe(
+        '/api/clusters/prod/topics/orders/timeline?direction=back&limit=100&anchor=latest',
+      )
     })
 
     it('bottom drops invalidate the back cursor: next bottom scroll repositions by timestamp', async () => {
@@ -1052,6 +1089,110 @@ describe('Timeline', () => {
       expect(FakeEventSource.instances[nextIdx].url).toBe(
         '/api/clusters/prod/topics/orders/timeline?direction=back&limit=100&cursor=c9',
       )
+    })
+
+    // Coverage gap: the bottom-drop reposition test above only exercises
+    // 'back' direction. The forward mirror ('back'-origin top drop, then a
+    // top gesture) must anchor forward from the top row's own timestamp —
+    // not follow the (in this exact scenario, never-yet-opened) forward
+    // cursor.
+    it('top drops reposition forward from the top row timestamp on a top gesture', async () => {
+      mockTail()
+      render(<Timeline cluster="prod" topic="orders" windowCap={3} />)
+      await emit(0, 'match', mk(9))
+      await emit(0, 'match', mk(8))
+      await emit(0, 'page_end', { cursor: 'c1', exhausted: false })
+
+      // Same top-drop setup as above: back page pushes 4 rows against
+      // cap(3), the newest (p0·9) drops off the top -> detach.
+      scrollToBottom()
+      await emit(1, 'match', mk(7))
+      await emit(1, 'match', mk(6))
+      await emit(1, 'page_end', { cursor: 'c2', exhausted: false })
+      expect(screen.queryByText('p0·9')).not.toBeInTheDocument()
+
+      // The back cursor ('c2') is still live and not exhausted here — use
+      // the far-from-bottom top gesture so the bottom sentinel doesn't also
+      // fire in the same scroll event (see the helper's own comment).
+      scrollToTopFarFromBottom()
+      const req = FakeEventSource.instances.at(-1)!.url
+      // Current top row after the drop is p0·8 (ts 1008) — anchors forward
+      // from there, never the (null) forward cursor.
+      expect(req).toBe(
+        '/api/clusters/prod/topics/orders/timeline?direction=forward&limit=100&anchor=timestamp&ts_ms=1008',
+      )
+      expect(req).not.toContain('cursor=')
+    })
+
+    // F2: the caption claims the window's oldest row IS the topic's first
+    // message — a bottom drop makes that false even while state.exhausted
+    // .back is still (stale) true, so it must disappear until a fresh
+    // reposition genuinely re-earns exhaustion.
+    it('a bottom drop hides the beginning-of-topic caption until a reposition re-earns it', async () => {
+      const tail = mockTail()
+      render(<Timeline cluster="prod" topic="orders" windowCap={3} />)
+      await emit(0, 'match', mk(11))
+      await emit(0, 'match', mk(10))
+      await emit(0, 'page_end', { cursor: null, exhausted: true }) // genuinely exhausted
+      expect(screen.getByText('— beginning of topic —')).toBeInTheDocument()
+
+      // Live traffic pushes the store past cap(3): the oldest row drops off
+      // the bottom. The caption's claim is now false, even though
+      // state.exhausted.back is still (stale) true.
+      await act(async () => tail.handlers().onMessage(mk(12)))
+      await act(async () => tail.handlers().onMessage(mk(13)))
+      expect(screen.queryByText('— beginning of topic —')).not.toBeInTheDocument()
+
+      // Bottom-scroll repositions (proving the drop flag gates ahead of the
+      // stale "exhausted, null cursor -> no-op" path too).
+      scrollToBottom()
+      const idx = FakeEventSource.instances.length - 1
+      expect(FakeEventSource.instances[idx].url).toContain('anchor=timestamp')
+
+      await emit(idx, 'match', mk(20))
+      await emit(idx, 'page_end', { cursor: null, exhausted: true }) // re-reaches the true edge
+      expect(screen.getByText('— beginning of topic —')).toBeInTheDocument()
+    })
+
+    // F1 regression (trace c from review round 1): a bottom drop can land
+    // WHILE a page is already in flight (e.g. a pill-flush mid-scroll-load),
+    // not just from the sentinel's own perspective — the empty-page
+    // auto-continue effect follows cursors.back/forward directly and must
+    // check the drop flag itself, not rely on the sentinel having done so.
+    it('auto-continue does not follow a cursor invalidated by a mid-flight pill-flush drop', async () => {
+      const tail = mockTail()
+      const user = userEvent.setup()
+      render(<Timeline cluster="prod" topic="orders" windowCap={3} />)
+      await emit(0, 'match', mk(2))
+      await emit(0, 'match', mk(1))
+      await emit(0, 'page_end', { cursor: 'c1', exhausted: false })
+
+      // Explicit pause: subsequent live messages buffer instead of merging.
+      await user.click(screen.getByTestId('play-pause-toggle'))
+
+      // Start a load-older page and leave it in flight.
+      scrollToBottom()
+      const inFlightIdx = FakeEventSource.instances.length - 1
+      expect(FakeEventSource.instances[inFlightIdx].url).toContain('cursor=c1')
+
+      // While that page is still loading, live messages buffer...
+      await act(async () => tail.handlers().onMessage(mk(3)))
+      await act(async () => tail.handlers().onMessage(mk(4)))
+      expect(screen.getByText('▲ 2 new')).toBeInTheDocument()
+
+      // ...and a pill click mid-flight flushes them into the store, pushing
+      // it past cap(3): the oldest row (p0·1) drops off the bottom.
+      await user.click(screen.getByTestId('live-pill'))
+      expect(screen.queryByText('p0·1')).not.toBeInTheDocument()
+
+      // The in-flight page now ends with zero matches, a non-null cursor,
+      // and not exhausted — the empty-page auto-continue contract. It must
+      // NOT silently follow that cursor (it points past the just-dropped
+      // range); it must reposition instead.
+      await emit(inFlightIdx, 'page_end', { cursor: 'c2', exhausted: false })
+      const req = FakeEventSource.instances.at(-1)!.url
+      expect(req).toContain('anchor=timestamp')
+      expect(req).not.toContain('cursor=')
     })
   })
 })
