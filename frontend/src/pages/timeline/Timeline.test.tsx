@@ -883,5 +883,43 @@ describe('Timeline', () => {
       expect(screen.queryByText('● live')).not.toBeInTheDocument()
       expect(container.querySelector('[data-staleness]')).not.toBeNull()
     })
+
+    // Design spec v1.3 ("the detached chip is NEUTRAL"): a historical page
+    // is immutable and cannot go stale, so the chip shown while DETACHED
+    // must never trip the aging/alarm colors — regardless of how old the
+    // loaded window's newest row actually is.
+    it('detached header: the staleness chip is neutral, never aging/alarm colors', async () => {
+      mockTail()
+      const user = userEvent.setup()
+      const { container } = render(<Timeline cluster="prod" topic="orders" />)
+      await emit(0, 'match', mk(9))
+      await emit(0, 'page_end', { cursor: 'c1', exhausted: false })
+
+      await user.click(screen.getByTestId('jump-beginning'))
+      await emit(1, 'match', mk(2))
+      await emit(1, 'page_end', { cursor: 'c9', exhausted: false })
+
+      const chip = container.querySelector('[data-staleness]')
+      expect(chip).toHaveAttribute('data-staleness', 'neutral')
+    })
+
+    // Contrast case: the live stream dying while still ATTACHED is a
+    // genuinely honest alarm (new data really is missing) — that chip must
+    // keep today's aging/alarm tiers, not go neutral.
+    it('the !live-while-attached chip keeps its aging/alarm tiers (not neutral)', async () => {
+      const tail = mockTail()
+      const { container } = render(<Timeline cluster="prod" topic="orders" />)
+      await emit(0, 'match', mk(9))
+      await emit(0, 'page_end', { cursor: null, exhausted: true })
+      await act(async () => {
+        tail.handlers().onError({ code: 'kafka_error', message: 'broker gone', cluster: 'prod', retriable: true })
+      })
+      // mk(9)'s timestamp_ms (1009) is ancient next to real wall-clock time
+      // (this chip gets no `now` override, unlike the unit tests above), so
+      // it genuinely reads as 'stale' — the point is that it's a real
+      // age-based tier, never 'neutral'.
+      const chip = container.querySelector('[data-staleness]')
+      expect(chip).toHaveAttribute('data-staleness', 'stale')
+    })
   })
 })

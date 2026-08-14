@@ -637,10 +637,17 @@ export function Timeline({ cluster, topic }: { cluster: string; topic: string })
               {!paused && <span className="animate-pulse text-emerald-500">● live</span>}
               <PlayPauseToggle paused={paused} onClick={handlePlayPauseToggle} />
             </>
+          ) : !attached ? (
+            // Detached (there is nothing live to pause here — the pill is
+            // the affordance back to now): design spec v1.3 — the chip is
+            // NEUTRAL. A historical window is immutable and cannot go
+            // stale; this chip communicates position in history, not
+            // freshness, so it never trips the aging/alarm colors no
+            // matter how old the newest loaded row is.
+            <StalenessChip asOf={rows[0]?.timestamp_ms ?? null} failed={false} neutral />
           ) : (
-            // Detached (there is nothing live to pause here — the pill is the
-            // affordance back to now) or live has stopped entirely: same
-            // staleness chip, keyed to the newest loaded row, either way.
+            // Attached but live has died: this alarm is honest (new data
+            // is genuinely missing) — keep today's aging/alarm tiers.
             <StalenessChip asOf={rows[0]?.timestamp_ms ?? null} failed={false} />
           )}
         </div>
