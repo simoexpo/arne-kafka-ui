@@ -580,8 +580,10 @@ describe('Timeline', () => {
       // Jump to beginning: the old back cursor ('c2') must NOT survive. Note:
       // a bottom-scroll can't even be attempted in this exact window — the
       // store is cleared synchronously on click, so Panel shows a loading
-      // skeleton (no `timeline-scroll` element) until the new page lands, a
-      // real user couldn't scroll here either. The request-level proof that
+      // skeleton (no `timeline-scroll` element) at least until the page's
+      // first flush (a page yielding ≥25 matches remounts the list mid-load;
+      // even then both sentinel guards block, because reset() nulled both
+      // cursors before the request started). The request-level proof that
       // the stale cursor is really gone (not just visually hidden) comes
       // right below, the moment the list is scrollable again.
       await user.click(screen.getByTestId('jump-beginning'))
