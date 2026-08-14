@@ -5,17 +5,17 @@ import { LivePill, PlayPauseToggle } from './LivePill'
 
 describe('LivePill', () => {
   it('renders nothing when the buffer is empty', () => {
-    const { container } = render(<LivePill count={0} capped={false} onClick={vi.fn()} />)
+    const { container } = render(<LivePill count={0} capped={false} attached onClick={vi.fn()} />)
     expect(container).toBeEmptyDOMElement()
   })
 
   it('shows the buffered count', () => {
-    render(<LivePill count={7} capped={false} onClick={vi.fn()} />)
+    render(<LivePill count={7} capped={false} attached onClick={vi.fn()} />)
     expect(screen.getByText('▲ 7 new')).toBeInTheDocument()
   })
 
   it('keeps counting past the buffer cap and appends "· older dropped" once overflowed, rather than freezing at a fixed string', () => {
-    render(<LivePill count={612} capped={true} onClick={vi.fn()} />)
+    render(<LivePill count={612} capped={true} attached onClick={vi.fn()} />)
     expect(screen.getByText('▲ 612 new · older dropped')).toBeInTheDocument()
     expect(screen.queryByText('▲ 612 new')).not.toBeInTheDocument() // the suffix must be present, not a bare count
   })
@@ -23,10 +23,17 @@ describe('LivePill', () => {
   it('calls onClick when clicked', async () => {
     const user = userEvent.setup()
     const onClick = vi.fn()
-    render(<LivePill count={3} capped={false} onClick={onClick} />)
+    render(<LivePill count={3} capped={false} attached onClick={onClick} />)
     await user.click(screen.getByTestId('live-pill'))
     expect(onClick).toHaveBeenCalledTimes(1)
   })
+  it('labels the click by what it will do: flush when attached, jump to now when detached', () => {
+    const { rerender } = render(<LivePill count={2} capped={false} attached onClick={vi.fn()} />)
+    expect(screen.getByTestId('live-pill')).toHaveAttribute('aria-label', 'flush buffered live messages')
+    rerender(<LivePill count={2} capped={false} attached={false} onClick={vi.fn()} />)
+    expect(screen.getByTestId('live-pill')).toHaveAttribute('aria-label', 'jump to now and show new messages')
+  })
+
 })
 
 describe('PlayPauseToggle', () => {

@@ -5,7 +5,7 @@
 // or resumes explicitly. Same visual family as AppShell's ThemeToggle: a
 // rounded pill housing both icon states, the active one highlighted.
 
-export function LivePill({ count, capped, onClick }: { count: number; capped: boolean; onClick: () => void }) {
+export function LivePill({ count, capped, attached, onClick }: { count: number; capped: boolean; attached: boolean; onClick: () => void }) {
   if (count === 0) return null
   // `count` is the TOTAL received while paused, not the (500-)capped buffer
   // size — it keeps counting honestly even past the cap. `capped` only
@@ -16,7 +16,10 @@ export function LivePill({ count, capped, onClick }: { count: number; capped: bo
     <button
       type="button"
       data-testid="live-pill"
-      aria-label="flush buffered live messages"
+      // Attached: clicking flushes the buffer in place. Detached: clicking
+      // jumps to now, abandoning the historical reading position — the
+      // label must say which one the click will actually do.
+      aria-label={attached ? 'flush buffered live messages' : 'jump to now and show new messages'}
       onClick={onClick}
       className="rounded-full border border-emerald-400 px-2 py-0.5 text-xs font-medium text-emerald-600 dark:border-emerald-600 dark:text-emerald-400"
     >

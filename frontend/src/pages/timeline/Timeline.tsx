@@ -361,9 +361,10 @@ export function Timeline({ cluster, topic }: { cluster: string; topic: string })
       onMessage: (m) => {
         if (!predicateRef.current(m)) return
         // While detached, live messages ALWAYS buffer — merging them would
-        // recreate the false seam a historical window exists to avoid, even
-        // if pauseReasonRef happens to read 'none' (it never should while
-        // detached, but attached is the authoritative gate here).
+        // recreate the false seam a historical window exists to avoid.
+        // pauseReasonRef CAN legitimately read 'none' while detached (e.g.
+        // re-attach set it, then a filter settle from the 'beginning'
+        // context detached again): attached is the authoritative gate.
         if (attachedRef.current && pauseReasonRef.current === 'none') {
           storeRef.current.insert([m], 'live')
         } else {
@@ -586,7 +587,7 @@ export function Timeline({ cluster, topic }: { cluster: string; topic: string })
       <div className="flex items-center justify-between">
         <h2 className="text-sm font-medium text-zinc-500 dark:text-zinc-400">{rows.length} messages</h2>
         <div className="flex items-center gap-2">
-          <LivePill count={bufferReceivedRef.current} capped={bufferOverflowRef.current} onClick={handlePillClick} />
+          <LivePill count={bufferReceivedRef.current} capped={bufferOverflowRef.current} attached={attached} onClick={handlePillClick} />
           {live && attached ? (
             // Attached: the normal live indicator/toggle cluster.
             <>
