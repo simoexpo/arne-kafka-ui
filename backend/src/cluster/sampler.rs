@@ -60,20 +60,31 @@ pub fn spawn_sampler(handle: Arc<ClusterHandle>, interval: Duration) -> tokio::t
     tokio::spawn(async move {
         loop {
             let h = handle.clone();
-            let _ = tokio::task::spawn_blocking(move || sample_once(&h)).await;
+            let _ = tokio::task::spawn_blocking(move || sample_once(&h, ADMIN_TIMEOUT)).await;
             tokio::time::sleep(interval).await;
         }
     })
 }
 
-fn sample_once(handle: &ClusterHandle) {
+fn sample_once(handle: &ClusterHandle, timeout: Duration) {
     let now = crate::util::now_ms();
-    let Ok(md) = handle.consumer().fetch_metadata(None, ADMIN_TIMEOUT) else { return };
+    let md = match handle.consumer().fetch_metadata(None, timeout) {
+        Ok(md) => {
+            handle.reset_shared_failures();
+            md
+        }
+        Err(_) => {
+            // headless heal: without this, a wedged client starves the
+            // sampler forever until a browser opens /api/clusters
+            handle.note_shared_failure_and_maybe_recover();
+            return;
+        }
+    };
     for t in md.topics() {
         let mut total = 0i64;
         let mut complete = true;
         for p in t.partitions() {
-            match handle.consumer().fetch_watermarks(t.name(), p.id(), ADMIN_TIMEOUT) {
+            match handle.consumer().fetch_watermarks(t.name(), p.id(), timeout) {
                 Ok((_, hi)) => total += hi,
                 Err(_) => { complete = false; break; }
             }
@@ -125,5 +136,22 @@ mod tests {
         let s = SamplerStore::new(10);
         assert!(s.rate_points("nope").is_empty());
         assert_eq!(s.as_of("nope"), None);
+    }
+
+    #[test]
+    fn failed_sample_feeds_the_recovery_counter() {
+        use crate::config::ClusterConfig;
+        use std::time::Duration;
+
+        let cfg = ClusterConfig { name: "s".into(), bootstrap: "127.0.0.1:1".into(), sasl: None, schema_registry: None };
+        let handle = ClusterHandle::connect(cfg).expect("lazy create");
+        // short timeout keeps this fast; production passes ADMIN_TIMEOUT
+        sample_once(&handle, Duration::from_millis(300));
+        assert_eq!(handle.health_failures.load(std::sync::atomic::Ordering::SeqCst), 1);
+        // second failed sample reaches the threshold and attempts a probe
+        // (fails against the dead endpoint — honest, bounded by HEALTH_TIMEOUT)
+        sample_once(&handle, Duration::from_millis(300));
+        assert_eq!(handle.health_failures.load(std::sync::atomic::Ordering::SeqCst), 2);
+        assert!(!handle.probe_in_flight.load(std::sync::atomic::Ordering::SeqCst));
     }
 }

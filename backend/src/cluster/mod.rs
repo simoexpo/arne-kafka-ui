@@ -55,8 +55,8 @@ pub struct ClusterHandle {
     pub schema_registry: Option<Arc<SchemaRegistry>>,
     consumer: RwLock<Arc<BaseConsumer>>,
     admin: RwLock<Arc<AdminClient<DefaultClientContext>>>,
-    health_failures: AtomicU32,
-    probe_in_flight: AtomicBool,
+    pub(crate) health_failures: AtomicU32,
+    pub(crate) probe_in_flight: AtomicBool,
 }
 
 impl std::fmt::Debug for ClusterHandle {
@@ -103,8 +103,21 @@ impl ClusterHandle {
     }
 
     fn swap_clients(&self, consumer: BaseConsumer, admin: AdminClient<DefaultClientContext>) {
-        *self.consumer.write().expect("consumer lock poisoned") = Arc::new(consumer);
-        *self.admin.write().expect("admin lock poisoned") = Arc::new(admin);
+        // The two slots swap under separate locks, so a concurrent reader can
+        // briefly observe new-consumer + old-admin. Both are built from the
+        // same config; worst case is one bounded call on the outgoing client.
+        let old_consumer = std::mem::replace(
+            &mut *self.consumer.write().expect("consumer lock poisoned"),
+            Arc::new(consumer),
+        );
+        let old_admin = std::mem::replace(
+            &mut *self.admin.write().expect("admin lock poisoned"),
+            Arc::new(admin),
+        );
+        // Dropped here, after both locks are released: rd_kafka_destroy can
+        // stall, and it must never run while readers block on the lock.
+        drop(old_consumer);
+        drop(old_admin);
     }
 
     /// Test hook: rebuild the resident client pair against a different
@@ -126,14 +139,11 @@ impl ClusterHandle {
         let res = tokio::task::spawn_blocking(move || {
             match this.consumer().fetch_metadata(None, HEALTH_TIMEOUT) {
                 Ok(md) => {
-                    this.health_failures.store(0, Ordering::SeqCst);
+                    this.reset_shared_failures();
                     Ok(md.brokers().len())
                 }
                 Err(e) => {
-                    let failures = this.health_failures.fetch_add(1, Ordering::SeqCst) + 1;
-                    if failures >= RECOVERY_THRESHOLD
-                        && let Some(brokers) = this.try_recover()
-                    {
+                    if let Some(brokers) = this.note_shared_failure_and_maybe_recover() {
                         return Ok(brokers);
                     }
                     Err(e)
@@ -144,6 +154,32 @@ impl ClusterHandle {
             Ok(Ok(brokers)) => ClusterHealth { status: HealthStatus::Healthy, broker_count: Some(brokers), error: None },
             Ok(Err(e)) => ClusterHealth { status: HealthStatus::Unreachable, broker_count: None, error: Some(e.to_string()) },
             Err(e) => ClusterHealth { status: HealthStatus::Unreachable, broker_count: None, error: Some(e.to_string()) },
+        }
+    }
+
+    /// Record one failed shared-client operation; returns the new consecutive
+    /// count. Saturating: wraparound would silently skip a recovery cycle,
+    /// saturation just keeps probing at every subsequent check.
+    pub(crate) fn record_shared_failure(&self) -> u32 {
+        self.health_failures
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| Some(n.saturating_add(1)))
+            .expect("closure never returns None")
+            .saturating_add(1)
+    }
+
+    pub(crate) fn reset_shared_failures(&self) {
+        self.health_failures.store(0, Ordering::SeqCst);
+    }
+
+    /// A shared-client operation failed: count it and, at the threshold, probe
+    /// whether a freshly built client can reach the cluster — healing if so.
+    /// Returns the fresh broker count only on a real heal. Blocking (the probe
+    /// does network I/O); call only from blocking contexts.
+    pub(crate) fn note_shared_failure_and_maybe_recover(&self) -> Option<usize> {
+        if self.record_shared_failure() >= RECOVERY_THRESHOLD {
+            self.try_recover()
+        } else {
+            None
         }
     }
 
@@ -266,5 +302,33 @@ mod tests {
         assert_eq!(handle.try_recover(), None, "probe against a dead endpoint must not heal");
         assert!(!handle.probe_in_flight.load(std::sync::atomic::Ordering::SeqCst), "guard must be released after a failed probe");
         assert!(Arc::ptr_eq(&before, &handle.consumer()), "failed probe must not swap the resident client");
+    }
+
+    #[test]
+    fn failure_counter_saturates_instead_of_wrapping() {
+        let handle = ClusterHandle::connect(base("a")).expect("lazy create");
+        handle.health_failures.store(u32::MAX, std::sync::atomic::Ordering::SeqCst);
+        // would panic (debug) or wrap to 0 (release) with a plain fetch_add + 1
+        assert_eq!(handle.record_shared_failure(), u32::MAX);
+        handle.reset_shared_failures();
+        assert_eq!(handle.record_shared_failure(), 1);
+    }
+
+    #[test]
+    fn shared_failures_probe_only_at_threshold() {
+        // config points at a dead endpoint: probes can never heal, so the only
+        // observable difference between "no probe" and "failed probe" is time —
+        // and the counter/identity assertions below.
+        let handle = ClusterHandle::connect(base_with_bootstrap("127.0.0.1:1")).expect("lazy create");
+        let before = handle.consumer();
+        // below threshold: counted, no heal
+        assert_eq!(handle.note_shared_failure_and_maybe_recover(), None);
+        assert_eq!(handle.health_failures.load(std::sync::atomic::Ordering::SeqCst), 1);
+        // at threshold: probe runs (bounded by HEALTH_TIMEOUT), fails against the
+        // dead endpoint, stays honest — no swap, guard released
+        assert_eq!(handle.note_shared_failure_and_maybe_recover(), None);
+        assert_eq!(handle.health_failures.load(std::sync::atomic::Ordering::SeqCst), 2);
+        assert!(!handle.probe_in_flight.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(Arc::ptr_eq(&before, &handle.consumer()));
     }
 }
