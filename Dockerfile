@@ -5,11 +5,26 @@ RUN npm ci
 COPY frontend/ ./
 RUN npm run build
 
-FROM rust:slim-bookworm AS backend
+# cargo-chef splits the build into "compile dependencies" (cached until
+# Cargo.toml/Cargo.lock change — this is the ~13min librdkafka+openssl cmake
+# build) and "compile our crate" (~1-2min, reruns on source changes).
+FROM rust:slim-bookworm AS chef
 RUN apt-get update \
     && apt-get install -y --no-install-recommends cmake g++ make perl pkg-config libcurl4-openssl-dev \
     && rm -rf /var/lib/apt/lists/*
+RUN cargo install cargo-chef --locked
 WORKDIR /build
+
+# The planner layer reruns on any backend change, but its output (recipe.json)
+# only encodes the dependency graph — so the expensive cook layer below stays
+# cache-hit as long as the manifests are unchanged.
+FROM chef AS planner
+COPY backend/ backend/
+RUN cd backend && cargo chef prepare --recipe-path recipe.json
+
+FROM chef AS backend
+COPY --from=planner /build/backend/recipe.json backend/recipe.json
+RUN cd backend && cargo chef cook --release --recipe-path recipe.json
 COPY backend/ backend/
 COPY --from=frontend /build/frontend/dist frontend/dist
 RUN cd backend && cargo build --release
