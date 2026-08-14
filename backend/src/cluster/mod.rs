@@ -20,6 +20,7 @@ pub fn build_client_config(cfg: &ClusterConfig) -> ClientConfig {
     let mut cc = ClientConfig::new();
     cc.set("bootstrap.servers", &cfg.bootstrap);
     cc.set("allow.auto.create.topics", "false");
+    cc.set("socket.keepalive.enable", "true");
     match &cfg.sasl {
         None => { cc.set("security.protocol", "plaintext"); }
         Some(s) => {
@@ -141,5 +142,11 @@ mod tests {
         let cc = build_client_config(&cfg);
         assert_eq!(cc.get("security.protocol"), Some("sasl_plaintext"));
         assert_eq!(cc.get("sasl.mechanism"), Some("PLAIN"));
+    }
+
+    #[test]
+    fn keepalive_enabled_on_every_client() {
+        let cc = build_client_config(&base("a"));
+        assert_eq!(cc.get("socket.keepalive.enable"), Some("true"));
     }
 }
