@@ -250,6 +250,9 @@ export function Timeline({ cluster, topic }: { cluster: string; topic: string })
       predicateRef.current = parsed.predicate
       activeFilterApiRef.current = parsed.api
       storeRef.current.clear()
+      // A pending scroll-anchor capture belongs to the window being
+      // discarded — applying it to the fresh one would yank the viewport.
+      pendingAnchorRef.current = null
       bufferRef.current = []
       bufferReceivedRef.current = 0
       bufferOverflowRef.current = false
@@ -447,15 +450,18 @@ export function Timeline({ cluster, topic }: { cluster: string; topic: string })
   // recreate the false seam the historical window exists to avoid — so
   // instead the pill jumps to now (fresh latest page, scrolled to top, live
   // resumed), abandoning the historical reading position by design (an
-  // explicit click). While ATTACHED, it always flushes; it only resumes when
-  // the pause was automatic — an explicit pause stays paused (the pill just
-  // clears what had built up so far).
+  // explicit click). While ATTACHED, it flushes and scrolls to the top —
+  // the click means "show me the new messages", and flushing without
+  // moving would just shift content invisibly above the viewport. It only
+  // resumes when the pause was automatic — an explicit pause stays paused
+  // (the pill clears what had built up so far).
   const handlePillClick = () => {
     if (!attachedRef.current) {
       handleJump({ kind: 'now' })
       return
     }
     flushBuffer()
+    listRef.current?.scrollToEdge('top')
     if (pauseReasonRef.current === 'auto') pauseReasonRef.current = 'none'
     bump()
   }
@@ -485,6 +491,10 @@ export function Timeline({ cluster, topic }: { cluster: string; topic: string })
   // now, does).
   const handleJump = (target: JumpTarget) => {
     storeRef.current.clear()
+    // A pending scroll-anchor capture belongs to the window being left —
+    // never let it adjust the post-jump viewport (defense-in-depth: today
+    // capture and consumption share one commit, but that's implicit).
+    pendingAnchorRef.current = null
     bufferRef.current = []
     bufferReceivedRef.current = 0
     bufferOverflowRef.current = false

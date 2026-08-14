@@ -351,6 +351,27 @@ describe('Timeline', () => {
       expect(screen.queryByTestId('live-pill')).not.toBeInTheDocument()
     })
 
+    it('clicking the pill while attached scrolls back to the top — the click means "show me the new"', async () => {
+      const tail = mockTail()
+      const user = userEvent.setup()
+      render(<Timeline cluster="prod" topic="orders" />)
+      await settleWithOneRow()
+
+      scrollTo(100)
+      await act(async () => tail.handlers().onMessage(mk(5)))
+      expect(screen.getByText('▲ 1 new')).toBeInTheDocument()
+
+      const scroll = spyOnScrollTop()
+      try {
+        await user.click(screen.getByTestId('live-pill'))
+        // Flushing without repositioning would shift content invisibly
+        // above the viewport; the pill must land the reader at the top.
+        expect(scroll.setter).toHaveBeenCalledWith(0)
+      } finally {
+        scroll.restore()
+      }
+    })
+
     it('scrolling back to the top auto-flushes and resumes without a click', async () => {
       const tail = mockTail()
       render(<Timeline cluster="prod" topic="orders" />)
