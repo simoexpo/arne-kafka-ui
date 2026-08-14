@@ -54,7 +54,11 @@ export const MessageList = forwardRef<
       ref={parentRef}
       data-testid="timeline-scroll"
       onScroll={(e) => onScroll?.(e.currentTarget.scrollTop, e.currentTarget.scrollHeight, e.currentTarget.clientHeight)}
-      className="max-h-[32rem] overflow-auto"
+      // Fill the viewport below the tab chrome (title + tabs + timeline
+      // controls + main padding ≈ 19rem) instead of a fixed 32rem cap that
+      // stranded dead space on tall monitors; the floor keeps the list
+      // usable on short windows even if the page then scrolls a little.
+      className="max-h-[calc(100dvh-19rem)] min-h-[16rem] overflow-auto"
     >
       <div style={{ height: virtualizer.getTotalSize(), position: 'relative' }}>
         {virtualizer.getVirtualItems().map((item) => {
