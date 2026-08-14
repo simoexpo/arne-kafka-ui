@@ -334,6 +334,60 @@ fn page_made_no_progress(taken_is_empty: bool, any_incomplete_window: bool, canc
     taken_is_empty && any_incomplete_window && !cancelled
 }
 
+/// Owner's ordering ruling (spec v1.2 §Out-of-order policy): within one
+/// partition, offset order ALWAYS; across partitions, merge by timestamp
+/// (ties: smaller partition id; null ts = i64::MIN). A pure-timestamp sort
+/// would invert same-partition offset order under non-monotonic producer
+/// timestamps — this k-way merge cannot, by construction. Mirrors the
+/// frontend store's mergeRows so both sides agree on display order.
+fn chunk_display_order(matches: Vec<MessageOut>, direction: Direction) -> Vec<MessageOut> {
+    let mut by_partition: std::collections::BTreeMap<i32, Vec<MessageOut>> = std::collections::BTreeMap::new();
+    for m in matches {
+        by_partition.entry(m.partition).or_default().push(m);
+    }
+    // pop() serves each stream's next head. Back's head is the HIGHEST
+    // remaining offset — an offset-ascending vec already has it last.
+    // Forward's head is the LOWEST — reverse the ascending vec so it's last.
+    let mut streams: Vec<Vec<MessageOut>> = by_partition
+        .into_values()
+        .map(|mut v| {
+            v.sort_by_key(|m| m.offset);
+            if matches!(direction, Direction::Forward) {
+                v.reverse();
+            }
+            v
+        })
+        .collect();
+    let mut out = Vec::with_capacity(streams.iter().map(Vec::len).sum());
+    loop {
+        let mut best: Option<usize> = None;
+        for (i, s) in streams.iter().enumerate() {
+            let Some(head) = s.last() else { continue };
+            let ts = head.timestamp_ms.unwrap_or(i64::MIN);
+            let better = match best {
+                None => true,
+                Some(b) => {
+                    let best_ts = streams[b].last().unwrap().timestamp_ms.unwrap_or(i64::MIN);
+                    // Strict comparison: on ties the earlier stream (smaller
+                    // partition id, BTreeMap order) wins.
+                    match direction {
+                        Direction::Back => ts > best_ts,
+                        Direction::Forward => ts < best_ts,
+                    }
+                }
+            };
+            if better {
+                best = Some(i);
+            }
+        }
+        match best {
+            Some(i) => out.push(streams[i].pop().expect("stream with a head")),
+            None => break,
+        }
+    }
+    out
+}
+
 /// Per-partition span of one scan iteration ("chunk") once a page needs to
 /// keep looking past its first window — either because it's hunting for
 /// filter matches, or (this task's amendment) crossing a hole-dominated
@@ -471,13 +525,16 @@ fn cap_windows_to_budget(windows: Vec<PartitionRange>, budget_cap: u64) -> Vec<P
 ///    otherwise an unfiltered page could cross an unbounded hole region for
 ///    free, defeating the whole point of a *scan* budget.
 /// 5. Each chunk's matches (already ≤ remaining `limit`, already loss-free,
-///    already overlap-free) are sorted into **display** order —
-///    `(timestamp_ms, partition, offset)`, desc/asc to match `direction` —
-///    and emitted before moving to the next chunk: the merge's *selection*
-///    order can differ from display order under non-monotonic timestamps,
-///    and chunk-to-chunk the display order is only as good as each chunk's
-///    own sort — both are exactly the page-boundary "fuzz" the design doc
-///    already licenses, now also licensed *within* one request's chunks.
+///    already overlap-free) are put into **display** order by
+///    `chunk_display_order` — a k-way merge per spec v1.2's Out-of-order
+///    policy: within one partition, offset order ALWAYS; across partitions,
+///    merge by timestamp (ties: smaller partition id; null ts = i64::MIN) —
+///    and emitted before moving to the next chunk. This cannot invert a
+///    partition's own offset order the way a pure-timestamp sort could
+///    under non-monotonic producer timestamps. Chunk-to-chunk, the display
+///    order is only as good as each chunk's own merge — that's exactly the
+///    page-boundary "fuzz" the design doc already licenses, now also
+///    licensed *within* one request's chunks.
 /// 6. **Progress guarantee** (`page_made_no_progress`, narrowed by N4): a
 ///    chunk that took nothing, wasn't cancelled, and had at least one
 ///    genuinely *incomplete* window (a true short read) reports a terminal
@@ -760,18 +817,7 @@ pub fn run_page(
             chunk_index += 1;
 
             // Step 5: display order, then emit — one chunk at a time.
-            match direction {
-                Direction::Back => chunk_matches.sort_by(|a, b| {
-                    b.timestamp_ms.unwrap_or(i64::MIN).cmp(&a.timestamp_ms.unwrap_or(i64::MIN))
-                        .then(a.partition.cmp(&b.partition))
-                        .then(b.offset.cmp(&a.offset))
-                }),
-                Direction::Forward => chunk_matches.sort_by(|a, b| {
-                    a.timestamp_ms.unwrap_or(i64::MIN).cmp(&b.timestamp_ms.unwrap_or(i64::MIN))
-                        .then(a.partition.cmp(&b.partition))
-                        .then(a.offset.cmp(&b.offset))
-                }),
-            }
+            let chunk_matches = chunk_display_order(chunk_matches, direction);
             for m in chunk_matches {
                 if tx.send(TimelineEvent::Match(Box::new(m))).await.is_err() {
                     return; // client disconnected: no point sending more
@@ -925,6 +971,34 @@ mod tests {
 
     fn raw(partition: i32, offset: i64, ts: Option<i64>) -> RawRecord {
         RawRecord { partition, offset, timestamp_ms: ts, key: None, value: Some(b"x".to_vec()), headers: vec![] }
+    }
+
+    fn m(partition: i32, offset: i64, ts: Option<i64>) -> MessageOut {
+        MessageOut { partition, offset, timestamp_ms: ts, key: None, value: None, headers: vec![] }
+    }
+
+    #[test]
+    fn chunk_display_order_keeps_same_partition_offset_order_back() {
+        // p0: offset 1 ts=100, offset 2 ts=50 (producer clock jumped back)
+        // p1: offset 5 ts=80
+        let matches = vec![m(0, 1, Some(100)), m(0, 2, Some(50)), m(1, 5, Some(80))];
+        let out = chunk_display_order(matches, Direction::Back);
+        let got: Vec<(i32, i64)> = out.iter().map(|x| (x.partition, x.offset)).collect();
+        // newest-first merge: p0's head is offset 2 (ts 50), p1's head is offset 5
+        // (ts 80). Pick p1 (80), then p0 offset 2 (50), then p0 offset 1 (100).
+        // Same-partition offset order (2 before 1, descending) is preserved even
+        // though ts order says otherwise; a pure-ts sort would emit (0,1) first.
+        assert_eq!(got, vec![(1, 5), (0, 2), (0, 1)]);
+    }
+
+    #[test]
+    fn chunk_display_order_forward_and_ties() {
+        // Forward: oldest-first. Tie on ts=70 between p0 and p2 → smaller
+        // partition id wins. Null ts sorts as MIN (first, forward).
+        let matches = vec![m(2, 9, Some(70)), m(0, 3, Some(70)), m(1, 4, None), m(0, 4, Some(60))];
+        let out = chunk_display_order(matches, Direction::Forward);
+        let got: Vec<(i32, i64)> = out.iter().map(|x| (x.partition, x.offset)).collect();
+        assert_eq!(got, vec![(1, 4), (0, 3), (0, 4), (2, 9)]);
     }
 
     #[test]
