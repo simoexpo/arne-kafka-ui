@@ -163,9 +163,16 @@ export function AppShell() {
   const { pathname } = useLocation()
   const active = sectionFromPathname(pathname, cluster)
   return (
-    <div className="flex min-h-screen bg-white text-zinc-900 dark:bg-zinc-950 dark:text-zinc-100">
+    <div className="flex h-screen bg-white text-zinc-900 dark:bg-zinc-950 dark:text-zinc-100">
       {cluster && <Sidebar cluster={cluster} clusters={data?.clusters ?? []} active={active} />}
-      <main className="flex-1 p-6">
+      {/* Viewport-fixed shell (owner feedback 2026-08-15): the app itself
+          never scrolls — `main` is a bounded-height flex item (h-screen ->
+          flex stretch) with overflow-hidden, so document/body can't scroll
+          on any page. Each routed page owns its OWN scrolling region from
+          here down (a plain h-full overflow-y-auto wrapper for most pages;
+          the Messages tab instead chains flex-1 min-h-0 all the way to
+          MessageList's own scroller — see TopicDetailPage/Timeline). */}
+      <main className="flex-1 overflow-hidden p-6">
         <Outlet />
       </main>
       {cluster && <CommandPalette cluster={cluster} />}

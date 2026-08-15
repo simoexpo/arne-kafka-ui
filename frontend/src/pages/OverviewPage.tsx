@@ -22,7 +22,10 @@ export function OverviewView({ cluster }: { cluster: string }) {
     .slice(0, 10)
 
   return (
-    <div className="space-y-4">
+    // This page owns its own scrolling region (the app shell's `main` is
+    // overflow-hidden — see AppShell) so a long "Top topics" table scrolls
+    // in place instead of the whole document.
+    <div className="h-full space-y-4 overflow-y-auto">
       <div className="flex items-center gap-3">
         <h1 className="text-lg font-semibold">Overview</h1>
         <StalenessChip asOf={overview.data?.as_of ?? null} refreshing={overview.isFetching} failed={overview.isError} />

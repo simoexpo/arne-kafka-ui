@@ -89,15 +89,17 @@ export const MessageList = forwardRef<
       ref={parentRef}
       data-testid="timeline-scroll"
       onScroll={(e) => onScroll?.(e.currentTarget.scrollTop, e.currentTarget.scrollHeight, e.currentTarget.clientHeight)}
-      // Fill the viewport below the tab chrome (title + tabs + timeline
-      // controls + main padding ≈ 19rem) instead of a fixed 32rem cap that
-      // stranded dead space on tall monitors; the floor keeps the list
-      // usable on short windows even if the page then scrolls a little.
-      // overflow-anchor:none — Timeline does its own junction anchoring on
-      // forward prepends; the browser's native scroll anchoring must never
-      // compensate a second time (today the index-bearing row keys happen to
-      // defeat it, but that's incidental, not something to rely on).
-      className="max-h-[calc(100dvh-19rem)] min-h-[16rem] overflow-auto [overflow-anchor:none]"
+      // Owner feedback 2026-08-15: this is the ONLY scroller on the Messages
+      // tab now — the app shell, the page, and Timeline's own chrome are all
+      // fixed/overflow-hidden (see AppShell/TopicDetailPage/Timeline), so
+      // this container must genuinely fill whatever vertical space its flex
+      // parent hands it (flex-1 min-h-0), not estimate the chrome above it
+      // with a `calc(100dvh-...)` fudge factor. overflow-anchor:none —
+      // Timeline does its own junction anchoring on forward prepends; the
+      // browser's native scroll anchoring must never compensate a second
+      // time (today the index-bearing row keys happen to defeat it, but
+      // that's incidental, not something to rely on).
+      className="min-h-0 flex-1 overflow-auto [overflow-anchor:none]"
     >
       <div style={{ height: virtualizer.getTotalSize(), position: 'relative' }}>
         {virtualizer.getVirtualItems().map((item) => {

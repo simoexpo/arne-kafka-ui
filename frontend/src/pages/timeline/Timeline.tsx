@@ -1064,7 +1064,13 @@ export function Timeline({
     : 'scanned far, nothing found here — continue'
 
   return (
-    <div className="space-y-3">
+    // Flex column filling whatever height TopicDetailPage's tab-body slot
+    // hands it (owner feedback 2026-08-15): every row of chrome here (header,
+    // filter, jump control, captions) is fixed-size; only the Panel/
+    // MessageList slot below grows (flex-1 min-h-0), so MessageList's own
+    // internal scroller ends up the ONE scroller on this tab — see its own
+    // comment on the className it's given.
+    <div className="flex h-full flex-col gap-3">
       <div className="flex items-center justify-between">
         <h2 className="text-sm font-medium text-zinc-500 dark:text-zinc-400">{rows.length} messages</h2>
         <div className="flex items-center gap-2">
@@ -1121,7 +1127,12 @@ export function Timeline({
           {continueScanLabel}
         </button>
       )}
-      <Panel error={state.error} hasData={rows.length > 0} loading={state.loading && rows.length === 0}>
+      <Panel
+        className="flex min-h-0 flex-1 flex-col overflow-hidden"
+        error={state.error}
+        hasData={rows.length > 0}
+        loading={state.loading && rows.length === 0}
+      >
         <MessageList ref={listRef} messages={rows} onScroll={handleScroll} />
       </Panel>
       {continueDirection === 'back' ? (

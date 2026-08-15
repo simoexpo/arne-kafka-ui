@@ -24,7 +24,8 @@ export function TopicsView({ cluster }: { cluster: string }) {
   }, [topics.data, filter, showInternal])
 
   return (
-    <div className="space-y-4">
+    // Owns its own scrolling region — see OverviewPage's comment.
+    <div className="h-full space-y-4 overflow-y-auto">
       <div className="flex items-center gap-3">
         <h1 className="text-lg font-semibold">Topics</h1>
         <StalenessChip asOf={topics.data?.as_of ?? null} refreshing={topics.isFetching} failed={topics.isError} />

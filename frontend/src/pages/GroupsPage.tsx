@@ -12,7 +12,8 @@ export function GroupsView({ cluster }: { cluster: string }) {
     refetchInterval: 10_000,
   })
   return (
-    <div className="space-y-4">
+    // Owns its own scrolling region — see OverviewPage's comment.
+    <div className="h-full space-y-4 overflow-y-auto">
       <div className="flex items-center gap-3">
         <h1 className="text-lg font-semibold">Consumer groups</h1>
         <StalenessChip asOf={groups.data?.as_of ?? null} refreshing={groups.isFetching} failed={groups.isError} />

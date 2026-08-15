@@ -23,7 +23,15 @@ export function TopicDetailView({ cluster, topic }: { cluster: string; topic: st
   })
 
   return (
-    <div className="space-y-4">
+    // Flex column filling the shell's bounded height (main is
+    // overflow-hidden — see AppShell): header + tab bar are fixed-size,
+    // the tab body below is the ONE flex-1 min-h-0 slot. Non-Messages tabs
+    // get their own overflow-y-auto wrapper (plain content that can grow
+    // long — partitions/config/consumer tables); the Messages tab instead
+    // hands that slot straight to Timeline, which chains flex-1 min-h-0
+    // down to MessageList's own scroller — that scroller must be the ONLY
+    // one on this tab.
+    <div className="flex h-full flex-col gap-4">
       <div className="flex items-center gap-3">
         <h1 className="flex items-center gap-1.5 font-mono text-lg font-semibold">
           {topic}
@@ -46,42 +54,52 @@ export function TopicDetailView({ cluster, topic }: { cluster: string; topic: st
           </button>
         ))}
       </div>
-      {tab === 'Messages' && <MessagesTab cluster={cluster} topic={topic} />}
-      {tab === 'Partitions' && (
-        <Panel
-          title={`${detail.data?.partitions.length ?? 0} partitions`}
-          error={detail.error}
-          loading={detail.isPending}
-          hasData={detail.data !== undefined}
-        >
-          <table className="w-full text-left text-sm">
-            <thead className="text-xs text-zinc-500">
-              <tr><th className="py-1">id</th><th>leader</th><th>replicas</th><th>ISR</th><th>start</th><th>end</th><th>health</th></tr>
-            </thead>
-            <tbody className="font-mono">
-              {detail.data?.partitions.map((p) => (
-                <tr key={p.id} data-testid="partition-row" className="border-t border-zinc-100 dark:border-zinc-800">
-                  <td className="py-1">{p.id}</td>
-                  <td>{p.leader}</td>
-                  <td>{p.replicas.join(', ')}</td>
-                  <td>{p.isr.join(', ')}</td>
-                  <td>{p.start_offset}</td>
-                  <td>{p.end_offset}</td>
-                  <td>
-                    {p.isr.length < p.replicas.length
-                      ? <span className="text-red-600 dark:text-red-400">under-replicated</span>
-                      : <span className="text-emerald-600 dark:text-emerald-400">ok</span>}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </Panel>
-      )}
-      {tab === 'Consumers' && <ConsumersTab cluster={cluster} topic={topic} />}
-      {tab === 'Config' && (
-        <ConfigTab data={detail.data} error={detail.error} loading={detail.isPending} />
-      )}
+      <div className="min-h-0 flex-1">
+        {tab === 'Messages' && <MessagesTab cluster={cluster} topic={topic} />}
+        {tab === 'Partitions' && (
+          <div className="h-full overflow-y-auto">
+            <Panel
+              title={`${detail.data?.partitions.length ?? 0} partitions`}
+              error={detail.error}
+              loading={detail.isPending}
+              hasData={detail.data !== undefined}
+            >
+              <table className="w-full text-left text-sm">
+                <thead className="text-xs text-zinc-500">
+                  <tr><th className="py-1">id</th><th>leader</th><th>replicas</th><th>ISR</th><th>start</th><th>end</th><th>health</th></tr>
+                </thead>
+                <tbody className="font-mono">
+                  {detail.data?.partitions.map((p) => (
+                    <tr key={p.id} data-testid="partition-row" className="border-t border-zinc-100 dark:border-zinc-800">
+                      <td className="py-1">{p.id}</td>
+                      <td>{p.leader}</td>
+                      <td>{p.replicas.join(', ')}</td>
+                      <td>{p.isr.join(', ')}</td>
+                      <td>{p.start_offset}</td>
+                      <td>{p.end_offset}</td>
+                      <td>
+                        {p.isr.length < p.replicas.length
+                          ? <span className="text-red-600 dark:text-red-400">under-replicated</span>
+                          : <span className="text-emerald-600 dark:text-emerald-400">ok</span>}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </Panel>
+          </div>
+        )}
+        {tab === 'Consumers' && (
+          <div className="h-full overflow-y-auto">
+            <ConsumersTab cluster={cluster} topic={topic} />
+          </div>
+        )}
+        {tab === 'Config' && (
+          <div className="h-full overflow-y-auto">
+            <ConfigTab data={detail.data} error={detail.error} loading={detail.isPending} />
+          </div>
+        )}
+      </div>
     </div>
   )
 }

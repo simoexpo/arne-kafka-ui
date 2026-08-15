@@ -11,7 +11,8 @@ export function GroupDetailView({ cluster, group }: { cluster: string; group: st
     refetchInterval: 10_000,
   })
   return (
-    <div className="space-y-4">
+    // Owns its own scrolling region — see OverviewPage's comment.
+    <div className="h-full space-y-4 overflow-y-auto">
       <div className="flex items-center gap-3">
         <h1 className="font-mono text-lg font-semibold">{group}</h1>
         {detail.data && <span className="text-sm text-zinc-500">{detail.data.state}</span>}
