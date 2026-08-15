@@ -18,18 +18,24 @@ export function formatCount(n: number): string {
 // feedback 2026-08-15: replaces the raw "{n} messages" count, which
 // saturated — and lied — at the store's 2000-row cap). UTC, not local time
 // (matches MessageRow's own per-row `toISOString()` convention, and stays
-// deterministic regardless of the reader's or CI's timezone): same-UTC-day
-// windows show bare times; a window spanning a day boundary prefixes both
-// sides with their own date so the range is never ambiguous.
+// deterministic regardless of the reader's or CI's timezone).
+//
+// The date is NEVER omitted (owner feedback, same day: "having just the
+// time could be misleading") — a same-UTC-day window shows the shared date
+// ONCE, then bare oldest -> newest times (e.g. "2026-08-15 09:12 → 17:40
+// UTC"); a window spanning a day boundary gives each side its own full
+// date + time (e.g. "2023-12-31 23:59 → 2024-01-01 00:01 UTC"). Minute
+// precision (no seconds): this is a compact header, not a precise log —
+// matches the owner's own suggested format.
 export function formatWindowRange(oldestMs: number | null, newestMs: number | null): string {
   if (oldestMs === null || newestMs === null) return '—'
   const oldestIso = new Date(oldestMs).toISOString()
   const newestIso = new Date(newestMs).toISOString()
   const oldestDate = oldestIso.slice(0, 10)
   const newestDate = newestIso.slice(0, 10)
-  const time = (iso: string) => iso.slice(11, 19)
+  const time = (iso: string) => iso.slice(11, 16)
   return oldestDate === newestDate
-    ? `${time(oldestIso)} → ${time(newestIso)} UTC`
+    ? `${oldestDate} ${time(oldestIso)} → ${time(newestIso)} UTC`
     : `${oldestDate} ${time(oldestIso)} → ${newestDate} ${time(newestIso)} UTC`
 }
 

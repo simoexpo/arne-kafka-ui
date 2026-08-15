@@ -200,15 +200,17 @@ describe('Timeline', () => {
   // which saturates (and lies) at the store's 2000-row cap. It now shows the
   // loaded WINDOW's own time range instead — oldest (bottom row) to newest
   // (top row), straight from the store's rows(), updating as the window
-  // slides.
-  it('header shows the loaded window as a compact oldest -> newest range, not a raw count', async () => {
+  // slides. Follow-up owner feedback (same day): the date must never be
+  // omitted, even within one day ("having just the time could be
+  // misleading") — shown once, shared, when both ends fall on the same day.
+  it('header shows the loaded window as a compact oldest -> newest range with its date, not a raw count', async () => {
     mockTail()
     render(<Timeline cluster="prod" topic="orders" />)
-    await emit(0, 'match', mk(2, { timestamp_ms: 1_704_067_265_000 })) // newest (top)
-    await emit(0, 'match', mk(1, { timestamp_ms: 1_704_067_205_000 })) // oldest (bottom)
+    await emit(0, 'match', mk(2, { timestamp_ms: 1_704_067_265_000 })) // newest (top): 2024-01-01T00:01:05Z
+    await emit(0, 'match', mk(1, { timestamp_ms: 1_704_067_205_000 })) // oldest (bottom): 2024-01-01T00:00:05Z
     await emit(0, 'page_end', { cursor: cur({ 0: 1 }), exhausted: false })
 
-    expect(screen.getByTestId('window-range')).toHaveTextContent('00:00:05 → 00:01:05 UTC')
+    expect(screen.getByTestId('window-range')).toHaveTextContent('2024-01-01 00:00 → 00:01 UTC')
     expect(screen.queryByText(/^\d+ messages$/)).not.toBeInTheDocument()
   })
 

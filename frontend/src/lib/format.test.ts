@@ -26,15 +26,18 @@ describe('formatRetentionValue', () => {
 })
 
 describe('formatWindowRange', () => {
-  it('shows oldest -> newest, UTC, same-day compact (no date)', () => {
-    // 2024-01-01T00:00:00Z + 5s / + 65s
-    expect(formatWindowRange(1_704_067_205_000, 1_704_067_265_000)).toBe('00:00:05 → 00:01:05 UTC')
+  // Owner feedback 2026-08-15: "having just the time could be misleading" —
+  // the date must never be omitted entirely, even within one UTC day; when
+  // both ends share a day, show it once rather than twice.
+  it('shows the shared date once, then oldest -> newest time, when both ends fall on the same UTC day', () => {
+    // 2024-01-01T00:00:05Z .. 2024-01-01T00:01:05Z
+    expect(formatWindowRange(1_704_067_205_000, 1_704_067_265_000)).toBe('2024-01-01 00:00 → 00:01 UTC')
   })
 
-  it('prefixes both sides with their date when the window spans a UTC day boundary', () => {
+  it('gives each side its own full date + time when the window spans a UTC day boundary', () => {
     // 2023-12-31T23:59:00Z .. 2024-01-01T00:01:00Z
     expect(formatWindowRange(1_704_067_140_000, 1_704_067_260_000)).toBe(
-      '2023-12-31 23:59:00 → 2024-01-01 00:01:00 UTC',
+      '2023-12-31 23:59 → 2024-01-01 00:01 UTC',
     )
   })
 
