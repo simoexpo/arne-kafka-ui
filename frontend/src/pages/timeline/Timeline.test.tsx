@@ -1660,5 +1660,80 @@ describe('Timeline', () => {
       scrollToTopFarFromBottom()
       expect(screen.getByText('● live')).toBeInTheDocument()
     })
+
+    // Round 4 (coordinator correction of a round-3 regression): pins spec
+    // v1.6's own binding behavior — design doc "Sliding window (v1.6 —
+    // owner ruling)": "scrolling back up re-reads trimmed regions forward
+    // from the top map — seamlessly — and re-attaches when a forward page
+    // reports exhausted... Content resets ONLY on explicit navigation" —
+    // unqualified by anchor context. A round-3 "fix" mistakenly gated this
+    // off for a 'default' (opened-at-'now') window, reasoning that
+    // recovering forward content competes with the row cap against
+    // whatever a LIVE topic produced meanwhile, evicting the reader's own
+    // recent backward progress. That reasoning was wrong: the window is
+    // DESIGNED to slide — the reader moved up, so the just-vacated bottom
+    // region is exactly what should be evicted (nothing there is being
+    // read anymore), and it stays perfectly, losslessly re-fetchable via
+    // the store's own minted bottom cursor (proven byte-for-byte exact by
+    // both rounds' own investigation) — never a gap, never silently
+    // dropped data. This test pins the full oscillation the round-3 fix
+    // broke: cap-crossing trim (detach) -> top-scroll recovers forward
+    // from topMap -> its insert trims the bottom (evicting exactly what
+    // the last back page had just added) -> a further bottom-scroll
+    // re-issues precisely that back page's own original request cursor —
+    // proof the "regression" is the window sliding as specified, not data
+    // loss. (Mutation check: reinstating the round-3 gate — `if
+    // (!attachedRef.current && anchorContextRef.current.kind === 'default')
+    // return` at the top of `loadNewer` — turns this red: the top-scroll
+    // assertion below fails to find a new forward request.)
+    it('a default-context window sliding up re-covers newer rows and re-exposes the just-vacated bottom region — the oscillation is correct, never a loss', async () => {
+      mockTail()
+      render(<Timeline cluster="prod" topic="orders" windowCap={2} />)
+      await emit(0, 'match', mk(9))
+      await emit(0, 'page_end', { cursor: cur({ 0: 9 }), exhausted: false })
+
+      // First back page fills to the cap exactly — no trim yet.
+      scrollToBottom()
+      await emit(1, 'match', mk(8))
+      await emit(1, 'page_end', { cursor: cur({ 0: 8 }), exhausted: false })
+      expect(screen.getByText('p0·9')).toBeInTheDocument()
+      expect(screen.getByText('p0·8')).toBeInTheDocument()
+
+      // Second back page crosses cap(2): adds p0·7, trims the newest
+      // (p0·9) off the top -> detach. Window is now [8,7]; this page's own
+      // REQUEST cursor was 8 — the value the oscillation should return to.
+      scrollToBottom()
+      expect(FakeEventSource.instances.at(-1)!.url).toBe(url({ direction: 'back', limit: '100', cursor: cur({ 0: 8 }) }))
+      await emit(2, 'match', mk(7))
+      await emit(2, 'page_end', { cursor: cur({ 0: 7 }), exhausted: false })
+      expect(screen.queryByText('p0·9')).not.toBeInTheDocument()
+      expect(screen.getByText('p0·8')).toBeInTheDocument()
+      expect(screen.getByText('p0·7')).toBeInTheDocument()
+
+      // Slide up: a forward request minted straight from topMap — fires
+      // for a PLAIN 'default'-context detached window, exactly per spec,
+      // no anchor-context gate.
+      scrollToTopFarFromBottom()
+      expect(FakeEventSource.instances.at(-1)!.url).toBe(url({ direction: 'forward', limit: '100', cursor: cur({ 0: 9 }) }))
+
+      // Recovering p0·9 over cap(2) evicts the oldest (p0·7) — exactly the
+      // row the LAST back page had itself just added. Reports exhausted:
+      // re-attaches (spec: "re-attaches when a forward page reports
+      // exhausted").
+      const idx = FakeEventSource.instances.length - 1
+      await emit(idx, 'match', mk(9))
+      await emit(idx, 'page_end', { cursor: null, exhausted: true })
+      expect(screen.queryByText('p0·7')).not.toBeInTheDocument()
+      expect(screen.getByText('p0·9')).toBeInTheDocument()
+      expect(screen.getByText('p0·8')).toBeInTheDocument()
+      expect(screen.getByText('● live')).toBeInTheDocument() // re-attached
+
+      // The oscillation: a further bottom-scroll re-issues EXACTLY the
+      // cursor the second back page was itself fetched with (8) — the
+      // just-vacated region, legitimately re-fetchable, never a gap and
+      // never silently-lost data.
+      scrollToBottom()
+      expect(FakeEventSource.instances.at(-1)!.url).toBe(url({ direction: 'back', limit: '100', cursor: cur({ 0: 8 }) }))
+    })
   })
 })
