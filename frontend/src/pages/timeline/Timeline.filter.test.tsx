@@ -108,6 +108,17 @@ async function mountAndSettleInitial() {
   await emit(0, 'page_end', { cursor: null, exhausted: true })
 }
 
+// Total row count, read off the virtualizer's own total-size div (uniform
+// 40px rows in jsdom) — the header no longer renders a raw "{n} messages"
+// count to assert on directly (see formatWindowRange's own owner-feedback
+// comment in Timeline.tsx), so a "how many rows are visible right now" check
+// reads this instead. Mirrors the identical helper in Timeline.test.tsx.
+function totalRowsHeight(): number {
+  const scroller = screen.getByTestId('timeline-scroll')
+  const inner = scroller.firstElementChild as HTMLElement
+  return Number(inner.style.height.replace('px', ''))
+}
+
 describe('Timeline filter box', () => {
   it('renders the filter input with the expected placeholder and aria-label', async () => {
     mockTail()
@@ -222,17 +233,17 @@ describe('Timeline filter box', () => {
     }
     // Still mid-scan — no page_end has fired yet — but the whole batch is
     // already visible via the display overlay, not held back for one
-    // atomic store commit at the end. (Row count via the header, not
-    // individual row text: the virtualized list only renders rows near the
-    // top of a 25+-row window, so the newest (p0·124, always index 0) is a
-    // safe row-level check, but the OLDEST wouldn't be — see the message
-    // count instead for the full-batch claim.)
-    expect(screen.getByText('25 messages')).toBeInTheDocument()
+    // atomic store commit at the end. (Row count via the virtualizer's own
+    // total-size div, not individual row text: the virtualized list only
+    // renders rows near the top of a 25+-row window, so the newest
+    // (p0·124, always index 0) is a safe row-level check, but the OLDEST
+    // wouldn't be — see totalRowsHeight for the full-batch claim.)
+    expect(totalRowsHeight()).toBe(25 * 40)
     expect(screen.getByText('p0·124')).toBeInTheDocument()
 
     await emit(idx, 'match', mk(125))
     await emit(idx, 'page_end', { cursor: null, exhausted: true })
-    expect(screen.getByText('26 messages')).toBeInTheDocument()
+    expect(totalRowsHeight()).toBe(26 * 40)
     expect(screen.getByText('p0·125')).toBeInTheDocument()
   })
 
@@ -253,11 +264,13 @@ describe('Timeline filter box', () => {
     for (let i = 0; i < 25; i++) {
       await emit(idx, 'match', mk(100 + i))
     }
-    expect(screen.getByText('25 messages')).toBeInTheDocument()
+    expect(totalRowsHeight()).toBe(25 * 40)
 
     fireEvent.click(screen.getByTestId('cancel-scan'))
-    expect(screen.queryByText('25 messages')).not.toBeInTheDocument() // uncommitted, dropped with the overlay
-    expect(screen.getByText('0 messages')).toBeInTheDocument()
+    // uncommitted, dropped with the overlay: back to the empty state, not
+    // just a smaller row count.
+    expect(screen.getByText('no messages')).toBeInTheDocument()
+    expect(screen.getByTestId('window-range')).toHaveTextContent('no messages loaded')
 
     // A fresh scan (re-typing the filter re-triggers a settle) lands for
     // real this time — its own match, and ONLY its own match, is what ends
@@ -271,7 +284,7 @@ describe('Timeline filter box', () => {
     await emit(idx2, 'page_end', { cursor: null, exhausted: true })
     expect(screen.getByText('p0·7')).toBeInTheDocument()
     expect(screen.queryByText('p0·100')).not.toBeInTheDocument()
-    expect(screen.getByText('1 messages')).toBeInTheDocument()
+    expect(totalRowsHeight()).toBe(1 * 40)
   })
 
   it('editing the filter mid-scan cancels the in-flight page', async () => {

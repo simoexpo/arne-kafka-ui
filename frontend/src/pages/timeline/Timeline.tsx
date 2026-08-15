@@ -8,6 +8,7 @@ import type { MessageListHandle } from '../../components/messages/MessageList'
 import { Panel } from '../../components/Panel'
 import { StalenessChip } from '../../components/StalenessChip'
 import { parseFilterQuery, type FilterQueryApi } from '../../lib/filterQuery'
+import { formatWindowRange } from '../../lib/format'
 import { decodeCursor } from '../../lib/timelineCursor'
 import { createSlidingWindowStore, type InsertOutcome } from '../../lib/timelineStore'
 import { JumpControl, type JumpTarget } from './JumpControl'
@@ -1072,7 +1073,9 @@ export function Timeline({
     // comment on the className it's given.
     <div className="flex h-full flex-col gap-3">
       <div className="flex items-center justify-between">
-        <h2 className="text-sm font-medium text-zinc-500 dark:text-zinc-400">{rows.length} messages</h2>
+        <h2 className="text-sm font-medium text-zinc-500 dark:text-zinc-400" data-testid="window-range">
+          {rows.length === 0 ? 'no messages loaded' : formatWindowRange(rows.at(-1)!.timestamp_ms, rows[0].timestamp_ms)}
+        </h2>
         <div className="flex items-center gap-2">
           <LivePill count={bufferReceivedRef.current} capped={bufferOverflowRef.current} attached={attached} onClick={handlePillClick} />
           {live && attached ? (

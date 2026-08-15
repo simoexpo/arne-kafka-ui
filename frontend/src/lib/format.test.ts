@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { formatAgo, formatCount, formatRetentionValue, retentionMsHint } from './format'
+import { formatAgo, formatCount, formatRetentionValue, formatWindowRange, retentionMsHint } from './format'
 
 describe('formatAgo', () => {
   const now = 1_000_000_000
@@ -23,6 +23,26 @@ describe('formatRetentionValue', () => {
   it('shows a dash for a missing value', () => expect(formatRetentionValue(null)).toBe('—'))
   it('shows infinity for -1', () => expect(formatRetentionValue('-1')).toBe('∞'))
   it('shows the raw value otherwise', () => expect(formatRetentionValue('604800000')).toBe('604800000'))
+})
+
+describe('formatWindowRange', () => {
+  it('shows oldest -> newest, UTC, same-day compact (no date)', () => {
+    // 2024-01-01T00:00:00Z + 5s / + 65s
+    expect(formatWindowRange(1_704_067_205_000, 1_704_067_265_000)).toBe('00:00:05 → 00:01:05 UTC')
+  })
+
+  it('prefixes both sides with their date when the window spans a UTC day boundary', () => {
+    // 2023-12-31T23:59:00Z .. 2024-01-01T00:01:00Z
+    expect(formatWindowRange(1_704_067_140_000, 1_704_067_260_000)).toBe(
+      '2023-12-31 23:59:00 → 2024-01-01 00:01:00 UTC',
+    )
+  })
+
+  it('is a dash when either endpoint is null (no timestamp to anchor on)', () => {
+    expect(formatWindowRange(null, 1_704_067_265_000)).toBe('—')
+    expect(formatWindowRange(1_704_067_265_000, null)).toBe('—')
+    expect(formatWindowRange(null, null)).toBe('—')
+  })
 })
 
 describe('retentionMsHint', () => {

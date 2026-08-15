@@ -14,6 +14,25 @@ export function formatCount(n: number): string {
   return `${(n / 1_000_000_000).toFixed(1)}B`
 }
 
+// Compact oldest -> newest range for the currently loaded window (owner
+// feedback 2026-08-15: replaces the raw "{n} messages" count, which
+// saturated — and lied — at the store's 2000-row cap). UTC, not local time
+// (matches MessageRow's own per-row `toISOString()` convention, and stays
+// deterministic regardless of the reader's or CI's timezone): same-UTC-day
+// windows show bare times; a window spanning a day boundary prefixes both
+// sides with their own date so the range is never ambiguous.
+export function formatWindowRange(oldestMs: number | null, newestMs: number | null): string {
+  if (oldestMs === null || newestMs === null) return '—'
+  const oldestIso = new Date(oldestMs).toISOString()
+  const newestIso = new Date(newestMs).toISOString()
+  const oldestDate = oldestIso.slice(0, 10)
+  const newestDate = newestIso.slice(0, 10)
+  const time = (iso: string) => iso.slice(11, 19)
+  return oldestDate === newestDate
+    ? `${time(oldestIso)} → ${time(newestIso)} UTC`
+    : `${oldestDate} ${time(oldestIso)} → ${newestDate} ${time(newestIso)} UTC`
+}
+
 export function formatRetentionValue(raw: string | null): string {
   if (raw == null) return '—'
   if (Number(raw) === -1) return '∞'

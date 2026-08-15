@@ -140,6 +140,17 @@ function scrollToBottom() {
 // createSlidingWindowStore's own doc comment), so a bare `scrollTop: 0`
 // scroll event is used directly ONLY in the handful of places where the
 // back edge is genuinely null/exhausted at that point.
+// Total row count, read off the virtualizer's own total-size div (uniform
+// 40px rows in jsdom, no ResizeObserver) — used where a test's real point is
+// "did every row actually land in the store", now that the header no longer
+// renders a raw "{n} messages" count to assert on directly (see
+// formatWindowRange's own owner-feedback comment in Timeline.tsx).
+function totalRowsHeight(): number {
+  const scroller = screen.getByTestId('timeline-scroll')
+  const inner = scroller.firstElementChild as HTMLElement
+  return Number(inner.style.height.replace('px', ''))
+}
+
 function scrollToTopFarFromBottom() {
   const restoreScrollHeight = stubScrollHeight(2000)
   const restoreClientHeight = stubClientHeight(600)
@@ -165,6 +176,29 @@ describe('Timeline', () => {
     const rows = screen.getAllByTestId('message-row')
     expect(rows[0]).toHaveTextContent('p0·2') // newest (highest ts) first
     expect(rows[1]).toHaveTextContent('p0·1')
+  })
+
+  // Owner feedback 2026-08-15: the header used to show the loaded COUNT,
+  // which saturates (and lies) at the store's 2000-row cap. It now shows the
+  // loaded WINDOW's own time range instead — oldest (bottom row) to newest
+  // (top row), straight from the store's rows(), updating as the window
+  // slides.
+  it('header shows the loaded window as a compact oldest -> newest range, not a raw count', async () => {
+    mockTail()
+    render(<Timeline cluster="prod" topic="orders" />)
+    await emit(0, 'match', mk(2, { timestamp_ms: 1_704_067_265_000 })) // newest (top)
+    await emit(0, 'match', mk(1, { timestamp_ms: 1_704_067_205_000 })) // oldest (bottom)
+    await emit(0, 'page_end', { cursor: cur({ 0: 1 }), exhausted: false })
+
+    expect(screen.getByTestId('window-range')).toHaveTextContent('00:00:05 → 00:01:05 UTC')
+    expect(screen.queryByText(/^\d+ messages$/)).not.toBeInTheDocument()
+  })
+
+  it('header reads gracefully before any row has loaded', () => {
+    mockTail()
+    render(<Timeline cluster="prod" topic="orders" />)
+    expect(screen.getByTestId('window-range')).toHaveTextContent('no messages loaded')
+    expect(screen.queryByText(/^\d+ messages$/)).not.toBeInTheDocument()
   })
 
   it('starts live tail on mount and prepends a message that passes the (empty) predicate', async () => {
@@ -447,7 +481,7 @@ describe('Timeline', () => {
       expect(screen.queryByText('p0·211')).not.toBeInTheDocument() // dropped
       // 1 initial row + exactly 500 buffered (the cap holds regardless of
       // how many arrived while paused).
-      expect(screen.getByText('501 messages')).toBeInTheDocument()
+      expect(totalRowsHeight()).toBe(501 * 40)
     })
   })
 
@@ -706,7 +740,7 @@ describe('Timeline', () => {
 
       // End-to-end sanity: all 31 rows (1 original + 30 scanned) ended up
       // committed, content never reset along the way.
-      expect(screen.getByText('31 messages')).toBeInTheDocument()
+      expect(totalRowsHeight()).toBe(31 * 40)
     })
 
     // Real-browser stall (rollout drill, 2026-08-15, ~24k-message topic):
