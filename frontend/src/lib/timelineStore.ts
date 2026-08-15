@@ -342,7 +342,13 @@ export interface SlidingWindowStore {
  * hasn't fired). For that one case, and ONLY that case, the opposite-side
  * map is seeded directly from the just-fetched rows' own offsets — per
  * partition, `max(offset) + 1` (back anchor's opposite/top side) or
- * `min(offset)` (forward anchor's opposite/bottom side). This is the
+ * `min(offset)` (forward anchor's opposite/bottom side) — but ONLY when
+ * that partition's entry is still ABSENT (fix round 2, N2): this same
+ * window can already hold a genuinely-established value for the opposite
+ * side from an EARLIER insert with no `clear()` in between (Timeline's
+ * loadNewer forward-anchor fallback re-issues an anchor this way), and an
+ * unrelated page's own row offsets are never grounds to clobber it — see
+ * `insertPage`'s own doc comment on this seeding step. This is the
  * documented exception ("the edge map seeds from the response continuation
  * + row offsets instead" — see the design doc and this store's own brief);
  * it's exact as long as the anchor's own starting offset has no leading hole
@@ -350,6 +356,18 @@ export interface SlidingWindowStore {
  * caption logic — see the design doc's "beginning of topic" caption note —
  * not something this store can fix without knowing the true watermark, which
  * `insertPage`'s signature never receives).
+ *
+ * **When an incomplete opposite-seed actually matters (fix round 2, N1):**
+ * the C2 completeness check (`edges()`'s own doc comment) that masks
+ * `edges().top` when `topMap` is missing a partition `bottomMap` knows
+ * about is only CONSULTED when `topCompletenessMatters` — set true by a
+ * HISTORICAL (`attach: false`) back-anchor bootstrap, never by a Latest
+ * (`attach: true`) one. A cold partition a Latest bootstrap never saw a row
+ * for hides nothing (everything above a Latest anchor is, by construction,
+ * the live tail, for every partition); treating it as an incompleteness
+ * risk anyway left `edges().top` masked `null` FOREVER once such a window
+ * detached — a dead scroll-up with no cursor and no anchor-forward fallback
+ * to fall back to for a 'default' context, trapping the reader.
  *
  * `attached` (top-edge liveness) changes on exactly two events, independent
  * of the maps themselves: it becomes `true` on a back-direction anchor
@@ -375,6 +393,19 @@ export function createSlidingWindowStore(cap = 2000): SlidingWindowStore {
   const bottomMap = new Map<number, number>()
   const topMap = new Map<number, number>()
   let attached = false
+  // Fix round 2, N1 (the blocker on the C2 completeness check): whether an
+  // incomplete `topMap` (relative to `bottomMap`) is a real risk worth
+  // masking `edges().top` for at all. Set true ONLY by a HISTORICAL
+  // (`attach: false`) back-anchor bootstrap — a cold/empty partition
+  // omitted from `topMap`'s opposite-side seed there genuinely hides a
+  // forward gap (the C2 scenario). A LATEST (`attach: true`) bootstrap
+  // never sets this: everything above a Latest anchor is, by construction,
+  // the live tail — a cold partition contributing zero rows there has
+  // nothing above it to hide (nothing has been produced yet, for ANY
+  // partition). Left false by default (and reset by `clear()`) so a
+  // Latest-mounted window's `edges().top` is trusted the instant a trim
+  // detaches it, same as before the C2 fix ever existed.
+  let topCompletenessMatters = false
   let cachedRows: readonly MessageOut[] | null = null
 
   function totalCount(): number {
@@ -565,10 +596,28 @@ export function createSlidingWindowStore(cap = 2000): SlidingWindowStore {
         // offsets — the one case with no continuation to draw from on that
         // side at all (see the home doc comment's "one gap none of the three
         // rules fill" section).
+        //
+        // Fix round 2, N2: only fill entries that are still ABSENT
+        // outright — never unconditionally `.set()`. An opposite-side seed
+        // is an ESTIMATE for a side this request didn't actually focus on
+        // (it only reflects THIS page's own row offsets, nothing about the
+        // map's true history), and this same window can already hold a
+        // genuinely-established, independently-verified value for it from
+        // an EARLIER insert (no `clear()` in between — e.g. Timeline's
+        // loadNewer forward-anchor fallback re-issuing an anchor while
+        // `bottomMap` already holds the real edge from the window's own
+        // first bootstrap). Deferring entirely to whatever's already
+        // there — rather than trying to "merge" the estimate in via some
+        // min/max rule — is the simplest rule that can only ever leave the
+        // map correct: an already-present entry was necessarily planted by
+        // a verified source (rule 1, the live ceiling, a trim, or an
+        // earlier opposite-seed of its own), which this unrelated page's
+        // own row offsets have no way to improve on or safely combine with.
         if (direction === 'back') {
-          for (const [p, max] of insertedMax) topMap.set(p, max + 1)
+          topCompletenessMatters ||= !(opts?.attach ?? true)
+          for (const [p, max] of insertedMax) if (!topMap.has(p)) topMap.set(p, max + 1)
         } else {
-          for (const [p, min] of insertedMin) bottomMap.set(p, min)
+          for (const [p, min] of insertedMin) if (!bottomMap.has(p)) bottomMap.set(p, min)
         }
       }
 
@@ -683,7 +732,13 @@ export function createSlidingWindowStore(cap = 2000): SlidingWindowStore {
       // opposite-seed has no equivalent guarantee (only partitions with
       // ≥1 row this page get seeded) — this is the ONLY event that can
       // create the discrepancy this check catches.
-      const topComplete = [...bottomMap.keys()].every((p) => topMap.has(p))
+      //
+      // Fix round 2, N1: this check is only CONSULTED when
+      // `topCompletenessMatters` — i.e. when the window's provenance
+      // includes a historical anchor bootstrap. A Latest-only window never
+      // sets that flag, so an omitted cold partition (harmless there — see
+      // the flag's own doc comment) never masks `edges().top`.
+      const topComplete = !topCompletenessMatters || [...bottomMap.keys()].every((p) => topMap.has(p))
       const top = attached || topMap.size === 0 || !topComplete ? null : encodeCursor(mapToPositions(topMap))
       return { top, bottom }
     },
@@ -696,6 +751,7 @@ export function createSlidingWindowStore(cap = 2000): SlidingWindowStore {
       bottomMap.clear()
       topMap.clear()
       attached = false
+      topCompletenessMatters = false
       cachedRows = null
     },
     totalCount,

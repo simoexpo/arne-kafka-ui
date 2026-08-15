@@ -870,6 +870,99 @@ describe('createSlidingWindowStore — edges().top completeness (C2, fix round 1
 })
 
 // ---------------------------------------------------------------------------
+// Fix round 2 (re-review of 000fd9f) — N1 (High, THE BLOCKER): the C2
+// completeness check above applied unconditionally, regardless of WHY the
+// window is incomplete. For a Latest-anchored bootstrap (`attach: true`),
+// a cold/empty partition that never contributed a row (but that the back
+// request's own `cur_positions` still enumerates in `bottomMap`) makes
+// `topMap` permanently "incomplete" relative to `bottomMap` — but this
+// omission hides NOTHING: for a Latest bootstrap, genuinely EVERYTHING
+// above the anchor point is the live tail (nothing has been produced yet
+// that a forward read could ever find, for ANY partition, cold or not).
+// Applying the C2 check here anyway meant `edges().top` stayed `null`
+// FOREVER once such a window detached — `loadNewer` finds no cursor,
+// `forwardAnchorFallback` returns null for the 'default' anchor context
+// (Latest has no "same anchor, forward" replay to fall back to — see
+// Timeline.tsx's own comment), so NO request ever fires: a dead scroll-up,
+// the window can never re-attach. Reachable on any over-partitioned topic
+// (any partition quiet enough to contribute zero rows to one Latest page).
+//
+// Fix: the C2 completeness check now applies ONLY when the CURRENT
+// incompleteness traces back to a HISTORICAL anchor bootstrap (`attach:
+// false` — Offset/Timestamp; Beginning does not touch `topMap`'s opposite
+// side at all, see the class doc comment). A Latest bootstrap (`attach:
+// true`, or the default) never sets this flag — an omitted partition there
+// is provably harmless, so `edges().top` is trusted at face value the
+// instant a trim detaches, exactly as it was before the C2 fix existed.
+// ---------------------------------------------------------------------------
+describe('createSlidingWindowStore — edges().top completeness only matters for historical bootstraps (N1, fix round 2)', () => {
+  it("the reviewer's exact probe: a Latest mount with a cold partition (rows from p0/p1 only, contCursor enumerating p0/p1/p2) still exposes a real top edge after detaching, and the up-walk works", () => {
+    const s = createSlidingWindowStore(4)
+    // Latest anchor bootstrap: rows only from partitions 0 and 1 — the
+    // response's own cur_positions (rule 1, bottomMap) enumerates p0, p1,
+    // AND the cold p2 (an anchor request touches every partition of the
+    // topic, including ones that never produced a row this page).
+    const mountOutcome = s.insertPage(
+      [mk(0, 9, 900), mk(1, 9, 950), mk(0, 8, 800), mk(1, 8, 850)],
+      'back',
+      null,
+      encodeCursor({ 0: 8, 1: 8, 2: 0 }),
+      { attach: true },
+    )
+    expect(mountOutcome.attached).toBe(true)
+    // topMap never learned about p2 (no rows) — the OLD, unconditional C2
+    // check would read this as incomplete forever. p2 hides nothing for a
+    // Latest bootstrap, so it must not matter.
+    expect(decodeCursor(s.edges().bottom!)).toEqual({ 0: 8, 1: 8, 2: 0 })
+
+    // Detach via an over-cap back page (cap 4, already holding 4 rows —
+    // this trims the newest 2 off the top).
+    const detachOutcome = s.insertPage(
+      [mk(0, 7, 700), mk(1, 7, 750)],
+      'back',
+      { 0: 8, 1: 8, 2: 0 },
+      encodeCursor({ 0: 7, 1: 7, 2: 0 }),
+    )
+    expect(detachOutcome.trimmedTop).toBeGreaterThan(0)
+    expect(s.isAttached()).toBe(false)
+
+    // The blocker: edges().top must be a REAL cursor, not null — a dead
+    // scroll-up (no cursor, no fallback for a Latest-style context) would
+    // otherwise trap the reader in a detached window forever.
+    expect(s.edges().top).not.toBeNull()
+
+    // The up-walk must actually work: following edges().top forward
+    // recovers the trimmed rows gap-free.
+    const topPositions = decodeCursor(s.edges().top!)
+    const outcome = s.insertPage(
+      [mk(0, 9, 900), mk(1, 9, 950)],
+      'forward',
+      topPositions,
+      null, // caught the tail
+    )
+    expect(outcome.rejectedStale).toBe(false)
+    expect(s.rows().some((r) => r.partition === 0 && r.offset === 9)).toBe(true)
+    expect(s.rows().some((r) => r.partition === 1 && r.offset === 9)).toBe(true)
+    expect(s.isAttached()).toBe(true) // re-attached
+  })
+
+  it('a HISTORICAL (attach: false) bootstrap with the same cold-partition shape still reads edges().top as null — the C2 protection is unchanged for the case it exists for', () => {
+    const s = createSlidingWindowStore(4)
+    s.insertPage(
+      [mk(0, 9, 900), mk(1, 9, 950), mk(0, 8, 800), mk(1, 8, 850)],
+      'back',
+      null,
+      encodeCursor({ 0: 8, 1: 8, 2: 0 }),
+      { attach: false },
+    )
+    expect(s.isAttached()).toBe(false)
+    // Still masked null (isAttached() false, but ALSO genuinely incomplete
+    // per C2 — a historical jump's cold partition IS a real risk).
+    expect(s.edges().top).toBeNull()
+  })
+})
+
+// ---------------------------------------------------------------------------
 // Fix round 1 — C3: an in-flight page's response can no longer be trusted
 // to safely narrow its own same-direction edge map once a CONCURRENT event
 // (a live insert's trim, in the reviewer's own probe) has already advanced
@@ -1017,5 +1110,52 @@ describe('createSlidingWindowStore — previewWithOverlay (M2, fix round 1)', ()
     // preview2 does NOT include offset 6 (from the FIRST preview call,
     // never committed) — each call is a fresh, independent overlay.
     expect(preview2.map((m) => m.offset)).toEqual([7, 5])
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Fix round 2 — N2 (Medium): the anchor opposite-side seed used to `.set()`
+// the opposite map unconditionally, clobbering an already-established,
+// more trustworthy value from an EARLIER insert in the SAME window (no
+// `clear()` in between) — reachable via Timeline's own loadNewer
+// forward-anchor fallback re-issuing an anchor while `bottomMap` already
+// holds the real edge from the window's first (back-anchor) bootstrap.
+// ---------------------------------------------------------------------------
+describe('createSlidingWindowStore — opposite-side anchor seed merges, never clobbers (N2, fix round 2)', () => {
+  it("the reviewer's exact probe: a forward-anchor re-issue (loadNewer's fallback) must not clobber an established bottom edge with its own (much higher) row minima", () => {
+    const s = createSlidingWindowStore(100)
+    // An earlier back-anchor bootstrap already established a real,
+    // trustworthy bottom edge.
+    s.insertPage([mk(0, 25, 2500), mk(1, 15, 1500)], 'back', null, encodeCursor({ 0: 20, 1: 10 }), { attach: false })
+    expect(decodeCursor(s.edges().bottom!)).toEqual({ 0: 20, 1: 10 })
+
+    // Timeline's loadNewer fallback re-issues the SAME anchor forward (no
+    // clear() in between) — this page's own rows are 73-79, nowhere near
+    // the true bottom edge. The opposite-side seed must not abandon it.
+    s.insertPage(
+      [mk(0, 79, 7900), mk(0, 78, 7800), mk(1, 41, 4100)],
+      'forward',
+      null,
+      encodeCursor({ 0: 80, 1: 42 }),
+    )
+    // Bottom edge is UNCHANGED — never regressed to {0:78, 1:41}.
+    expect(decodeCursor(s.edges().bottom!)).toEqual({ 0: 20, 1: 10 })
+  })
+
+  it('symmetric: a back-anchor re-issue must not clobber an established top edge with its own row maxima', () => {
+    const s = createSlidingWindowStore(100)
+    s.insertPage([mk(0, 3, 300), mk(1, 2, 200)], 'forward', null, encodeCursor({ 0: 100, 1: 90 }))
+    expect(decodeCursor(s.edges().top!)).toEqual({ 0: 100, 1: 90 })
+
+    // A back-anchor re-issue (no clear()) whose own rows are far below the
+    // established top edge — must not regress it upward.
+    s.insertPage([mk(0, 5, 500), mk(1, 4, 400)], 'back', null, encodeCursor({ 0: 4, 1: 3 }), { attach: false })
+    expect(decodeCursor(s.edges().top!)).toEqual({ 0: 100, 1: 90 })
+  })
+
+  it('still fills a genuinely ABSENT partition entry normally (no regression for the common, single-bootstrap case)', () => {
+    const s = createSlidingWindowStore(100)
+    s.insertPage([mk(0, 9, 900)], 'back', null, encodeCursor({ 0: 8 }), { attach: false })
+    expect(decodeCursor(s.edges().top!)).toEqual({ 0: 10 })
   })
 })

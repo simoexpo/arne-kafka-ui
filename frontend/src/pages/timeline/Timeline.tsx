@@ -184,18 +184,35 @@ export function Timeline({
   // relocation this mechanism exists to prevent.
   //
   // Fixed by anchoring to a SPECIFIC row's IDENTITY instead of a total
-  // delta: captured synchronously in runPage's `onPageEnd` callback (see
-  // below), right before `insertPage` commits — the "junction" row is
-  // whatever is CURRENTLY at the top of the merged list (`rows()[0]`),
-  // since a forward insert can only ever prepend ABOVE it, never move it
-  // out from under itself (a top trim is impossible on a forward-direction
-  // insert — see `enforceCap`: only `back`-direction overflow ever trims
-  // the top). Consumed by the layout effect below, which finds that SAME
-  // row's NEW index after the commit and adjusts scrollTop by the
+  // delta: captured in runPage's `onMatches` callback (see below, one
+  // capture per BATCH as of fix round 2, N5 — including the final one,
+  // since `flush()` always runs before `onPageEnd`), right before that
+  // batch's rows get added — the "junction" row is whatever is CURRENTLY
+  // at the top of the merged (possibly overlaid) list, since a forward
+  // insert can only ever prepend ABOVE it, never move it out from under
+  // itself (a top trim is impossible on a forward-direction insert — see
+  // `enforceCap`: only `back`-direction overflow ever trims the top).
+  // Consumed by the layout effect below, which finds that SAME row's NEW
+  // index after the batch/commit renders and adjusts scrollTop by the
   // difference in `MessageList#rowOffsetAt` — robust to a simultaneous
   // trim (which only ever happens BELOW this row) and to estimate-vs-
   // measured drift (both reads go through the same virtualizer API). Not
   // used for 'back' (appends below, doesn't move the viewport).
+  //
+  // `priorTop` is ALWAYS `0` here (fix round 2, N4 — flagged as "correct
+  // by accident" otherwise): the junction row captured is, by construction,
+  // ALWAYS the row currently at index 0 (`rowOffsetAt(0)`), and index 0's
+  // own cumulative offset from the top of the list is trivially 0 no
+  // matter WHICH row occupies that slot. `rowOffsetAt(0)` is called anyway
+  // (rather than hard-coding `priorTop: 0`) for two honest reasons, not
+  // because the call result is in doubt: (1) it doubles as the "is the
+  // list actually mounted" check — returns `null` before the virtualizer
+  // exists (e.g. mid-jump, while `Panel` shows a loading skeleton), which a
+  // hardcoded `0` would silently paper over; (2) it keeps the invariant
+  // explicit and self-enforcing — if a future change ever captured some
+  // OTHER index instead of 0, this call would immediately start returning
+  // that row's real (non-zero) offset rather than silently inheriting a
+  // now-wrong hardcoded assumption.
   const pendingAnchorRef = useRef<{ partition: number; offset: number; priorTop: number } | null>(null)
 
   const [live, setLive] = useState(true)
@@ -351,6 +368,33 @@ export function Timeline({
         (msgs: MessageOut[]) => {
           matchedRef.current = true
           pageMatchesRef.current += msgs.length
+          // Scroll anchoring, per BATCH (fix round 2, N5 — review of
+          // 000fd9f): a forward scan's overlay (see pendingAnchorRef's own
+          // comment, and M2 below) prepends each new batch above whatever
+          // the reader is currently looking at, exactly like the final
+          // commit does — without this, an intermediate overlay update
+          // would silently relocate the reader the same way M1 originally
+          // fixed for the commit itself. Capture the row CURRENTLY at the
+          // top of the overlay (index 0 — see pendingAnchorRef's own
+          // comment on why that index specifically) before adding this
+          // batch; the layout effect below finds that same row's new index
+          // once the batch has rendered and adjusts by the difference.
+          // This ALSO covers the final trailing batch: `flush()` (see
+          // useTimelinePage's own doc comment) always calls this callback
+          // BEFORE `onPageEnd` fires, so there is no separate capture
+          // needed at commit time — each batch's own capture chains into
+          // the next, and the last one chains straight into the commit
+          // (summing to the same total adjustment as anchoring once to the
+          // original pre-scan top row would have, just incrementally).
+          if (direction === 'forward') {
+            const beforeRows = storeRef.current.previewWithOverlay(pageRowsRef.current)
+            if (beforeRows.length > 0) {
+              const priorTop = listRef.current?.rowOffsetAt(0) ?? null
+              if (priorTop !== null) {
+                pendingAnchorRef.current = { partition: beforeRows[0].partition, offset: beforeRows[0].offset, priorTop }
+              }
+            }
+          }
           pageRowsRef.current.push(...msgs)
           // No store COMMIT here (task 3, unlike the old per-batch
           // `store.insert` calls): a page's rows are committed to the store
@@ -381,21 +425,16 @@ export function Timeline({
         (cursor) => {
           const rows = pageRowsRef.current
           pageRowsRef.current = []
-          // Scroll anchoring (see pendingAnchorRef's own comment): capture
-          // the CURRENT top-of-list row's identity + rendered offset right
-          // before this page's commit — a forward insert can only ever
-          // prepend above it (never trim it out from under itself; see
-          // enforceCap). Captured unconditionally for every forward page,
-          // not just while the reader is pinned to the top: the top
-          // sentinel fires precisely when pinned there, so there is no
-          // "pinned means show me the new" case for forward pages (that
-          // logic belongs to 'live' inserts, which never reach this
-          // callback at all).
-          const beforeRows = direction === 'forward' ? storeRef.current.rows() : null
-          const junction =
-            beforeRows && beforeRows.length > 0
-              ? { partition: beforeRows[0].partition, offset: beforeRows[0].offset, priorTop: listRef.current?.rowOffsetAt(0) ?? null }
-              : null
+          // Scroll anchoring is captured per-BATCH now (fix round 2, N5 —
+          // see the `onMatches` callback above, which always runs, via
+          // `flush()`, before this callback does) — there is deliberately
+          // no separate capture here: `flush()`'s own trailing call already
+          // set `pendingAnchorRef` for this exact commit, and capturing
+          // again here (against the now-about-to-be-cleared `pageRowsRef`)
+          // would just re-derive the SAME "before" state a second time —
+          // or, worse, the WRONG one, since the row this batch's own
+          // capture chained from may no longer be at index 0 by the time
+          // this callback runs (see `pendingAnchorRef`'s own comment).
           const outcome = storeRef.current.insertPage(rows, direction, pendingStartPositionsRef.current, cursor, {
             attach: pendingAttachRef.current,
           })
@@ -404,20 +443,41 @@ export function Timeline({
           // page assumed when it was issued — the store detects this and
           // rejects the page wholesale (see its own doc comment) rather
           // than risk an interior hole. Nothing here landed: don't touch
-          // detach/reattach or the trimmed-since staleness tracking (an
-          // ACCEPTED page is what re-earns those, never a rejected one) —
-          // just re-issue the same logical request from the store's own
-          // fresh edge. One wasted round trip in a rare race; if the store
-          // has no fresh edge to offer either (a genuine, if unlikely,
-          // corner), this simply does nothing and a later user gesture
-          // (scroll) will retry on its own.
+          // detach/reattach — an ACCEPTED page is what re-earns those,
+          // never a rejected one.
           if (outcome.rejectedStale) {
+            // Fix round 2, N6: this REJECTED page's own SSE response may
+            // still have reported `exhausted: true` to `useTimelinePage`'s
+            // internal state (e.g. a genuinely-reached topic start that
+            // arrived just as a concurrent trim invalidated it) — mark
+            // this direction's exhausted flag untrustworthy UNCONDITIONALLY
+            // here, not contingent on whether the retry below actually
+            // fires, so that even a skipped retry (no fresh cursor to
+            // offer) can't leave that stale `true` unguarded: it would
+            // otherwise show a false "beginning of topic" caption or wrongly
+            // gate further pagination. bottomTrimmedSinceRef/
+            // topTrimmedSinceRef (see their own comment) are exactly the
+            // existing mechanism for discounting a stale exhausted flag —
+            // no need for a separate one.
+            if (direction === 'back') bottomTrimmedSinceRef.current = true
+            else topTrimmedSinceRef.current = true
             const freshCursor = storeRef.current.edges()[direction === 'back' ? 'bottom' : 'top']
-            if (freshCursor !== null) {
+            // Fix round 2, N3 (charter: no zombie scans): a retry consumes
+            // an iteration-cap slot just like an empty-page auto-continue
+            // does — a pathological storm of concurrent trims invalidating
+            // one retry after another must eventually land on the SAME
+            // continue-scan affordance, never loop silently forever.
+            // `resetIteration` stays `false` (this is a continuation of the
+            // SAME gesture, not a new one) but the counter itself still
+            // advances.
+            if (freshCursor !== null && iterationRef.current < ITERATION_CAP) {
+              iterationRef.current += 1
               runPage(direction, withFilter({ direction, limit: PAGE_LIMIT, cursor: freshCursor }), {
                 resetIteration: false,
                 attach: false,
               })
+            } else if (freshCursor !== null) {
+              setContinueDirection(direction)
             }
             return
           }
@@ -441,14 +501,6 @@ export function Timeline({
             setAttached(true)
             flushBuffer()
             pauseReasonRef.current = pauseReasonRef.current === 'explicit' ? 'explicit' : 'none'
-          }
-          // The page committed for real (not rejected-stale, reached only
-          // via the early return above) — hand the captured junction to
-          // the consuming layout effect, but only if it actually found a
-          // rendered offset (null if the list wasn't mounted yet, e.g. mid-
-          // jump while Panel shows a loading skeleton).
-          if (junction && junction.priorTop !== null) {
-            pendingAnchorRef.current = { partition: junction.partition, offset: junction.offset, priorTop: junction.priorTop }
           }
           bump()
           // Direction-based staleness refresh (see bottomTrimmedSinceRef/
@@ -625,21 +677,29 @@ export function Timeline({
     listRef.current?.scrollToEdge(edge)
   }, [state.loading])
 
-  // Scroll anchoring (row-identity rewrite, fix round 1, M1): consumes
-  // whatever the synchronous `onPageEnd` callback just captured (see
-  // pendingAnchorRef's own comment) after the corresponding rows have
-  // rendered, finds the SAME junction row's NEW index in the just-
-  // committed `rows`, and nudges scrollTop by the difference between its
-  // rendered offset now and before — robust to a trim that ALSO happened
-  // below it in the same commit (unlike a total-height delta, which that
-  // trim would corrupt). No dependency array — deliberately runs after
-  // every render (the ref-guard, cleared immediately, makes any render
-  // without a pending anchor a no-op).
+  // Scroll anchoring (row-identity rewrite, fix round 1 M1; per-batch, fix
+  // round 2 N5): consumes whatever the LAST `onMatches` call captured (see
+  // pendingAnchorRef's own comment — every batch captures, including the
+  // final one, via `flush()` always running before `onPageEnd`) after the
+  // corresponding rows have rendered, finds the SAME junction row's NEW
+  // index, and nudges scrollTop by the difference between its rendered
+  // offset now and before — robust to a trim that ALSO happened below it
+  // in the same commit (unlike a total-height delta, which that trim would
+  // corrupt). Searches the SAME view the render actually used: the overlay
+  // (`previewWithOverlay`) if a page is still mid-flight (another batch of
+  // the SAME page still pending, or a DIFFERENT page already started before
+  // this render committed — either way `pageRowsRef` is non-empty), or the
+  // plain committed `rows()` once a commit has actually run and cleared it.
+  // No dependency array — deliberately runs after every render (the
+  // ref-guard, cleared immediately, makes any render without a pending
+  // anchor a no-op).
   useLayoutEffect(() => {
     const anchor = pendingAnchorRef.current
     if (!anchor) return
     pendingAnchorRef.current = null
-    const newIndex = storeRef.current.rows().findIndex((r) => r.partition === anchor.partition && r.offset === anchor.offset)
+    const currentRows =
+      pageRowsRef.current.length > 0 ? storeRef.current.previewWithOverlay(pageRowsRef.current) : storeRef.current.rows()
+    const newIndex = currentRows.findIndex((r) => r.partition === anchor.partition && r.offset === anchor.offset)
     if (newIndex === -1) return // the junction row itself is gone — nothing sane to anchor to (shouldn't happen; see the comment on why a forward insert can't trim its own top)
     const newTop = listRef.current?.rowOffsetAt(newIndex) ?? null
     if (newTop === null) return

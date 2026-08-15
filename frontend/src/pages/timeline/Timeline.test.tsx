@@ -639,6 +639,75 @@ describe('Timeline', () => {
         scroll.restore()
       }
     })
+
+    // Fix round 2 (re-review of 000fd9f), N5: the display overlay (M2)
+    // shows a forward scan's matches progressively, in BATCH_SIZE (25)
+    // batches, well before page_end — each batch prepends above the
+    // reader exactly like the final commit does, so without per-batch
+    // anchoring, an intermediate overlay update would silently relocate
+    // the reader the same way M1 originally fixed for the commit alone.
+    // This test forces TWO batches (30 total matches) and asserts
+    // `adjustScrollTop` fires ONCE PER BATCH, each with the correct
+    // per-batch delta — not just once at the very end.
+    it('a multi-batch forward scan anchors the viewport on EVERY batch, not just the final commit', async () => {
+      mockTail()
+      const user = userEvent.setup()
+      render(<Timeline cluster="prod" topic="orders" />)
+      await emit(0, 'match', mk(9))
+      await emit(0, 'page_end', { cursor: cur({ 0: 9 }), exhausted: false })
+
+      await user.click(screen.getByTestId('jump-beginning'))
+      await emit(1, 'match', mk(2))
+      await emit(1, 'page_end', { cursor: cur({ 0: 3 }), exhausted: false })
+      // Rows now just [2] (offset 2, index 0 — uniform 40px rows in jsdom,
+      // no ResizeObserver).
+
+      scrollToTopFarFromBottom() // forward request, cursor = top = cur({0:3})
+      const idx = FakeEventSource.instances.length - 1
+
+      const scroll = spyOnScrollTop()
+      try {
+        // First batch: 25 matches (offsets 4..28, ascending — all newer
+        // than the existing row 2) — crosses BATCH_SIZE, flushes mid-scan,
+        // well before page_end.
+        for (let i = 0; i < 25; i++) {
+          await emit(idx, 'match', mk(4 + i))
+        }
+        // Junction (p0·2) was at index 0 (offset 0) before this batch; the
+        // 25 new rows prepend above it, pushing it to index 25 (offset
+        // 25*40 = 1000). scrollTop (started at 0, from
+        // scrollToTopFarFromBottom) is set to 0 + 1000 = 1000 — DURING the
+        // scan, not at page_end. Exactly one call for this batch.
+        expect(scroll.setter.mock.calls).toEqual([[1000]])
+
+        // Second (final, trailing) batch: 5 more matches (offsets 29..33),
+        // delivered together with page_end (useTimelinePage batches these
+        // 5 internally and only flushes at the terminal event, in the SAME
+        // synchronous handler as the commit — see useTimelinePage's own
+        // doc comment — so this is one combined React update, one call).
+        scroll.setter.mockClear()
+        for (let i = 25; i < 30; i++) {
+          await emit(idx, 'match', mk(4 + i))
+        }
+        await emit(idx, 'page_end', { cursor: null, exhausted: true })
+        // This batch's OWN "before" capture chases whatever is CURRENTLY
+        // topmost at ITS capture time — batch 1's own newest row (p0·28,
+        // at index 0, per the chaining scheme — see pendingAnchorRef's own
+        // comment) — not the original p0·2 again. After the commit (31
+        // rows total, newest-first), p0·28 sits at index 5 (33,32,31,30,29
+        // are the 5 newer rows ahead of it): offset 5*40 = 200. scrollTop
+        // becomes 1000 (from batch 1) + 200 = 1200. Exactly one call for
+        // this batch/commit too — TWO calls total across the whole scan,
+        // not one lump sum at the very end.
+        expect(scroll.setter.mock.calls).toEqual([[1200]])
+      } finally {
+        scroll.restore()
+      }
+
+      // End-to-end sanity: all 31 rows (1 original + 30 scanned) ended up
+      // committed, content never reset along the way.
+      expect(screen.getByText('31 messages')).toBeInTheDocument()
+    })
   })
 
   describe('jump control', () => {
@@ -1415,6 +1484,93 @@ describe('Timeline', () => {
       await emit(retryIdx, 'match', mk(9))
       await emit(retryIdx, 'page_end', { cursor: null, exhausted: true })
       expect(screen.getByText('p0·9')).toBeInTheDocument()
+    })
+
+    // Fix round 2 (re-review of 000fd9f), N6: a rejected page's own SSE
+    // response can still report `exhausted: true` to useTimelinePage's
+    // internal state, even though the store never committed it — landing
+    // this exact page WITH that lie must not show a false "beginning of
+    // topic" caption (or gate further pagination), and a retry still fires
+    // using the store's own fresh (unregressed) edge, proving the rejection
+    // is honored regardless of what the stale page claimed about itself.
+    it("a rejected page's own stale exhausted:true claim never shows a false beginning-of-topic caption, and a retry still fires", async () => {
+      const tail = mockTail()
+      render(<Timeline cluster="prod" topic="orders" windowCap={4} />)
+      await emit(0, 'match', mk(12))
+      await emit(0, 'match', mk(11))
+      await emit(0, 'match', mk(10))
+      await emit(0, 'match', mk(9))
+      await emit(0, 'page_end', { cursor: cur({ 0: 9 }), exhausted: false })
+
+      fireEvent.scroll(screen.getByTestId('timeline-scroll'), { target: { scrollTop: 0 } })
+      const inFlightIdx = FakeEventSource.instances.length - 1
+
+      // Live 13 trims the bottom (evicts 9), advancing bottom to {0:10}.
+      await act(async () => tail.handlers().onMessage(mk(13)))
+
+      // The stale page lands claiming exhausted:true (a lie — the store
+      // rejects it as stale regardless of what it claims about itself).
+      await emit(inFlightIdx, 'match', mk(8))
+      await emit(inFlightIdx, 'page_end', { cursor: null, exhausted: true })
+
+      // No false caption — the rejection marks this side's exhausted claim
+      // untrustworthy, unconditionally, before even checking whether a
+      // retry can fire.
+      expect(screen.queryByText('— beginning of topic —')).not.toBeInTheDocument()
+
+      // A retry still fires, using the store's OWN fresh (unregressed)
+      // bottom edge — not gated by the stale page's own exhausted claim.
+      const retryIdx = FakeEventSource.instances.length - 1
+      expect(retryIdx).toBeGreaterThan(inFlightIdx)
+      expect(FakeEventSource.instances[retryIdx].url).toBe(url({ direction: 'back', limit: '100', cursor: cur({ 0: 10 }) }))
+
+      // Once a REAL page genuinely reaches the start, the caption is
+      // honored again normally.
+      await emit(retryIdx, 'match', mk(9))
+      await emit(retryIdx, 'page_end', { cursor: null, exhausted: true })
+      expect(screen.getByText('— beginning of topic —')).toBeInTheDocument()
+    })
+
+    // Fix round 2, N3 (charter: no zombie scans): the reject-stale retry
+    // loop must consume an iteration-cap slot per retry, same as an
+    // empty-page auto-continue — a storm of concurrent trims invalidating
+    // one retry after another must eventually land on the SAME
+    // continue-scan affordance, never loop silently forever.
+    it('a storm of concurrent trims invalidating each retry in turn eventually surfaces the continue-scan affordance instead of looping forever', async () => {
+      const tail = mockTail()
+      render(<Timeline cluster="prod" topic="orders" windowCap={3} />)
+      await emit(0, 'match', mk(12))
+      await emit(0, 'match', mk(11))
+      await emit(0, 'match', mk(10))
+      await emit(0, 'page_end', { cursor: cur({ 0: 10 }), exhausted: false })
+
+      // Kick off the first back page — every landing below is deliberately
+      // invalidated by a live trim before it resolves, forcing a retry.
+      fireEvent.scroll(screen.getByTestId('timeline-scroll'), { target: { scrollTop: 0 } })
+
+      let liveOffset = 13
+      let iterations = 0
+      while (!screen.queryByTestId('continue-scan') && iterations < 25) {
+        const idx = FakeEventSource.instances.length - 1
+        // Live insert trims the bottom again, invalidating whatever is
+        // currently in flight before it lands.
+        await act(async () => tail.handlers().onMessage(mk(liveOffset++)))
+        // Land the (now-stale) in-flight page — rejected, triggers a retry
+        // (until the cap stops it).
+        await emit(idx, 'page_end', { cursor: null, exhausted: false })
+        iterations++
+      }
+
+      expect(screen.getByTestId('continue-scan')).toBeInTheDocument()
+      // Bounded: stopped at (around) the iteration cap, never looped past
+      // it — a real zombie-scan bug would run out the `iterations < 25`
+      // guard above without ever finding the affordance.
+      expect(iterations).toBeLessThan(25)
+
+      // No further request fires once capped, even with more live trims.
+      const countAtCap = FakeEventSource.instances.length
+      await act(async () => tail.handlers().onMessage(mk(liveOffset++)))
+      expect(FakeEventSource.instances).toHaveLength(countAtCap)
     })
   })
 
