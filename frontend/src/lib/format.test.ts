@@ -1,5 +1,9 @@
-import { describe, expect, it } from 'vitest'
-import { formatAgo, formatCount, formatRetentionValue, formatWindowRange, retentionMsHint } from './format'
+import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { formatAgo, formatCount, formatRetentionValue, formatTimestamp, formatWindowRange, retentionMsHint } from './format'
+
+// `@types/node` isn't in this app's tsconfig `types` (browser app) — declared
+// locally for the fixed-TZ tests below rather than widening ambient types.
+declare const process: { env: Record<string, string | undefined> }
 
 describe('formatAgo', () => {
   const now = 1_000_000_000
@@ -45,6 +49,43 @@ describe('formatWindowRange', () => {
     expect(formatWindowRange(null, 1_704_067_265_000)).toBe('—')
     expect(formatWindowRange(1_704_067_265_000, null)).toBe('—')
     expect(formatWindowRange(null, null)).toBe('—')
+  })
+
+  // UTC/local display toggle (owner ruling 2026-08-15): a third, optional
+  // mode argument re-renders the exact same instants in the reader's own
+  // browser zone instead, explicitly labelled so it's never mistaken for
+  // UTC. Fixed non-UTC TZ so a mode that silently fell back to UTC math
+  // would fail these.
+  describe('local mode (fixed TZ=America/New_York)', () => {
+    const ORIGINAL_TZ = process.env.TZ
+    beforeAll(() => { process.env.TZ = 'America/New_York' })
+    afterAll(() => { process.env.TZ = ORIGINAL_TZ })
+
+    it('shows the shared LOCAL date once, then oldest -> newest LOCAL time, labelled "local"', () => {
+      // 2024-01-01T00:00:05Z .. 2024-01-01T00:01:05Z == 2023-12-31 19:00:05 .. 19:01:05 America/New_York (EST, UTC-5)
+      expect(formatWindowRange(1_704_067_205_000, 1_704_067_265_000, 'local')).toBe(
+        '2023-12-31 19:00 → 19:01 local',
+      )
+    })
+
+    it('defaults to utc when no mode is given (backward compatible)', () => {
+      expect(formatWindowRange(1_704_067_205_000, 1_704_067_265_000)).toBe('2024-01-01 00:00 → 00:01 UTC')
+    })
+  })
+})
+
+describe('formatTimestamp', () => {
+  const ORIGINAL_TZ = process.env.TZ
+  beforeAll(() => { process.env.TZ = 'America/New_York' })
+  afterAll(() => { process.env.TZ = ORIGINAL_TZ })
+
+  it('utc mode matches the historical toISOString() row rendering', () => {
+    expect(formatTimestamp(1_704_067_205_000, 'utc')).toBe(new Date(1_704_067_205_000).toISOString())
+  })
+
+  it('local mode renders the browser\'s own zone, explicitly labelled so it is never mistaken for UTC', () => {
+    // 2024-01-01T00:00:05Z == 2023-12-31 19:00:05 America/New_York (EST, UTC-5)
+    expect(formatTimestamp(1_704_067_205_000, 'local')).toBe('2023-12-31 19:00:05.000 local')
   })
 })
 

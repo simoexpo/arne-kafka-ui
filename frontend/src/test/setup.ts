@@ -4,6 +4,10 @@ import '@testing-library/jest-dom/vitest'
 
 afterEach(() => {
   cleanup()
+  // Several features persist a small preference to localStorage (theme,
+  // time-display mode) — jsdom's localStorage otherwise survives across
+  // tests in the SAME file, leaking one test's toggle into the next.
+  localStorage.clear()
 })
 
 // jsdom performs no layout: every element reports offsetWidth/offsetHeight

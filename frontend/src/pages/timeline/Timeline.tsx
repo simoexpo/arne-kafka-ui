@@ -11,6 +11,7 @@ import { parseFilterQuery, type FilterQueryApi } from '../../lib/filterQuery'
 import { formatWindowRange } from '../../lib/format'
 import { decodeCursor } from '../../lib/timelineCursor'
 import { createSlidingWindowStore, type InsertOutcome } from '../../lib/timelineStore'
+import { useTimeDisplayMode } from '../../lib/timeDisplayMode'
 import { JumpControl, type JumpTarget } from './JumpControl'
 import { LivePill, PlayPauseToggle } from './LivePill'
 import { useTimelinePage } from './useTimelinePage'
@@ -301,6 +302,12 @@ export function Timeline({
   // itself: the highlight only ever makes sense for the window it was set
   // in, never carried forward into a different one.
   const [jumpTarget, setJumpTarget] = useState<{ partition: number; offset: number } | null>(null)
+
+  // UTC/local display toggle (owner ruling 2026-08-15): purely re-renders
+  // the header's zone label/time from the SAME loaded rows — see
+  // `lib/timeDisplayMode`'s own comment. No refetch: nothing below reads
+  // this to decide what to request, only how to format what's already here.
+  const timeDisplayMode = useTimeDisplayMode()
 
   const [live, setLive] = useState(true)
   const [tailErrorText, setTailErrorText] = useState<string | null>(null)
@@ -1177,7 +1184,9 @@ export function Timeline({
     <div className="flex h-full flex-col gap-3">
       <div className="flex items-center justify-between">
         <h2 className="text-sm font-medium text-zinc-500 dark:text-zinc-400" data-testid="window-range">
-          {rows.length === 0 ? 'no messages loaded' : formatWindowRange(rows.at(-1)!.timestamp_ms, rows[0].timestamp_ms)}
+          {rows.length === 0
+            ? 'no messages loaded'
+            : formatWindowRange(rows.at(-1)!.timestamp_ms, rows[0].timestamp_ms, timeDisplayMode)}
         </h2>
         <div className="flex items-center gap-2">
           <LivePill count={bufferReceivedRef.current} capped={bufferOverflowRef.current} attached={attached} onClick={handlePillClick} />

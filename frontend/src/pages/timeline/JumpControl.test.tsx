@@ -1,6 +1,7 @@
 import { fireEvent, render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
+import { setTimeDisplayMode } from '../../lib/timeDisplayMode'
 import { JumpControl } from './JumpControl'
 
 // `@types/node` isn't in this app's tsconfig `types` (it's a browser app) —
@@ -156,7 +157,23 @@ describe('JumpControl', () => {
       await user.click(screen.getByTestId('jump-timestamp'))
       const picker = screen.getByTestId('jump-timestamp-picker')
       fireEvent.change(picker, { target: { value: '2026-08-15T14:32:10' } })
-      expect(screen.getByTestId('jump-timestamp-utc-preview')).toHaveTextContent('2026-08-15T18:32:10')
+      expect(screen.getByTestId('jump-timestamp-preview')).toHaveTextContent('2026-08-15T18:32:10')
+    })
+
+    // UTC/local display toggle (owner ruling 2026-08-15): the preview
+    // mirrors whatever zone the rest of the app (rows, header) is currently
+    // showing, so it's always speaking the SAME language as the data the
+    // reader is about to jump into — never hardcoded to UTC regardless of
+    // the toggle.
+    it('preview follows the UTC/local display toggle, showing the picked instant in the browser\'s local zone when toggled', async () => {
+      setTimeDisplayMode('local')
+      const user = userEvent.setup()
+      render(<JumpControl onJump={vi.fn()} />)
+      await user.click(screen.getByTestId('jump-timestamp'))
+      const picker = screen.getByTestId('jump-timestamp-picker')
+      fireEvent.change(picker, { target: { value: '2026-08-15T14:32:10' } })
+      // Same instant as above (2026-08-15T18:32:10Z), now shown local.
+      expect(screen.getByTestId('jump-timestamp-preview')).toHaveTextContent('2026-08-15 14:32:10.000 local')
     })
 
     it('typing an epoch-ms value directly also updates the picker to match (bidirectional sync)', async () => {

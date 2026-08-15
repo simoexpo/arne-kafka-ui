@@ -4,6 +4,7 @@ import { Link, Outlet, useLocation, useParams } from '@tanstack/react-router'
 import { getClusters } from '../api/client'
 import type { ClusterHealth } from '../api/types'
 import { CommandPalette } from '../components/CommandPalette' // Task 11 stub
+import { setTimeDisplayMode, useTimeDisplayMode } from '../lib/timeDisplayMode'
 
 export function useClusters() {
   return useQuery({ queryKey: ['clusters'], queryFn: ({ signal }) => getClusters(signal), refetchInterval: 10_000 })
@@ -80,7 +81,10 @@ export function Sidebar({ cluster, clusters, active }: {
             </Link>
           ))}
         </div>
-        <div className="mt-4"><ThemeToggle /></div>
+        <div className="mt-4 flex items-center gap-2">
+          <ThemeToggle />
+          <TimeZoneToggle />
+        </div>
       </div>
     </aside>
   )
@@ -151,6 +155,45 @@ export function ThemeToggle() {
       </span>
       <span className={`rounded-full p-1 ${dark ? 'bg-indigo-100 dark:bg-indigo-500/20' : ''}`}>
         <MoonIcon active={dark} />
+      </span>
+    </button>
+  )
+}
+
+// UTC/local display toggle (owner ruling 2026-08-15): same visual family as
+// `ThemeToggle` above (a single button, two labelled halves, one lit at a
+// time, `data-mode` reflecting the current choice) — placed right beside it
+// since both are "how does this app show itself to me" preferences. Purely
+// display: flipping it only changes how already-loaded epoch-ms values are
+// FORMATTED (see `lib/timeDisplayMode` and `formatTimestamp`/
+// `formatWindowRange`) — nothing here re-fetches anything.
+export function TimeZoneToggle() {
+  const mode = useTimeDisplayMode()
+  return (
+    <button
+      type="button"
+      aria-label="toggle time zone display"
+      data-mode={mode}
+      className="flex items-center gap-1 rounded-full border border-zinc-300 p-1 text-xs dark:border-zinc-700"
+      onClick={() => setTimeDisplayMode(mode === 'utc' ? 'local' : 'utc')}
+    >
+      <span
+        className={`rounded-full px-2 py-0.5 ${
+          mode === 'utc'
+            ? 'bg-sky-100 font-medium text-sky-700 dark:bg-sky-500/20 dark:text-sky-300'
+            : 'text-zinc-400 dark:text-zinc-600'
+        }`}
+      >
+        UTC
+      </span>
+      <span
+        className={`rounded-full px-2 py-0.5 ${
+          mode === 'local'
+            ? 'bg-sky-100 font-medium text-sky-700 dark:bg-sky-500/20 dark:text-sky-300'
+            : 'text-zinc-400 dark:text-zinc-600'
+        }`}
+      >
+        local
       </span>
     </button>
   )

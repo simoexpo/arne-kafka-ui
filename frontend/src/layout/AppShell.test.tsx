@@ -1,8 +1,9 @@
 import { describe, expect, it } from 'vitest'
-import { screen } from '@testing-library/react'
+import { render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { renderWithQuery, renderWithRouter } from '../test/utils'
-import { Sidebar, ThemeToggle, sectionFromPathname } from './AppShell'
+import { getTimeDisplayMode } from '../lib/timeDisplayMode'
+import { Sidebar, ThemeToggle, TimeZoneToggle, sectionFromPathname } from './AppShell'
 
 const clusters = [
   { name: 'prod', status: 'healthy', broker_count: 3, error: null } as const,
@@ -66,5 +67,34 @@ describe('ThemeToggle', () => {
     expect(button).toHaveAttribute('data-mode', 'dark')
     await userEvent.click(button)
     expect(button).toHaveAttribute('data-mode', 'light')
+  })
+})
+
+// UTC/local display toggle (owner ruling 2026-08-15): display-only, no
+// refetch — proven at the Timeline level (see Timeline.test.tsx); this
+// suite covers the toggle control itself.
+describe('TimeZoneToggle', () => {
+  it('defaults to UTC and is labelled UTC/local', () => {
+    render(<TimeZoneToggle />)
+    const button = screen.getByRole('button', { name: /time zone/i })
+    expect(button).toHaveAttribute('data-mode', 'utc')
+    expect(button).toHaveTextContent('UTC')
+    expect(button).toHaveTextContent('local')
+  })
+
+  it('clicking flips to local and persists the choice', async () => {
+    render(<TimeZoneToggle />)
+    const button = screen.getByRole('button', { name: /time zone/i })
+    await userEvent.click(button)
+    expect(button).toHaveAttribute('data-mode', 'local')
+    expect(getTimeDisplayMode()).toBe('local')
+  })
+
+  it('clicking again flips back to utc', async () => {
+    render(<TimeZoneToggle />)
+    const button = screen.getByRole('button', { name: /time zone/i })
+    await userEvent.click(button)
+    await userEvent.click(button)
+    expect(button).toHaveAttribute('data-mode', 'utc')
   })
 })

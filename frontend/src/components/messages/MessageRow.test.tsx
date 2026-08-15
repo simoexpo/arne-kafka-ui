@@ -1,8 +1,13 @@
-import { describe, expect, it } from 'vitest'
+import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MessageRow } from './MessageRow'
 import type { MessageOut } from '../../api/types'
+import { setTimeDisplayMode } from '../../lib/timeDisplayMode'
+
+// `@types/node` isn't in this app's tsconfig `types` (browser app) — declared
+// locally for the fixed-TZ test below rather than widening ambient types.
+declare const process: { env: Record<string, string | undefined> }
 
 const msg = (overrides: Partial<MessageOut> = {}): MessageOut => ({
   partition: 2, offset: 1337, timestamp_ms: 1754900000000,
@@ -47,5 +52,25 @@ describe('MessageRow', () => {
     render(<MessageRow message={msg()} />)
     expect(screen.queryByTestId('jump-target')).not.toBeInTheDocument()
     expect(screen.getByTestId('message-row').className).not.toMatch(/emerald/)
+  })
+
+  // UTC/local display toggle (owner ruling 2026-08-15): rows re-render the
+  // SAME epoch-ms value in either zone — no refetch, pure formatting swap.
+  describe('time display mode (fixed TZ=America/New_York)', () => {
+    const ORIGINAL_TZ = process.env.TZ
+    beforeAll(() => { process.env.TZ = 'America/New_York' })
+    afterAll(() => { process.env.TZ = ORIGINAL_TZ })
+
+    it('shows UTC by default (unchanged historical behavior)', () => {
+      render(<MessageRow message={msg({ timestamp_ms: 1_704_067_205_000 })} />)
+      expect(screen.getByText(new Date(1_704_067_205_000).toISOString())).toBeInTheDocument()
+    })
+
+    it('shows the browser\'s local zone, explicitly labelled, once the toggle is set to local', () => {
+      setTimeDisplayMode('local')
+      render(<MessageRow message={msg({ timestamp_ms: 1_704_067_205_000 })} />)
+      // 2024-01-01T00:00:05Z == 2023-12-31 19:00:05 America/New_York (EST, UTC-5)
+      expect(screen.getByText('2023-12-31 19:00:05.000 local')).toBeInTheDocument()
+    })
   })
 })

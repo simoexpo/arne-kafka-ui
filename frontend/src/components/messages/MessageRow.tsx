@@ -1,5 +1,7 @@
 import { useState } from 'react'
 import type { MessageOut } from '../../api/types'
+import { formatTimestamp } from '../../lib/format'
+import { useTimeDisplayMode } from '../../lib/timeDisplayMode'
 import { EncodingBadge } from './EncodingBadge'
 import { PayloadView } from './PayloadView'
 
@@ -13,7 +15,8 @@ export function MessageRow({
   isJumpTarget?: boolean
 }) {
   const [open, setOpen] = useState(false)
-  const ts = message.timestamp_ms === null ? '—' : new Date(message.timestamp_ms).toISOString()
+  const timeDisplayMode = useTimeDisplayMode()
+  const ts = message.timestamp_ms === null ? '—' : formatTimestamp(message.timestamp_ms, timeDisplayMode)
   const preview = message.value === null ? '∅ null' : message.value.text.replaceAll('\n', ' ')
   const isError = message.value?.encoding === 'decode_error'
   return (

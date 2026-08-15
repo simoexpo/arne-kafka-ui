@@ -1,4 +1,6 @@
 import { useState } from 'react'
+import { formatTimestamp } from '../../lib/format'
+import { useTimeDisplayMode } from '../../lib/timeDisplayMode'
 
 export type JumpTarget =
   | { kind: 'now' }
@@ -48,6 +50,12 @@ function msToDatetimeLocal(ms: number): string {
 }
 
 export function JumpControl({ onJump }: { onJump: (target: JumpTarget) => void }) {
+  // UTC/local display toggle (owner ruling 2026-08-15): the preview below
+  // follows this so it always speaks the SAME zone as the rows/header the
+  // reader is about to jump into — the picker's own input, however, always
+  // stays browser-local (that's a native `datetime-local` constraint, not a
+  // preference), hence the "local" caption next to it never changes.
+  const timeDisplayMode = useTimeDisplayMode()
   const [expanded, setExpanded] = useState<Expanded>('none')
   const [partitionText, setPartitionText] = useState('')
   const [offsetText, setOffsetText] = useState('')
@@ -177,11 +185,11 @@ export function JumpControl({ onJump }: { onJump: (target: JumpTarget) => void }
           <span className="text-[10px] text-zinc-500 dark:text-zinc-400">local</span>
           {tsValid && (
             <span
-              data-testid="jump-timestamp-utc-preview"
+              data-testid="jump-timestamp-preview"
               className="text-[10px] text-zinc-500 dark:text-zinc-400"
-              title="The absolute instant this will jump to — rows are shown in UTC."
+              title="The absolute instant this will jump to, in the same zone the rows/header are currently showing."
             >
-              {new Date(tsMs).toISOString()} UTC
+              {formatTimestamp(tsMs, timeDisplayMode)}
             </span>
           )}
           <button

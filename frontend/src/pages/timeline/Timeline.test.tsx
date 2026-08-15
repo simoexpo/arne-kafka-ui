@@ -5,7 +5,12 @@ import { FakeEventSource } from '../../test/fake-event-source'
 import * as sse from '../../api/sse'
 import type { MessageOut, SseErrorData } from '../../api/types'
 import { encodeCursor } from '../../lib/timelineCursor'
+import { setTimeDisplayMode } from '../../lib/timeDisplayMode'
 import { Timeline } from './Timeline'
+
+// `@types/node` isn't in this app's tsconfig `types` (browser app) — declared
+// locally for the fixed-TZ tests below rather than widening ambient types.
+declare const process: { env: Record<string, string | undefined> }
 
 // Task 3: the sliding-window store decodes every non-null cursor as a real
 // per-partition position map (see timelineCursor.ts) — unlike the old v1.4
@@ -230,6 +235,33 @@ describe('Timeline', () => {
 
     expect(screen.getByTestId('window-range')).toHaveTextContent('2024-01-01 00:00 → 00:01 UTC')
     expect(screen.queryByText(/^\d+ messages$/)).not.toBeInTheDocument()
+  })
+
+  // UTC/local display toggle (owner ruling 2026-08-15): the header's own
+  // zone label follows the global toggle, re-rendering the SAME loaded rows
+  // — no refetch. Fixed TZ so a mode that silently fell back to UTC math
+  // would fail this.
+  describe('UTC/local display toggle (fixed TZ=America/New_York)', () => {
+    const ORIGINAL_TZ = process.env.TZ
+    beforeEach(() => { process.env.TZ = 'America/New_York' })
+    afterEach(() => { process.env.TZ = ORIGINAL_TZ })
+
+    it('window-range header switches to the local zone label and time when toggled, without any new request', async () => {
+      mockTail()
+      render(<Timeline cluster="prod" topic="orders" />)
+      await emit(0, 'match', mk(2, { timestamp_ms: 1_704_067_265_000 })) // 2024-01-01T00:01:05Z
+      await emit(0, 'match', mk(1, { timestamp_ms: 1_704_067_205_000 })) // 2024-01-01T00:00:05Z
+      await emit(0, 'page_end', { cursor: cur({ 0: 1 }), exhausted: false })
+      expect(screen.getByTestId('window-range')).toHaveTextContent('2024-01-01 00:00 → 00:01 UTC')
+
+      const requestsBefore = FakeEventSource.instances.length
+      act(() => setTimeDisplayMode('local'))
+
+      // 2024-01-01 00:00:05/00:01:05 Z == 2023-12-31 19:00/19:01 America/New_York (EST, UTC-5)
+      expect(screen.getByTestId('window-range')).toHaveTextContent('2023-12-31 19:00 → 19:01 local')
+      expect(screen.getAllByTestId('message-row')[0]).toHaveTextContent('2023-12-31 19:01:05.000 local')
+      expect(FakeEventSource.instances.length).toBe(requestsBefore)
+    })
   })
 
   it('header reads gracefully before any row has loaded', () => {
