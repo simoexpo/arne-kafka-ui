@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from '@testing-library/react'
+import { render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import { setTimeDisplayMode } from '../../lib/timeDisplayMode'
@@ -117,7 +117,13 @@ describe('JumpControl', () => {
   // Fixed, non-UTC test zone so a picker that (incorrectly) treated its
   // value as UTC instead of local would produce a different, wrong ms value
   // and fail these tests. America/New_York is UTC-4 (EDT) on the date used.
-  describe('datetime-local picker (fixed TZ=America/New_York)', () => {
+  // The picker itself (calendar grid, day click, time fields, its own
+  // Apply/Escape/outside-click handling) has its own dedicated suite —
+  // ../../components/DateTimePicker.test.tsx. These tests are about the
+  // INTEGRATION: JumpControl feeds it `tsMs`/receives ms back into `tsText`,
+  // and the picker's own Apply is independent of the segment's "jump"
+  // button — only the latter ever calls onJump.
+  describe('timestamp picker integration (fixed TZ=America/New_York)', () => {
     const ORIGINAL_TZ = process.env.TZ
 
     beforeAll(() => {
@@ -135,17 +141,29 @@ describe('JumpControl', () => {
       expect(screen.getByLabelText(/pick timestamp.*local/i)).toBeInTheDocument()
     })
 
-    it('picking a date+time converts from the picker\'s local zone to the correct UTC epoch ms and fills the ms field', async () => {
+    it('picking via the popover fills the ms field; only the segment\'s jump button fires onJump', async () => {
       const user = userEvent.setup()
       const onJump = vi.fn()
       render(<JumpControl onJump={onJump} />)
       await user.click(screen.getByTestId('jump-timestamp'))
-      const picker = screen.getByTestId('jump-timestamp-picker')
-      fireEvent.change(picker, { target: { value: '2026-08-15T14:32:10' } })
+      // Seed a known month/day by typing the raw ms field first, so the
+      // popover opens on August 2026 rather than whatever month the test
+      // happens to run in.
+      await user.type(screen.getByTestId('jump-timestamp-input'), String(Date.UTC(2026, 7, 15, 18, 32, 10)))
+      await user.click(screen.getByLabelText(/pick timestamp.*local/i))
+      await user.click(screen.getByTestId('datetime-picker-day-20'))
+      await user.clear(screen.getByLabelText('hour'))
+      await user.type(screen.getByLabelText('hour'), '09')
+      await user.clear(screen.getByLabelText('minute'))
+      await user.type(screen.getByLabelText('minute'), '05')
+      await user.clear(screen.getByLabelText('second'))
+      await user.type(screen.getByLabelText('second'), '00')
+      await user.click(screen.getByTestId('datetime-picker-apply'))
 
-      // 2026-08-15 14:32:10 America/New_York (EDT, UTC-4) == 2026-08-15T18:32:10Z
-      const expectedMs = Date.UTC(2026, 7, 15, 18, 32, 10)
+      // 2026-08-20 09:05:00 America/New_York (EDT, UTC-4) == 2026-08-20T13:05:00Z
+      const expectedMs = Date.UTC(2026, 7, 20, 13, 5, 0)
       expect(screen.getByTestId('jump-timestamp-input')).toHaveValue(String(expectedMs))
+      expect(onJump).not.toHaveBeenCalled()
 
       await user.click(screen.getByTestId('jump-timestamp-apply'))
       expect(onJump).toHaveBeenCalledExactlyOnceWith({ kind: 'timestamp', ts_ms: expectedMs })
@@ -155,8 +173,7 @@ describe('JumpControl', () => {
       const user = userEvent.setup()
       render(<JumpControl onJump={vi.fn()} />)
       await user.click(screen.getByTestId('jump-timestamp'))
-      const picker = screen.getByTestId('jump-timestamp-picker')
-      fireEvent.change(picker, { target: { value: '2026-08-15T14:32:10' } })
+      await user.type(screen.getByTestId('jump-timestamp-input'), String(Date.UTC(2026, 7, 15, 18, 32, 10)))
       expect(screen.getByTestId('jump-timestamp-preview')).toHaveTextContent('2026-08-15T18:32:10')
     })
 
@@ -170,20 +187,18 @@ describe('JumpControl', () => {
       const user = userEvent.setup()
       render(<JumpControl onJump={vi.fn()} />)
       await user.click(screen.getByTestId('jump-timestamp'))
-      const picker = screen.getByTestId('jump-timestamp-picker')
-      fireEvent.change(picker, { target: { value: '2026-08-15T14:32:10' } })
+      await user.type(screen.getByTestId('jump-timestamp-input'), String(Date.UTC(2026, 7, 15, 18, 32, 10)))
       // Same instant as above (2026-08-15T18:32:10Z), now shown local.
       expect(screen.getByTestId('jump-timestamp-preview')).toHaveTextContent('2026-08-15 14:32:10.000 local')
     })
 
-    it('typing an epoch-ms value directly also updates the picker to match (bidirectional sync)', async () => {
+    it('typing an epoch-ms value directly also updates the picker trigger to match (bidirectional sync)', async () => {
       const user = userEvent.setup()
       render(<JumpControl onJump={vi.fn()} />)
       await user.click(screen.getByTestId('jump-timestamp'))
       // 2026-08-15T18:32:10Z == 2026-08-15 14:32:10 America/New_York (EDT, UTC-4)
       await user.type(screen.getByTestId('jump-timestamp-input'), String(Date.UTC(2026, 7, 15, 18, 32, 10)))
-      const picker = screen.getByTestId('jump-timestamp-picker') as HTMLInputElement
-      expect(picker.value).toMatch(/^2026-08-15T14:32:10/)
+      expect(screen.getByLabelText(/pick timestamp.*local/i)).toHaveValue('2026-08-15 14:32:10')
     })
   })
 })

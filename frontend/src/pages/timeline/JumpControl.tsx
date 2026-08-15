@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { DateTimePicker } from '../../components/DateTimePicker'
 import { formatTimestamp } from '../../lib/format'
 import { useTimeDisplayMode } from '../../lib/timeDisplayMode'
 
@@ -17,44 +18,13 @@ function parseNonNegativeInt(text: string): number | null {
   return Number(text)
 }
 
-function pad(n: number): string {
-  return String(n).padStart(2, '0')
-}
-
-// `<input type="datetime-local">` has NO timezone of its own — its value
-// (e.g. "2026-08-15T14:32:10") is always the BROWSER's own local wall-clock
-// reading, per the HTML spec. Converting it with plain local `Date`
-// components (rather than trusting `new Date(string)` string-parsing, which
-// has historically had cross-engine quirks for non-`Z`-suffixed strings) is
-// the one correct way to turn that into an absolute epoch-ms instant — the
-// same instant `ts_ms` always meant, just entered via a friendlier control.
-// The trailing `(?:\.\d+)?` tolerates a fractional-seconds suffix some
-// engines echo back on the element's own `.value` (jsdom always does, even
-// at `step="1"`, which per spec asks for whole seconds only) — the sub-
-// second part is discarded, never fed into the parsed time.
-function datetimeLocalToMs(value: string): number | null {
-  const match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2})(?:\.\d+)?)?$/.exec(value)
-  if (!match) return null
-  const [, y, mo, d, h, mi, s] = match
-  return new Date(Number(y), Number(mo) - 1, Number(d), Number(h), Number(mi), s ? Number(s) : 0).getTime()
-}
-
-// Inverse of the above, for the picker's own `value` — keeps the picker and
-// the raw ms field showing the SAME instant regardless of which one the
-// reader last edited (arrangement chosen here: bidirectional sync, not a
-// one-way "picker fills the field then goes stale" affordance — the ms
-// field remains the exact-value escape hatch either way).
-function msToDatetimeLocal(ms: number): string {
-  const d = new Date(ms)
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`
-}
-
 export function JumpControl({ onJump }: { onJump: (target: JumpTarget) => void }) {
   // UTC/local display toggle (owner ruling 2026-08-15): the preview below
   // follows this so it always speaks the SAME zone as the rows/header the
-  // reader is about to jump into — the picker's own input, however, always
-  // stays browser-local (that's a native `datetime-local` constraint, not a
-  // preference), hence the "local" caption next to it never changes.
+  // reader is about to jump into — the picker itself, however, always
+  // interprets and shows browser-local wall-clock time (that's what a
+  // reader picking off a calendar expects), hence the "local" caption next
+  // to it never changes.
   const timeDisplayMode = useTimeDisplayMode()
   const [expanded, setExpanded] = useState<Expanded>('none')
   const [partitionText, setPartitionText] = useState('')
@@ -169,18 +139,10 @@ export function JumpControl({ onJump }: { onJump: (target: JumpTarget) => void }
             onKeyDown={(e) => e.key === 'Enter' && applyTimestamp()}
             className="w-32 rounded border border-zinc-300 px-1 py-0.5 dark:border-zinc-700 dark:bg-zinc-900"
           />
-          <input
-            type="datetime-local"
-            step="1"
-            data-testid="jump-timestamp-picker"
-            aria-label="pick timestamp (local time)"
-            title="Interpreted in your browser's local time zone, then converted to the exact epoch-ms value on the left."
-            value={tsMs !== null ? msToDatetimeLocal(tsMs) : ''}
-            onChange={(e) => {
-              const ms = datetimeLocalToMs(e.target.value)
-              if (ms !== null) setTsText(String(ms))
-            }}
-            className="rounded border border-zinc-300 px-1 py-0.5 dark:border-zinc-700 dark:bg-zinc-900"
+          <DateTimePicker
+            valueMs={tsMs}
+            onChange={(ms) => setTsText(String(ms))}
+            ariaLabel="pick timestamp (local time)"
           />
           <span className="text-[10px] text-zinc-500 dark:text-zinc-400">local</span>
           {tsValid && (
