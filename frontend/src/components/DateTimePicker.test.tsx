@@ -1,5 +1,5 @@
 import type { ComponentProps } from 'react'
-import { act, render, screen, within } from '@testing-library/react'
+import { act, fireEvent, render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import {
@@ -412,6 +412,47 @@ describe('DateTimePicker', () => {
       // deterministic: day 15 (the seeded value) is marked selected.
       expect(screen.getByTestId('datetime-picker-day-15')).toHaveAttribute('aria-pressed', 'true')
       expect(screen.getByTestId('datetime-picker-day-20')).toHaveAttribute('aria-pressed', 'false')
+    })
+
+    // Owner ruling 2026-08-16 (second feedback round): emerald is
+    // semantically reserved elsewhere (live/healthy, the jump-target row) —
+    // the picker's own selection highlight must never collide with it.
+    it('the selected day and the "today" marker use sky, never emerald', () => {
+      // Fixed system time so "today" is deterministic and DISTINCT from the
+      // seeded/selected day (Aug 15) — this is the one test in the file
+      // that needs "today" to be a specific, known day rather than
+      // "whatever the real clock says" (see the sibling test above).
+      // `fireEvent` (not `userEvent`) — `userEvent`'s own internal delays
+      // don't mix with fake timers without extra setup, and this test only
+      // needs one plain click.
+      vi.useFakeTimers()
+      vi.setSystemTime(new Date(2026, 7, 10, 12, 0, 0))
+      try {
+        render(<Picker valueMs={SEED_MS} onChange={vi.fn()} />)
+        fireEvent.click(screen.getByTestId('datetime-picker-trigger'))
+
+        const selectedDay = screen.getByTestId('datetime-picker-day-15')
+        expect(selectedDay.className).toMatch(/\bbg-sky-/)
+        expect(selectedDay.className).not.toMatch(/emerald/)
+
+        const todayDay = screen.getByTestId('datetime-picker-day-10')
+        expect(todayDay).toHaveAttribute('aria-pressed', 'false')
+        expect(todayDay.className).toMatch(/\btext-sky-/)
+        expect(todayDay.className).not.toMatch(/emerald/)
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
+    it('the selected wheel-column value uses sky, never emerald', async () => {
+      const user = userEvent.setup()
+      render(<Picker valueMs={SEED_MS} onChange={vi.fn()} />)
+      await user.click(screen.getByTestId('datetime-picker-trigger'))
+
+      // Default mode (UTC, no toggle in this test): SEED_MS's hour is 18.
+      const selectedHour = screen.getByTestId('datetime-picker-hour-18')
+      expect(selectedHour.className).toMatch(/\bbg-sky-/)
+      expect(selectedHour.className).not.toMatch(/emerald/)
     })
 
     it('renders each time column as a looping wheel: only the canonical (accessible) copy is exposed, at the full 00-23/00-59/00-59 range', async () => {

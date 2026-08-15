@@ -31,6 +31,21 @@ import { useTimeDisplayMode, type TimeDisplayMode } from '../lib/timeDisplayMode
 // per the CURRENT mode. Two instants a day apart in one zone can be the
 // same wall-clock day in the other; whichever zone is active, Apply always
 // reconstructs the exact same epoch ms the fields represent.
+//
+// Owner ruling 2026-08-16 (second feedback round): selection highlight
+// recolored from emerald to SKY. Emerald is semantically reserved elsewhere
+// in the app for "live/healthy" (the pulsing "● live" indicator, the
+// jump-target row highlight after a jump lands, healthy-cluster dots) —
+// reusing it here for "this is the day/hour/minute/second you've picked"
+// was a coincidental color collision with no shared meaning. Sky was
+// chosen over amber/red (also reserved: staleness/error) because it's
+// already the app's own "this is selected/notable, no status implied"
+// color — AppShell's own UTC/local `TimeZoneToggle` lights its active half
+// with `bg-sky-100/text-sky-700` (dark: `bg-sky-500/20/text-sky-300`), and
+// message header keys (MessageRow/JsonView) render `text-sky-800/300` —
+// both purely representational, never a status signal. The jump-target row
+// highlight (separate component) stays emerald on purpose: "you jumped
+// here and it's live" IS a status, not a plain selection.
 
 const MONTH_NAMES = [
   'January', 'February', 'March', 'April', 'May', 'June',
@@ -247,7 +262,7 @@ function TimeColumn({ label, testidPrefix, count, selected, onSelect, open }: {
                   onClick={() => onSelect(n)}
                   className={
                     isSelected
-                      ? 'flex h-6 w-full items-center justify-center bg-emerald-500 font-medium text-white'
+                      ? 'flex h-6 w-full items-center justify-center bg-sky-500 font-medium text-white'
                       : 'flex h-6 w-full items-center justify-center hover:bg-zinc-100 dark:hover:bg-zinc-800'
                   }
                 >
@@ -521,9 +536,9 @@ export function DateTimePicker({
                       onClick={() => selectDay(day)}
                       className={
                         selected
-                          ? 'rounded bg-emerald-500 py-0.5 font-medium text-white'
+                          ? 'rounded bg-sky-500 py-0.5 font-medium text-white'
                           : isToday(day)
-                            ? 'rounded py-0.5 font-medium text-emerald-600 hover:bg-zinc-100 dark:text-emerald-400 dark:hover:bg-zinc-800'
+                            ? 'rounded py-0.5 font-medium text-sky-600 hover:bg-zinc-100 dark:text-sky-400 dark:hover:bg-zinc-800'
                             : 'rounded py-0.5 hover:bg-zinc-100 dark:hover:bg-zinc-800'
                       }
                     >
