@@ -162,6 +162,24 @@ function scrollToTopFarFromBottom() {
   }
 }
 
+// Real browsers (unlike jsdom) fire a genuine native 'scroll' event the
+// instant JS assigns `el.scrollTop = ...` — including for a jump's own
+// landing `scrollToEdge` call. Timeline recognizes exactly that one echoed
+// event, BY VALUE (see `expectedLandingScrollTopRef`'s own comment), so it
+// never mistakenly fires a bottom/top-sentinel pagination request. jsdom
+// never produces that echo on its own, so any test that jumps and then
+// wants to prove a GENUINE subsequent scroll still triggers pagination
+// must fire this first — exactly mirroring what a real browser already did
+// automatically — or its own real scroll could otherwise be misread as
+// (or itself mask) the still-armed expectation. Reads the CURRENT
+// `scrollTop` straight off the element (whatever the landing's own
+// scrollToEdge call actually set it to) rather than guessing a value, so
+// this always matches regardless of jsdom's unstubbed defaults.
+function consumeLandingEcho() {
+  const el = screen.getByTestId('timeline-scroll')
+  fireEvent.scroll(el, { target: { scrollTop: el.scrollTop } })
+}
+
 describe('Timeline', () => {
   it('loads the latest page on mount and renders rows in store order', async () => {
     mockTail()
@@ -544,6 +562,7 @@ describe('Timeline', () => {
       await emit(1, 'match', mk(2))
       await emit(1, 'page_end', { cursor: cur({ 0: 3 }), exhausted: false })
       expect(FakeEventSource.instances).toHaveLength(2)
+      consumeLandingEcho() // the real browser's own echo of this jump's scrollToEdge — see its own comment
 
       // Task 3: the beginning anchor bootstrap also seeded a real (non-
       // exhausted) BOTTOM edge from its own rows (the store's documented
@@ -576,6 +595,7 @@ describe('Timeline', () => {
       await user.click(screen.getByTestId('jump-beginning'))
       await emit(1, 'match', mk(2))
       await emit(1, 'page_end', { cursor: cur({ 0: 3 }), exhausted: false })
+      consumeLandingEcho() // the real browser's own echo of this jump's scrollToEdge — see its own comment
 
       // Task 3: isolates the top sentinel (see scrollToTopFarFromBottom's
       // own doc comment) — the beginning bootstrap also seeded a real,
@@ -931,6 +951,7 @@ describe('Timeline', () => {
       await emit(2, 'match', mk(1))
       await emit(2, 'page_end', { cursor: cur({ 0: 2 }), exhausted: false })
       expect(screen.queryByTestId('load-newer')).not.toBeInTheDocument() // no button — scroll only
+      consumeLandingEcho() // the real browser's own echo of this jump's scrollToEdge — see its own comment
 
       // Task 3: the beginning bootstrap ALSO seeded a real bottom edge from
       // its own rows (the store's documented opposite-side anchor seed —
@@ -1056,6 +1077,70 @@ describe('Timeline', () => {
         restoreHeight()
       }
     })
+
+    // Owner-reported bug (2026-08-15): after an offset/timestamp jump, the
+    // target rendered in the MIDDLE of the page instead of at the bottom
+    // edge. Root cause (found via a real-browser probe, not visible in
+    // jsdom): a real browser fires a genuine native 'scroll' event when JS
+    // assigns `el.scrollTop = ...` — jsdom does NOT, which is exactly why
+    // the tests above never caught this. That echoed scroll event lands
+    // exactly at the bottom (scrollToEdge('bottom') just put it there),
+    // which trivially satisfies the bottom-sentinel's "near the bottom"
+    // check — firing an UNSOLICITED loadOlder() immediately after landing.
+    // The older page it fetches appends BELOW the target (correct, back
+    // pages append below and don't move the viewport when nothing above
+    // the reader trims — see the scroll-anchoring comment on `pendingAnchorRef`),
+    // but that's exactly the bug: the viewport does NOT follow down to the
+    // NEW bottom, so the target — genuinely the bottom-most loaded row a
+    // moment ago — ends up stranded above it, rendering "in the middle".
+    // This test simulates that echoed scroll event directly (the same way
+    // every other test here drives scroll-sentinel behavior, via
+    // `fireEvent.scroll`) and asserts it must NOT trigger a pagination
+    // request — while a genuinely later, real user scroll still must.
+    it('the scroll event a real browser fires for the landing scrollToEdge call does not trigger an extra pagination request', async () => {
+      mockTail()
+      const user = userEvent.setup()
+      render(<Timeline cluster="prod" topic="orders" />)
+      await emit(0, 'match', mk(9))
+      await emit(0, 'page_end', { cursor: cur({ 0: 9 }), exhausted: false })
+
+      // Stubbed BEFORE the jump lands, so scrollToEdge('bottom') computes a
+      // realistic non-zero "bottom" (4000) — same as a real browser's own
+      // actual scrollHeight, unlike jsdom's unstubbed default of 0.
+      const restoreScrollHeight = stubScrollHeight(4000)
+      const restoreClientHeight = stubClientHeight(600)
+      try {
+        await user.click(screen.getByTestId('jump-offset'))
+        await user.type(screen.getByTestId('jump-offset-partition-input'), '1')
+        await user.type(screen.getByTestId('jump-offset-value-input'), '77')
+        await user.click(screen.getByTestId('jump-offset-apply'))
+        await emit(1, 'match', mk(30))
+        // Bottom (back) cursor open, not exhausted — a genuine "more history
+        // below" case, exactly what makes the bottom-sentinel fire in a real
+        // browser.
+        await emit(1, 'page_end', { cursor: cur({ 0: 31 }), exhausted: false })
+        expect(FakeEventSource.instances).toHaveLength(2) // landing page only, nothing auto-triggered yet
+
+        // The echoed native scroll event: scrollTop === scrollHeight, exactly
+        // what scrollToEdge('bottom') just set — must be swallowed once.
+        fireEvent.scroll(screen.getByTestId('timeline-scroll'), { target: { scrollTop: 4000 } })
+      } finally {
+        restoreScrollHeight()
+        restoreClientHeight()
+      }
+      expect(FakeEventSource.instances).toHaveLength(2) // still no extra request — the echo was suppressed
+
+      // A genuinely later user scroll to the bottom must still page normally
+      // — the suppression is a single one-shot swallow, not a broken feature.
+      // Cursor is 30 (mk(30)'s own offset), not the mocked page_end cursor
+      // (31): the bottom map is opposite-seeded from this anchor bootstrap's
+      // own INSERTED ROW offsets (the only source for the side the request
+      // itself didn't touch — direction is 'forward' here, so `31` feeds
+      // the TOP map instead; see createSlidingWindowStore's own doc comment).
+      scrollToBottom()
+      expect(FakeEventSource.instances).toHaveLength(3)
+      expect(FakeEventSource.instances[2].url).toBe(url({ direction: 'back', limit: '100', cursor: cur({ 0: 30 }) }))
+    })
   })
 
   describe('attached vs detached windows', () => {
@@ -1135,6 +1220,7 @@ describe('Timeline', () => {
       await user.click(screen.getByTestId('jump-beginning'))
       await emit(1, 'match', mk(2))
       await emit(1, 'page_end', { cursor: cur({ 0: 3 }), exhausted: false }) // forward cursor open, not exhausted yet
+      consumeLandingEcho() // the real browser's own echo of this jump's scrollToEdge — see its own comment
 
       await act(async () => tail.handlers().onMessage(mk(50)))
       expect(screen.getByText('▲ 1 new')).toBeInTheDocument()

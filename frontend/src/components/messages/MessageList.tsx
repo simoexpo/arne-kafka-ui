@@ -4,13 +4,20 @@ import type { MessageOut } from '../../api/types'
 import { MessageRow } from './MessageRow'
 
 export interface MessageListHandle {
-  // Jumps reposition the viewport, not just the data: 'now'/'offset'/
-  // 'timestamp' land you looking at the top of the new window; 'beginning'
-  // lands you at the start of history, looking forward, so the bottom (the
+  // Jumps reposition the viewport, not just the data: 'now' lands looking
+  // at the top of the new window; 'beginning'/'offset'/'timestamp' land at
+  // the start of their loaded window looking forward, so the bottom (the
   // oldest-visible edge) is the meaningful anchor there. Assigning
   // scrollTop = scrollHeight is the standard clamp-to-bottom trick (a real
   // browser clamps any out-of-range value to the max scrollable offset).
-  scrollToEdge(edge: 'top' | 'bottom'): void
+  // Returns the scrollTop it actually set (or `null` if the scroll element
+  // isn't mounted yet, a no-op) — owner-reported bug, 2026-08-15: a real
+  // browser fires a genuine native 'scroll' event for this assignment
+  // (jsdom does not), which Timeline must recognize as its OWN echo rather
+  // than a real pagination-triggering scroll; the caller records this
+  // return value to recognize that exact echo when it arrives (see
+  // `suppressNextScrollRef`'s own comment in Timeline.tsx).
+  scrollToEdge(edge: 'top' | 'bottom'): number | null
   // Nudges scrollTop by `delta` (added, not set) — compensates for a
   // height change that happened above the viewport (a prepend) so the
   // reader's visual position doesn't silently shift.
@@ -62,8 +69,9 @@ export const MessageList = forwardRef<
     () => ({
       scrollToEdge(edge) {
         const el = parentRef.current
-        if (!el) return
+        if (!el) return null
         el.scrollTop = edge === 'top' ? 0 : el.scrollHeight
+        return el.scrollTop
       },
       adjustScrollTop(delta) {
         const el = parentRef.current

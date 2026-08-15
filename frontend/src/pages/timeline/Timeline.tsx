@@ -172,6 +172,31 @@ export function Timeline({
   const listRef = useRef<MessageListHandle>(null)
   const pendingScrollEdgeRef = useRef<'top' | 'bottom' | null>(null)
   const scrollWasLoadingRef = useRef(false)
+  // Owner-reported bug (2026-08-15): a jump landing at the bottom edge
+  // (`scrollToEdge('bottom')`, below) programmatically sets `el.scrollTop`
+  // — and a REAL browser (unlike jsdom, which is why this shipped
+  // untested) fires a genuine native 'scroll' event for that assignment,
+  // same as any user-driven scroll. That echoed event lands exactly at the
+  // bottom, trivially satisfying the bottom-sentinel's "near the bottom"
+  // check in `handleScroll` — firing an unsolicited `loadOlder()` a moment
+  // after landing. The older page it fetches appends BELOW the target
+  // (correct — a back page below the cap doesn't move the viewport), but
+  // nothing then re-follows the viewport down to the NEW bottom, so the
+  // target — genuinely the bottom-most loaded row a moment ago — ends up
+  // stranded above it, rendering "in the middle" of the now-larger window.
+  //
+  // Fix: recognize that ONE echoed event by VALUE, not by "whichever scroll
+  // happens to arrive next" (an earlier version of this fix used a plain
+  // one-shot boolean flag — wrong, because it could swallow a genuinely
+  // later, unrelated user scroll if nothing happened to consume it first,
+  // e.g. a jump landing followed by a filter change and only THEN a real
+  // scroll: no scroll event fires in between to consume the flag, so it was
+  // still armed and ate the real one). Recording the EXACT scrollTop value
+  // `scrollToEdge` just set (its return value) instead means only a scroll
+  // event reporting that precise value gets treated as the echo — cleared
+  // immediately whether it matches or not, so a stale value can never
+  // linger to misfire against some later, coincidentally-different scroll.
+  const expectedLandingScrollTopRef = useRef<number | null>(null)
 
   // Scroll anchoring (design spec v1.3 "Scroll anchoring", owner feedback
   // 2026-08-15; ROW-IDENTITY rewrite, fix round 1, M1 — review of 079f30f):
@@ -726,7 +751,10 @@ export function Timeline({
     const edge = pendingScrollEdgeRef.current
     if (edge === null) return
     pendingScrollEdgeRef.current = null
-    listRef.current?.scrollToEdge(edge)
+    // See expectedLandingScrollTopRef's own comment: records the EXACT
+    // value just assigned (or `null` — nothing to expect an echo of — if
+    // the scroll element wasn't mounted to receive it at all).
+    expectedLandingScrollTopRef.current = listRef.current?.scrollToEdge(edge) ?? null
   }, [state.loading])
 
   // Scroll anchoring (row-identity rewrite, fix round 1 M1; per-batch, fix
@@ -1029,6 +1057,17 @@ export function Timeline({
   // would silently drop the running scanned/matches totals the continue
   // affordance is displaying, exactly the "silent stop" I2 exists to avoid.
   const handleScroll = (scrollTop: number, scrollHeight: number, clientHeight: number) => {
+    // See expectedLandingScrollTopRef's own comment: swallow exactly the
+    // scroll event that reports the value our own landing scrollToEdge call
+    // just assigned — never treat it as a pagination trigger. Cleared
+    // unconditionally on the FIRST scroll event after arming, matching or
+    // not, so a stale expectation can never linger to misfire against some
+    // later, unrelated scroll.
+    if (expectedLandingScrollTopRef.current !== null) {
+      const expected = expectedLandingScrollTopRef.current
+      expectedLandingScrollTopRef.current = null
+      if (scrollTop === expected) return
+    }
     const pinnedTop = scrollTop < TOP_PIN_THRESHOLD
     if (pinnedTop) {
       if (attachedRef.current && pauseReasonRef.current === 'auto') {
