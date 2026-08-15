@@ -35,10 +35,36 @@ pub enum Direction {
     Forward,
 }
 
-/// An opaque, per-partition offset map plus the direction it continues in.
-/// Serialized as compact JSON, then base64, so it round-trips as a single
-/// URL-safe-ish query-string token without the client needing to know its
-/// shape.
+/// An opaque, per-partition offset map plus the direction it was minted in.
+///
+/// **Wire format (documented contract, spec v1.6):** standard-alphabet
+/// base64 of the compact JSON `{"direction":"back"|"forward","positions":
+/// [[partition,offset],...]}` — `positions` is an array of 2-element
+/// `[i32, i64]` pairs, one per partition, in no particular guaranteed
+/// order. This is deliberately client-constructible: the sliding-window
+/// frontend mints its own cursors from row offsets it already tracks
+/// (rather than only ever replaying a cursor the backend handed back), so
+/// the format is a contract, not an implementation detail — see
+/// `tests/api.rs`'s `timeline_accepts_a_client_constructed_cursor` for a
+/// cursor built without this Rust type at all.
+///
+/// **`direction` is informational only.** It records which direction the
+/// cursor was minted in (useful for debugging/logging), but the backend
+/// never enforces it against a request: the REQUEST's own `direction` query
+/// param is authoritative for how `positions` are read (see
+/// `api::messages::timeline_sse`, where the decoded `direction` field is
+/// intentionally unused). Per the design's bound-semantics ruling, this is
+/// exact, not a loose convention: a `Back` request treats `positions` as
+/// exclusive uppers; a `Forward` request treats the identical numbers as
+/// inclusive lowers (see `Direction`'s doc comment, and `page_windows`,
+/// whose arithmetic is where this is actually implemented) — so following a
+/// back-minted cursor with `direction=forward` is a well-defined re-read of
+/// the region just below that cursor, not a version mismatch.
+///
+/// Every decoded cursor is treated as untrusted input regardless of origin:
+/// positions are clamped into each partition's *current* watermark range
+/// before use (`clamp_positions`), and any partition id absent from today's
+/// watermarks is dropped.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Cursor {
     pub direction: Direction,
@@ -947,6 +973,50 @@ mod tests {
         let (new_positions, exhausted) = advance(&positions, &windows, wm, Direction::Back);
         assert_eq!(new_positions, vec![(0, 0)]);
         assert!(exhausted, "clamped position at the edge must report exhausted, not loop forever");
+    }
+
+    /// Anchor partition property (spec v1.6, binding acceptance test),
+    /// cheap variant: for `Anchor::Beginning`, `back(anchor)` has nothing to
+    /// read (already at the low watermark) while `forward(anchor)` reads
+    /// everything — a trivial but real instance of "back(anchor) and
+    /// forward(anchor) split the topic disjointly and completely per
+    /// partition". Pure, no broker: `initial_positions` + `page_windows`
+    /// alone already guarantee this, so it's tested here rather than as a
+    /// real-cluster integration test (the timestamp-anchor case, which
+    /// isn't this cheap, gets that treatment in `tests/api.rs`).
+    #[test]
+    fn anchor_beginning_property_back_empty_forward_everything() {
+        let wm: &[(i32, i64, i64)] = &[(0, 0, 20), (1, 0, 20)];
+        let positions = initial_positions(wm, &Anchor::Beginning);
+        assert_eq!(positions, vec![(0, 0), (1, 0)]);
+
+        let back = page_windows(&positions, wm, Direction::Back, 500);
+        assert!(back.is_empty(), "back(beginning) must fetch nothing: already at the low watermark");
+
+        let forward = page_windows(&positions, wm, Direction::Forward, 500);
+        assert_eq!(forward, vec![
+            range::PartitionRange { partition: 0, start: 0, end: 20 },
+            range::PartitionRange { partition: 1, start: 0, end: 20 },
+        ], "forward(beginning) must cover the entire topic");
+    }
+
+    /// Symmetric case: `Anchor::Latest` — `forward(anchor)` has nothing to
+    /// read (already at the high watermark), `back(anchor)` reads
+    /// everything.
+    #[test]
+    fn anchor_latest_property_forward_empty_back_everything() {
+        let wm: &[(i32, i64, i64)] = &[(0, 0, 20), (1, 0, 20)];
+        let positions = initial_positions(wm, &Anchor::Latest);
+        assert_eq!(positions, vec![(0, 20), (1, 20)]);
+
+        let forward = page_windows(&positions, wm, Direction::Forward, 500);
+        assert!(forward.is_empty(), "forward(latest) must fetch nothing: already at the high watermark");
+
+        let back = page_windows(&positions, wm, Direction::Back, 500);
+        assert_eq!(back, vec![
+            range::PartitionRange { partition: 0, start: 0, end: 20 },
+            range::PartitionRange { partition: 1, start: 0, end: 20 },
+        ], "back(latest) must cover the entire topic");
     }
 
     /// Sanity check: a position already inside range is left untouched.

@@ -110,10 +110,12 @@ pub async fn timeline_sse(
     Query(params): Query<TimelineParams>,
 ) -> Result<Sse<impl Stream<Item = Result<Event, std::convert::Infallible>>>, ApiError> {
     // Fix round 1, M3: every param is validated — direction, limit, the
-    // cursor/anchor xor, the anchor's own shape, and (I1) a cursor's
-    // direction against the request's — strictly before `registry.get`, so
-    // a bad request against an *unknown* cluster is still 400, never a 404
-    // that masks the real problem.
+    // cursor/anchor xor, and the anchor's own shape — strictly before
+    // `registry.get`, so a bad request against an *unknown* cluster is
+    // still 400, never a 404 that masks the real problem. (I1's old check,
+    // rejecting a cursor whose own `direction` field disagreed with the
+    // request's `direction` param, was removed in spec v1.6 — see the
+    // `source` match below.)
     let direction = match params.direction.as_str() {
         "back" => timeline::Direction::Back,
         "forward" => timeline::Direction::Forward,
@@ -148,12 +150,15 @@ pub async fn timeline_sse(
         Some(cursor) => {
             let decoded = timeline::Cursor::decode(cursor)
                 .map_err(|e| ApiError::bad_request(format!("bad cursor: {e}")))?;
-            // I1: a cursor carries the direction it continues in; a request
-            // that flips `direction` against a stale/foreign cursor must
-            // fail fast, not silently paginate the wrong way.
-            if decoded.direction != direction {
-                return Err(ApiError::bad_request("cursor direction does not match direction param"));
-            }
+            // v1.6 owner ruling: direction belongs to the REQUEST, not the
+            // cursor blob. `decoded.direction` (the direction the cursor was
+            // *minted* in) is intentionally never compared against `direction`
+            // here — the request's own `direction` param is authoritative for
+            // how `decoded.positions` are read this time (see `Cursor`'s doc
+            // comment for the exact bound semantics). This is what makes the
+            // sliding window's "re-read a trimmed region by following an edge
+            // cursor in the opposite direction" a supported, well-defined
+            // request rather than a version mismatch to reject.
             PositionSource::FromCursor(decoded.positions)
         }
         None => PositionSource::FromAnchor(TimelineAnchorInput::parse(&params)?),

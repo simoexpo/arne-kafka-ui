@@ -624,24 +624,164 @@ async fn timeline_forward_position_adjacent_drop_does_not_livelock() {
     assert_eq!(seen_set, expected, "every record must be served, with no losses");
 }
 
-/// Fix round 1, I1: a cursor's own `direction` must match the request's
-/// `direction` param, or it's rejected with 400 before any streaming — a
-/// stale or foreign cursor used with the wrong direction must not silently
-/// paginate in a way its stored positions never meant.
+/// Superseded by spec v1.6 (owner ruling): direction now belongs to the
+/// REQUEST, not the cursor blob — a cursor minted by a back page must be
+/// followable with `direction=forward` (and vice versa), since the sliding
+/// window re-reads trimmed regions by flipping direction against an edge
+/// cursor. The old I1 rejection (`decoded.direction != direction` → 400) is
+/// gone; this replaces `timeline_cursor_direction_mismatch_is_400`.
+///
+/// Fixture: 2 partitions, 20 records each — p0 offset o @ ts=1000+20o, p1
+/// offset o @ ts=1010+20o (all timestamps distinct, so back/forward merge
+/// order is fully determined: descending ts strictly alternates p1,p0 for
+/// equal offsets). A back page anchored at ts_ms=1200 (resolves to offset
+/// 10 in both partitions) with `limit=6` takes, newest-first: p1:9(1190),
+/// p0:9(1180), p1:8(1170), p0:8(1160), p1:7(1150), p0:7(1140) — so
+/// M = {(0,7),(0,8),(0,9),(1,7),(1,8),(1,9)}, continuation cursor positions
+/// = [(0,7),(1,7)] (the lowest offset taken per partition), NOT exhausted
+/// (offsets 0..6 remain below). Following that continuation cursor with
+/// `direction=forward&limit=6` must be accepted (not 400) and must read
+/// forward from those same positions, oldest-first: p0:7(1140), p1:7(1150),
+/// p0:8(1160), p1:8(1170), p0:9(1180), p1:9(1190) — exactly M again. This is
+/// the bound-symmetry the design relies on: a Back page's ending position
+/// (exclusive upper for continuing further back) is numerically identical
+/// to a Forward request's starting inclusive lower bound for re-reading
+/// that same span forward.
 #[tokio::test]
-async fn timeline_cursor_direction_mismatch_is_400() {
+async fn timeline_direction_flip_reads_back_pages_continuation_forward_and_gets_it_back() {
     let bootstrap = start_kafka().await;
+    create_topic(&bootstrap, "tl-flip-topic", 2).await;
+    let p0: Vec<(String, String, i64)> =
+        (0..20i64).map(|o| (format!("p0k{o}"), format!("p0v{o}"), 1000 + 20 * o)).collect();
+    let p1: Vec<(String, String, i64)> =
+        (0..20i64).map(|o| (format!("p1k{o}"), format!("p1v{o}"), 1010 + 20 * o)).collect();
+    produce_at_many(&bootstrap, "tl-flip-topic", 0, &p0).await;
+    produce_at_many(&bootstrap, "tl-flip-topic", 1, &p1).await;
     let state = state_for(&bootstrap, vec![]);
-    let back_cursor = betrachtung::message::timeline::Cursor {
-        direction: betrachtung::message::timeline::Direction::Back,
-        positions: vec![(0, 5)],
-    }.encode();
-    let (status, body) = get_json(
-        app(state),
-        &format!("/api/clusters/test/topics/x/timeline?direction=forward&limit=10&cursor={}", urlencoding::encode(&back_cursor)),
+
+    let offsets_of = |events: &[(String, serde_json::Value)]| -> std::collections::HashSet<(i64, i64)> {
+        events.iter().filter(|(n, _)| n == "match")
+            .map(|(_, m)| (m["partition"].as_i64().unwrap(), m["offset"].as_i64().unwrap()))
+            .collect()
+    };
+    let expected_m: std::collections::HashSet<(i64, i64)> =
+        [(0i64, 7i64), (0, 8), (0, 9), (1, 7), (1, 8), (1, 9)].into_iter().collect();
+
+    let back = collect_sse(
+        app(state.clone()),
+        "/api/clusters/test/topics/tl-flip-topic/timeline?direction=back&limit=6&anchor=timestamp&ts_ms=1200",
+        200,
     ).await;
-    assert_eq!(status, 400, "body: {body}");
-    assert_eq!(body["code"], "bad_request");
+    let m = offsets_of(&back);
+    assert_eq!(m, expected_m, "back page: {m:?}");
+    let (_, back_end) = back.iter().find(|(n, _)| n == "page_end").expect("page_end present").clone();
+    assert_eq!(back_end["exhausted"], false, "20 records exist below the anchor, only 6 taken: {back_end}");
+    let continuation = back_end["cursor"].as_str().expect("non-exhausted page must carry a continuation cursor").to_string();
+    let decoded = betrachtung::message::timeline::Cursor::decode(&continuation).unwrap();
+    assert_eq!(decoded.positions, vec![(0, 7), (1, 7)], "continuation must sit at the lowest offset taken per partition");
+
+    // The decoded blob is still tagged `direction: Back` (minted by a back
+    // page) — following it with `direction=forward` must be honored, not
+    // rejected, per v1.6's direction-belongs-to-the-request ruling.
+    assert_eq!(decoded.direction, betrachtung::message::timeline::Direction::Back);
+    let forward = collect_sse(
+        app(state),
+        &format!("/api/clusters/test/topics/tl-flip-topic/timeline?direction=forward&limit=6&cursor={}", urlencoding::encode(&continuation)),
+        200,
+    ).await;
+    assert!(forward.iter().all(|(n, _)| n != "error"), "direction flip must not error: {forward:?}");
+    let f = offsets_of(&forward);
+    assert_eq!(f, expected_m, "forward-from-the-back-page's-own-continuation-cursor must read back exactly M: {f:?}");
+}
+
+/// Anchor partition property (spec v1.6, binding acceptance test): for
+/// anchor=timestamp, `back(anchor)` and `forward(anchor)` split the topic
+/// disjointly and completely per partition — reading upward from a jump's
+/// anchor is gap-free and overlap-free against the downward read. Same
+/// fixture and anchor as the direction-flip test above (ts_ms=1200 resolves
+/// to offset 10 in both partitions), but here each direction is its own
+/// independent anchor request (no cursor involved) with a generous limit/
+/// budget so each single page reaches its true watermark edge.
+#[tokio::test]
+async fn timeline_anchor_timestamp_back_and_forward_split_disjointly_and_completely() {
+    let bootstrap = start_kafka().await;
+    create_topic(&bootstrap, "tl-anchor-split-topic", 2).await;
+    let p0: Vec<(String, String, i64)> =
+        (0..20i64).map(|o| (format!("p0k{o}"), format!("p0v{o}"), 1000 + 20 * o)).collect();
+    let p1: Vec<(String, String, i64)> =
+        (0..20i64).map(|o| (format!("p1k{o}"), format!("p1v{o}"), 1010 + 20 * o)).collect();
+    produce_at_many(&bootstrap, "tl-anchor-split-topic", 0, &p0).await;
+    produce_at_many(&bootstrap, "tl-anchor-split-topic", 1, &p1).await;
+    let state = state_for(&bootstrap, vec![]);
+
+    let offsets_of = |events: &[(String, serde_json::Value)]| -> std::collections::HashSet<(i64, i64)> {
+        events.iter().filter(|(n, _)| n == "match")
+            .map(|(_, m)| (m["partition"].as_i64().unwrap(), m["offset"].as_i64().unwrap()))
+            .collect()
+    };
+    let older_half: std::collections::HashSet<(i64, i64)> =
+        (0..2i64).flat_map(|p| (0..10i64).map(move |o| (p, o))).collect();
+    let newer_half: std::collections::HashSet<(i64, i64)> =
+        (0..2i64).flat_map(|p| (10..20i64).map(move |o| (p, o))).collect();
+
+    let back = collect_sse(
+        app(state.clone()),
+        "/api/clusters/test/topics/tl-anchor-split-topic/timeline?direction=back&limit=500&anchor=timestamp&ts_ms=1200",
+        200,
+    ).await;
+    let (_, back_end) = back.iter().find(|(n, _)| n == "page_end").expect("page_end present").clone();
+    assert_eq!(back_end["exhausted"], true, "back: {back_end}");
+    let m = offsets_of(&back);
+    assert_eq!(m, older_half, "back(anchor) must cover exactly the records below the anchor: {m:?}");
+
+    let forward = collect_sse(
+        app(state),
+        "/api/clusters/test/topics/tl-anchor-split-topic/timeline?direction=forward&limit=500&anchor=timestamp&ts_ms=1200",
+        200,
+    ).await;
+    let (_, forward_end) = forward.iter().find(|(n, _)| n == "page_end").expect("page_end present").clone();
+    assert_eq!(forward_end["exhausted"], true, "forward: {forward_end}");
+    let f = offsets_of(&forward);
+    assert_eq!(f, newer_half, "forward(anchor) must cover exactly the records at/above the anchor: {f:?}");
+
+    assert!(f.is_disjoint(&m), "back(anchor) and forward(anchor) must not overlap: back={m:?} forward={f:?}");
+    let mut union = m.clone();
+    union.extend(&f);
+    let full: std::collections::HashSet<(i64, i64)> = older_half.union(&newer_half).copied().collect();
+    assert_eq!(union, full, "back(anchor) ∪ forward(anchor) must cover every fixture record exactly once: {union:?}");
+}
+
+/// Documents and locks down the cursor's wire-format contract (spec v1.6:
+/// "a documented, client-constructible format"): base64 of the compact JSON
+/// `{"direction":"back"|"forward","positions":[[partition,offset],...]}`.
+/// This builds that JSON *by hand* — the way an external client would, with
+/// no access to the Rust `Cursor` type — and asserts the backend accepts
+/// and honors it. Single-partition topic, 10 records (offsets 0..9, values
+/// "v0".."v9"): a hand-built forward cursor at position 5 must yield offsets
+/// 5..9 and reach the high watermark.
+#[tokio::test]
+async fn timeline_accepts_a_client_constructed_cursor() {
+    use base64::Engine as _;
+
+    let bootstrap = start_kafka().await;
+    create_topic(&bootstrap, "tl-client-cursor-topic", 1).await;
+    produce(&bootstrap, "tl-client-cursor-topic", 10).await;
+    let state = state_for(&bootstrap, vec![]);
+
+    let client_json = serde_json::json!({ "direction": "forward", "positions": [[0, 5]] });
+    let client_cursor = base64::engine::general_purpose::STANDARD.encode(client_json.to_string());
+
+    let events = collect_sse(
+        app(state),
+        &format!("/api/clusters/test/topics/tl-client-cursor-topic/timeline?direction=forward&limit=10&cursor={}", urlencoding::encode(&client_cursor)),
+        200,
+    ).await;
+    assert!(events.iter().all(|(n, _)| n != "error"), "hand-built cursor must be accepted: {events:?}");
+    let values: Vec<String> = events.iter().filter(|(n, _)| n == "match")
+        .map(|(_, m)| m["value"]["text"].as_str().unwrap().to_string()).collect();
+    assert_eq!(values, vec!["v5", "v6", "v7", "v8", "v9"], "must honor the hand-built position exactly: {values:?}");
+    let (_, end) = events.iter().find(|(n, _)| n == "page_end").expect("page_end present").clone();
+    assert_eq!(end["exhausted"], true, "{end}");
 }
 
 /// Fix round 1, M2: `limit=0` is nonsensical (an empty page forever) and
