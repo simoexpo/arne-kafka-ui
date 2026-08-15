@@ -208,7 +208,10 @@ pub async fn consume_and_commit(bootstrap: &str, topic: &str, group: &str, count
 }
 
 /// Start `app` on an ephemeral port and collect SSE events (name, json) from
-/// `path` until a `done`/`error` event or `max` events.
+/// `path` until a `done`/`app_error` event or `max` events. ("app_error",
+/// not "error" — the wire event name deliberately avoids `EventSource`'s
+/// own reserved "error" type; see `TimelineEvent`/`TailEvent::name`'s own
+/// comment.)
 pub async fn collect_sse(app: Router, path: &str, max: usize) -> Vec<(String, serde_json::Value)> {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -232,7 +235,7 @@ pub async fn collect_sse(app: Router, path: &str, max: usize) -> Vec<(String, se
             }
             if name.is_empty() { continue; } // keep-alive comments
             let json = serde_json::from_str(&data).unwrap_or(serde_json::Value::Null);
-            let terminal = name == "done" || name == "error";
+            let terminal = name == "done" || name == "app_error";
             events.push((name, json));
             if terminal || events.len() >= max {
                 return events;

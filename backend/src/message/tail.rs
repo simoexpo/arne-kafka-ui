@@ -41,7 +41,12 @@ impl TailEvent {
     pub fn name(&self) -> &'static str {
         match self {
             TailEvent::Message(_) => "message",
-            TailEvent::Error { .. } => "error",
+            // Deliberately NOT "error" — see `TimelineEvent::name`'s own
+            // comment (`message/timeline.rs`): that literal name collides
+            // with `EventSource`'s own reserved connection-error event in a
+            // real browser (a 2026-08-15 review finding), so both this and
+            // the timeline event use "app_error" instead.
+            TailEvent::Error { .. } => "app_error",
         }
     }
 
@@ -342,7 +347,7 @@ mod tests {
 
         let api_err = ApiError::kafka("prod", "assign tail consumer: boom");
         let err_event = TailEvent::from_api_error(&api_err);
-        assert_eq!(err_event.name(), "error");
+        assert_eq!(err_event.name(), "app_error");
         let json = serde_json::to_value(&err_event).unwrap();
         assert_eq!(json["code"], "kafka_error");
         assert_eq!(json["cluster"], "prod");

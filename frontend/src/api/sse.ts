@@ -2,6 +2,18 @@ import type { MessageOut, SseErrorData } from './types'
 
 const enc = encodeURIComponent
 
+// Review finding, 2026-08-15: the backend's own error events are wire-named
+// "app_error", never "error" — see `TimelineEvent`/`TailEvent::name`'s own
+// comment in `backend/src/message/{timeline,tail}.rs`. A server-sent SSE
+// frame with `event: error` collides with `EventSource`'s OWN reserved
+// connection-level error type in a real browser: BOTH `addEventListener(
+// 'error', ...)` and the `onerror` IDL handler below fire for it, and the
+// transport-error path wins the race, discarding the real structured error
+// this event carries in favor of generic "connection lost" wording. This
+// constant is the ONE place that name is spelled, on either side of the
+// wire boundary this file owns.
+const APP_ERROR_EVENT = 'app_error'
+
 export function openSse(
   url: string,
   eventNames: string[],
@@ -20,7 +32,7 @@ export function tailTopic(
   topic: string,
   h: { onMessage: (m: MessageOut) => void; onError: (e: SseErrorData) => void; onTransportError: () => void },
 ) {
-  return openSse(`/api/clusters/${enc(cluster)}/topics/${enc(topic)}/tail`, ['message', 'error'], {
+  return openSse(`/api/clusters/${enc(cluster)}/topics/${enc(topic)}/tail`, ['message', APP_ERROR_EVENT], {
     onEvent: (name, data) =>
       name === 'message' ? h.onMessage(data as MessageOut) : h.onError(data as SseErrorData),
     onTransportError: h.onTransportError,
@@ -78,7 +90,7 @@ export function timelinePage(
   }
   return openSse(
     `/api/clusters/${enc(cluster)}/topics/${enc(topic)}/timeline?${qs}`,
-    ['match', 'progress', 'page_end', 'error'],
+    ['match', 'progress', 'page_end', APP_ERROR_EVENT],
     {
       onEvent: (name, data) => {
         if (name === 'match') h.onMatch(data as MessageOut)

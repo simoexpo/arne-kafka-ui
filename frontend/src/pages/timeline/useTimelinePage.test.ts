@@ -158,7 +158,7 @@ describe('useTimelinePage', () => {
       result.current.loadPage({ direction: 'back', limit: 100, anchor: 'latest' }, vi.fn(), onPageEnd)
     })
     act(() => {
-      FakeEventSource.instances[0].emit('error', { code: 'kafka_error', message: 'boom', cluster: 'prod', retriable: true })
+      FakeEventSource.instances[0].emit('app_error', { code: 'kafka_error', message: 'boom', cluster: 'prod', retriable: true })
     })
     expect(onPageEnd).not.toHaveBeenCalled()
 
@@ -201,7 +201,7 @@ describe('useTimelinePage', () => {
       result.current.loadPage({ direction: 'back', limit: 100, anchor: 'latest' }, vi.fn())
     })
     act(() => {
-      FakeEventSource.instances[0].emit('error', {
+      FakeEventSource.instances[0].emit('app_error', {
         code: 'kafka_error',
         message: 'boom',
         cluster: 'prod',

@@ -290,7 +290,22 @@ impl TimelineEvent {
             TimelineEvent::Match(_) => "match",
             TimelineEvent::Progress { .. } => "progress",
             TimelineEvent::PageEnd { .. } => "page_end",
-            TimelineEvent::Error { .. } => "error",
+            // Deliberately NOT "error" (review finding, 2026-08-15): SSE's
+            // `EventSource` treats a server-sent frame whose `event:` field
+            // is literally "error" as colliding with its OWN reserved
+            // connection-level error type — both `addEventListener('error',
+            // ...)` AND the `onerror` IDL handler fire for it, in a REAL
+            // browser (not the test double here, which is exactly why this
+            // shipped unnoticed: this app's own error events had this
+            // collision from day one). The result: the frontend's
+            // transport-error handler wins the race and shows generic
+            // "connection lost" wording, discarding the real, structured
+            // error this event carries — the very same failure mode M1+M2
+            // was fixing by moving an anchor error in-stream in the first
+            // place, just one layer deeper. "app_error" carries the exact
+            // same envelope, named to never collide with a reserved
+            // EventSource type.
+            TimelineEvent::Error { .. } => "app_error",
         }
     }
 }

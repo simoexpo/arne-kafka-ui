@@ -689,7 +689,7 @@ async fn timeline_direction_flip_reads_back_pages_continuation_forward_and_gets_
         &format!("/api/clusters/test/topics/tl-flip-topic/timeline?direction=forward&limit=6&cursor={}", urlencoding::encode(&continuation)),
         200,
     ).await;
-    assert!(forward.iter().all(|(n, _)| n != "error"), "direction flip must not error: {forward:?}");
+    assert!(forward.iter().all(|(n, _)| n != "app_error"), "direction flip must not error: {forward:?}");
     let f = offsets_of(&forward);
     assert_eq!(f, expected_m, "forward-from-the-back-page's-own-continuation-cursor must read back exactly M: {f:?}");
 }
@@ -789,7 +789,7 @@ async fn timeline_offset_anchor_forward_aligns_all_partitions_at_the_targets_tim
         "/api/clusters/test/topics/tl-offset-forward-align-topic/timeline?direction=forward&limit=500&anchor=offset&partition=0&offset=10",
         200,
     ).await;
-    assert!(events.iter().all(|(n, _)| n != "error"), "offset-anchor forward must not error: {events:?}");
+    assert!(events.iter().all(|(n, _)| n != "app_error"), "offset-anchor forward must not error: {events:?}");
     let (_, end) = events.iter().find(|(n, _)| n == "page_end").expect("page_end present").clone();
     assert_eq!(end["exhausted"], true, "{end}");
     let m = offsets_of(&events);
@@ -828,7 +828,7 @@ async fn timeline_offset_anchor_forward_at_a_hole_reports_an_in_stream_error_not
     ).await;
     assert!(events.iter().all(|(n, _)| n != "match"), "no message exists at the hole: {events:?}");
     assert!(!events.iter().any(|(n, _)| n == "page_end"), "must end in error, not page_end: {events:?}");
-    let (_, err) = events.iter().find(|(n, _)| n == "error").expect("an in-stream error event: {events:?}").clone();
+    let (_, err) = events.iter().find(|(n, _)| n == "app_error").expect("an in-stream error event: {events:?}").clone();
     assert_eq!(err["code"], "bad_request", "{err}");
     assert!(
         err["message"].as_str().unwrap().contains("partition 0 offset 5"),
@@ -859,7 +859,7 @@ async fn timeline_offset_anchor_forward_past_the_high_watermark_reports_an_in_st
         20,
     ).await;
     assert!(events.iter().all(|(n, _)| n != "match"), "no wrong record may be silently returned: {events:?}");
-    let (_, err) = events.iter().find(|(n, _)| n == "error").expect("an in-stream error event: {events:?}").clone();
+    let (_, err) = events.iter().find(|(n, _)| n == "app_error").expect("an in-stream error event: {events:?}").clone();
     assert_eq!(err["code"], "bad_request", "{err}");
     assert!(
         err["message"].as_str().unwrap().contains("partition 0 offset 5000"),
@@ -892,7 +892,7 @@ async fn timeline_accepts_a_client_constructed_cursor() {
         &format!("/api/clusters/test/topics/tl-client-cursor-topic/timeline?direction=forward&limit=10&cursor={}", urlencoding::encode(&client_cursor)),
         200,
     ).await;
-    assert!(events.iter().all(|(n, _)| n != "error"), "hand-built cursor must be accepted: {events:?}");
+    assert!(events.iter().all(|(n, _)| n != "app_error"), "hand-built cursor must be accepted: {events:?}");
     let values: Vec<String> = events.iter().filter(|(n, _)| n == "match")
         .map(|(_, m)| m["value"]["text"].as_str().unwrap().to_string()).collect();
     assert_eq!(values, vec!["v5", "v6", "v7", "v8", "v9"], "must honor the hand-built position exactly: {values:?}");
@@ -925,7 +925,7 @@ async fn timeline_accepts_a_client_cursor_without_direction_field() {
         &format!("/api/clusters/test/topics/tl-client-cursor-no-direction-topic/timeline?direction=forward&limit=10&cursor={}", urlencoding::encode(&client_cursor)),
         200,
     ).await;
-    assert!(events.iter().all(|(n, _)| n != "error"), "cursor without a direction field must be accepted: {events:?}");
+    assert!(events.iter().all(|(n, _)| n != "app_error"), "cursor without a direction field must be accepted: {events:?}");
     let values: Vec<String> = events.iter().filter(|(n, _)| n == "match")
         .map(|(_, m)| m["value"]["text"].as_str().unwrap().to_string()).collect();
     assert_eq!(values, vec!["v5", "v6", "v7", "v8", "v9"], "must honor the position exactly even without direction: {values:?}");
@@ -990,7 +990,7 @@ async fn timeline_transactional_commit_hole_is_not_a_short_read() {
     let state = state_for(&bootstrap, vec![]);
 
     let back = collect_sse(app(state.clone()), "/api/clusters/test/topics/tl-txn-topic/timeline?direction=back&limit=10&anchor=latest", 200).await;
-    assert!(back.iter().all(|(n, _)| n != "error"), "back must not error on a legitimate transaction-commit hole: {back:?}");
+    assert!(back.iter().all(|(n, _)| n != "app_error"), "back must not error on a legitimate transaction-commit hole: {back:?}");
     let back_matches: Vec<_> = back.iter().filter(|(n, _)| n == "match").collect();
     assert_eq!(back_matches.len(), 4, "back: {back:?}");
     let (_, back_end) = back.iter().find(|(n, _)| n == "page_end").expect("page_end present").clone();
@@ -998,7 +998,7 @@ async fn timeline_transactional_commit_hole_is_not_a_short_read() {
     assert!(back_end["cursor"].is_null());
 
     let forward = collect_sse(app(state), "/api/clusters/test/topics/tl-txn-topic/timeline?direction=forward&limit=10&anchor=beginning", 200).await;
-    assert!(forward.iter().all(|(n, _)| n != "error"), "forward must not error on a legitimate transaction-commit hole: {forward:?}");
+    assert!(forward.iter().all(|(n, _)| n != "app_error"), "forward must not error on a legitimate transaction-commit hole: {forward:?}");
     let forward_matches: Vec<_> = forward.iter().filter(|(n, _)| n == "match").collect();
     assert_eq!(forward_matches.len(), 4, "forward: {forward:?}");
     let (_, forward_end) = forward.iter().find(|(n, _)| n == "page_end").expect("page_end present").clone();
@@ -1028,7 +1028,7 @@ async fn timeline_cursor_with_unknown_partition_terminates_properly() {
         &format!("/api/clusters/test/topics/tl-unknown-partition-topic/timeline?direction=forward&limit=10&cursor={}", urlencoding::encode(&cursor)),
         200,
     ).await;
-    assert!(events.iter().all(|(n, _)| n != "error"), "unknown partition in cursor must not error: {events:?}");
+    assert!(events.iter().all(|(n, _)| n != "app_error"), "unknown partition in cursor must not error: {events:?}");
     let matches: Vec<_> = events.iter().filter(|(n, _)| n == "match").collect();
     assert_eq!(matches.len(), 3, "events: {events:?}");
     let (_, end) = events.iter().find(|(n, _)| n == "page_end").expect("page_end present").clone();
@@ -1175,7 +1175,7 @@ async fn timeline_unfiltered_page_crosses_a_hole_in_one_request() {
     let state = state_for(&bootstrap, vec![]);
 
     let events = collect_sse(app(state), "/api/clusters/test/topics/tl-hole-topic/timeline?direction=back&limit=1&anchor=latest", 200).await;
-    assert!(events.iter().all(|(n, _)| n != "error"), "must not error crossing a legitimate hole region: {events:?}");
+    assert!(events.iter().all(|(n, _)| n != "app_error"), "must not error crossing a legitimate hole region: {events:?}");
     let m: Vec<_> = events.iter().filter(|(n, _)| n == "match").map(|(_, v)| v["value"]["text"].as_str().unwrap().to_string()).collect();
     assert_eq!(m, vec!["v0"], "a single request must cross the trailing hole and return the real record beyond it: {events:?}");
     let (_, end) = events.iter().find(|(n, _)| n == "page_end").unwrap().clone();

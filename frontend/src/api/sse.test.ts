@@ -6,7 +6,7 @@ beforeEach(() => FakeEventSource.install())
 afterEach(() => FakeEventSource.uninstall())
 
 describe('tailTopic', () => {
-  it('opens the tail url, forwards message and error events, closes', () => {
+  it('opens the tail url, forwards message and app_error events, closes', () => {
     const onMessage = vi.fn()
     const onError = vi.fn()
     const handle = tailTopic('prod', 'orders/x', { onMessage, onError, onTransportError: vi.fn() })
@@ -14,7 +14,7 @@ describe('tailTopic', () => {
     expect(es.url).toBe('/api/clusters/prod/topics/orders%2Fx/tail')
     es.emit('message', { partition: 0, offset: 7, timestamp_ms: 1, key: null, value: null, headers: [] })
     expect(onMessage).toHaveBeenCalledWith(expect.objectContaining({ offset: 7 }))
-    es.emit('error', { code: 'kafka_error', message: 'boom', cluster: 'prod', retriable: true })
+    es.emit('app_error', { code: 'kafka_error', message: 'boom', cluster: 'prod', retriable: true })
     expect(onError).toHaveBeenCalledWith(expect.objectContaining({ code: 'kafka_error' }))
     handle.close()
     expect(es.closed).toBe(true)
@@ -25,6 +25,19 @@ describe('tailTopic', () => {
     tailTopic('prod', 't', { onMessage: vi.fn(), onError: vi.fn(), onTransportError })
     FakeEventSource.instances[0].fireTransportError()
     expect(onTransportError).toHaveBeenCalled()
+  })
+
+  // Review finding, 2026-08-15: the wire event is deliberately named
+  // "app_error", never "error" — that literal name collides with
+  // `EventSource`'s own reserved connection-level error type in a real
+  // browser, and the transport-error path wins the race, discarding the
+  // real structured error. Pins that nothing here listens for the
+  // colliding literal name.
+  it('never registers a listener for the literal "error" event name', () => {
+    const onError = vi.fn()
+    tailTopic('prod', 'orders', { onMessage: vi.fn(), onError, onTransportError: vi.fn() })
+    FakeEventSource.instances[0].emit('error', { code: 'kafka_error', message: 'boom', cluster: 'prod', retriable: true })
+    expect(onError).not.toHaveBeenCalled()
   })
 })
 
@@ -93,11 +106,20 @@ describe('timelinePage', () => {
     expect(es.closed).toBe(true)
   })
 
-  it('surfaces error events', () => {
+  it('surfaces app_error events', () => {
+    const handlers = h()
+    timelinePage('prod', 'orders', { direction: 'back', limit: 10, anchor: 'latest' }, handlers)
+    FakeEventSource.instances[0].emit('app_error', { code: 'kafka_error', message: 'boom', cluster: 'prod', retriable: true })
+    expect(handlers.onError).toHaveBeenCalledWith(expect.objectContaining({ code: 'kafka_error' }))
+  })
+
+  // Review finding, 2026-08-15 — see the identical guard in the tailTopic
+  // describe block above for the full rationale.
+  it('never registers a listener for the literal "error" event name', () => {
     const handlers = h()
     timelinePage('prod', 'orders', { direction: 'back', limit: 10, anchor: 'latest' }, handlers)
     FakeEventSource.instances[0].emit('error', { code: 'kafka_error', message: 'boom', cluster: 'prod', retriable: true })
-    expect(handlers.onError).toHaveBeenCalledWith(expect.objectContaining({ code: 'kafka_error' }))
+    expect(handlers.onError).not.toHaveBeenCalled()
   })
 
   it('reports transport errors', () => {
