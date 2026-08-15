@@ -135,6 +135,27 @@ pub enum Anchor {
     /// here": position at the high watermark, matching `Latest`'s
     /// behavior for that partition.
     TimestampResolved(Vec<(i32, Option<i64>)>),
+    /// Offset anchor, FORWARD-direction alignment (owner ruling
+    /// 2026-08-15 — supersedes `Offset`'s "pin everyone else at their high
+    /// watermark" behavior for a forward read only; `Offset` itself is
+    /// unchanged and still used for `direction=back`, see its own doc
+    /// comment). The anchored `(partition, offset)` message's own
+    /// timestamp is resolved upstream (one bounded single-record fetch),
+    /// then every OTHER partition is resolved via the same
+    /// `OffsetsForTimes` machinery `TimestampResolved` uses, at that same
+    /// timestamp — `aligned` carries that per-partition result (`None` =
+    /// nothing at/after the timestamp there: high watermark, matching
+    /// `Latest`). The anchored partition itself is pinned to exactly
+    /// `offset`, never re-derived from the timestamp lookup (`aligned` may
+    /// also contain an entry for it, from the shared resolution call — it
+    /// is simply ignored below): the whole point is that partition reads
+    /// forward from the EXACT message the user picked, not a second
+    /// approximation of it. This is what makes the anchored message the
+    /// OLDEST row of its own partition in the resulting forward page,
+    /// while every other partition picks up at-or-after the same instant —
+    /// "nothing lost, nothing pinned to the wrong end" relative to a
+    /// `TimestampResolved` anchor at that same timestamp.
+    OffsetForwardAligned { partition: i32, offset: i64, aligned: Vec<(i32, Option<i64>)> },
 }
 
 /// Computes the starting cursor positions for a fresh (non-cursor) page
@@ -152,6 +173,17 @@ pub fn initial_positions(watermarks: &[(i32, i64, i64)], anchor: &Anchor) -> Vec
             .map(|&(p, _, hi)| {
                 let found = resolved.iter().find(|&&(rp, _)| rp == p).and_then(|&(_, o)| o);
                 (p, found.unwrap_or(hi))
+            })
+            .collect(),
+        Anchor::OffsetForwardAligned { partition, offset, aligned } => watermarks
+            .iter()
+            .map(|&(p, _, hi)| {
+                if p == *partition {
+                    (p, *offset)
+                } else {
+                    let found = aligned.iter().find(|&&(rp, _)| rp == p).and_then(|&(_, o)| o);
+                    (p, found.unwrap_or(hi))
+                }
             })
             .collect(),
     }
@@ -922,6 +954,26 @@ mod tests {
     fn beginning_positions_are_low_watermarks() {
         let p = initial_positions(WM, &Anchor::Beginning);
         assert_eq!(p, vec![(0, 10), (1, 0)]);
+    }
+
+    /// Owner ruling 2026-08-15: a forward offset anchor pins the anchored
+    /// partition at the EXACT offset (not `aligned`'s own resolution for
+    /// it, even if present) and every other partition at its aligned
+    /// timestamp-resolved offset — `None` there falls back to the high
+    /// watermark, exactly like `TimestampResolved`.
+    #[test]
+    fn offset_forward_aligned_pins_anchor_exactly_and_aligns_others() {
+        let wm: &[(i32, i64, i64)] = &[(0, 0, 100), (1, 0, 100), (2, 0, 100)];
+        let anchor = Anchor::OffsetForwardAligned {
+            partition: 0,
+            offset: 42,
+            // Partition 0's own entry (55) must be IGNORED in favor of the
+            // exact `offset` (42); partition 1 aligns to 30; partition 2 has
+            // nothing at/after the timestamp (falls back to its hi, 100).
+            aligned: vec![(0, Some(55)), (1, Some(30)), (2, None)],
+        };
+        let p = initial_positions(wm, &anchor);
+        assert_eq!(p, vec![(0, 42), (1, 30), (2, 100)]);
     }
 
     #[test]

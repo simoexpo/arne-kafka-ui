@@ -751,6 +751,56 @@ async fn timeline_anchor_timestamp_back_and_forward_split_disjointly_and_complet
     assert_eq!(union, full, "back(anchor) ∪ forward(anchor) must cover every fixture record exactly once: {union:?}");
 }
 
+/// Owner ruling 2026-08-15: a forward offset-anchor jump aligns EVERY
+/// partition at the anchored message's own timestamp instead of pinning
+/// everyone else at their high watermark (`Anchor::Offset`'s old,
+/// deliberately-simpler behavior, which the owner flagged as reading
+/// broken). Same fixture as the timestamp-anchor split test above (ts_ms=
+/// 1200 resolves to offset 10 in both partitions) — anchoring at partition
+/// 0 offset 10 (mid-topic, ts=1200) directly, forward, must land EXACTLY
+/// the same set of matches as `anchor=timestamp&ts_ms=1200&direction=
+/// forward` does: the anchored partition's target offset as its own oldest
+/// row, every other partition aligned at-or-after that instant, and
+/// nothing lost relative to the timestamp-anchor equivalent.
+#[tokio::test]
+async fn timeline_offset_anchor_forward_aligns_all_partitions_at_the_targets_timestamp() {
+    let bootstrap = start_kafka().await;
+    create_topic(&bootstrap, "tl-offset-forward-align-topic", 2).await;
+    let p0: Vec<(String, String, i64)> =
+        (0..20i64).map(|o| (format!("p0k{o}"), format!("p0v{o}"), 1000 + 20 * o)).collect();
+    let p1: Vec<(String, String, i64)> =
+        (0..20i64).map(|o| (format!("p1k{o}"), format!("p1v{o}"), 1010 + 20 * o)).collect();
+    produce_at_many(&bootstrap, "tl-offset-forward-align-topic", 0, &p0).await;
+    produce_at_many(&bootstrap, "tl-offset-forward-align-topic", 1, &p1).await;
+    let state = state_for(&bootstrap, vec![]);
+
+    let offsets_of = |events: &[(String, serde_json::Value)]| -> std::collections::HashSet<(i64, i64)> {
+        events.iter().filter(|(n, _)| n == "match")
+            .map(|(_, m)| (m["partition"].as_i64().unwrap(), m["offset"].as_i64().unwrap()))
+            .collect()
+    };
+    // Same "newer half" the timestamp-anchor split test proves forward(ts=
+    // 1200) covers exactly: offsets 10..19 in both partitions.
+    let expected: std::collections::HashSet<(i64, i64)> =
+        (0..2i64).flat_map(|p| (10..20i64).map(move |o| (p, o))).collect();
+
+    let events = collect_sse(
+        app(state),
+        "/api/clusters/test/topics/tl-offset-forward-align-topic/timeline?direction=forward&limit=500&anchor=offset&partition=0&offset=10",
+        200,
+    ).await;
+    assert!(events.iter().all(|(n, _)| n != "error"), "offset-anchor forward must not error: {events:?}");
+    let (_, end) = events.iter().find(|(n, _)| n == "page_end").expect("page_end present").clone();
+    assert_eq!(end["exhausted"], true, "{end}");
+    let m = offsets_of(&events);
+    assert_eq!(m, expected, "must align exactly like a timestamp anchor at the target's own ts (nothing lost, nothing extra): {m:?}");
+
+    // The anchored partition's own target is its OLDEST row: no partition-0
+    // offset below 10 appears anywhere in the page.
+    let p0_offsets: Vec<i64> = m.iter().filter(|&&(p, _)| p == 0).map(|&(_, o)| o).collect();
+    assert_eq!(*p0_offsets.iter().min().unwrap(), 10, "partition 0's target offset must be the oldest row for its own partition");
+}
+
 /// Documents and locks down the cursor's wire-format contract (spec v1.6:
 /// "a documented, client-constructible format"): base64 of the compact JSON
 /// `{"direction":"back"|"forward","positions":[[partition,offset],...]}`.

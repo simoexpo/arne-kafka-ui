@@ -183,7 +183,28 @@ pub async fn timeline_sse(
                         TimelineAnchorInput::Latest => timeline::Anchor::Latest,
                         TimelineAnchorInput::Beginning => timeline::Anchor::Beginning,
                         TimelineAnchorInput::Offset { partition, offset } => {
-                            timeline::Anchor::Offset { partition, offset }
+                            // Owner ruling 2026-08-15: `direction=back` keeps
+                            // the original, deliberately simpler `Offset`
+                            // behavior (pins every other partition at its
+                            // high watermark — documented deferral, see
+                            // `Anchor::Offset`'s own doc comment). Only a
+                            // forward read gets the new alignment: resolve
+                            // the anchored message's own timestamp (a
+                            // bounded single-record fetch — same consumer
+                            // discipline as everything else here) and align
+                            // every other partition at that instant, the
+                            // same way a timestamp anchor would.
+                            if direction == timeline::Direction::Forward {
+                                let anchor_ts = fetch::fetch_one_record_blocking(&handle.config, &topic, partition, offset)?
+                                    .and_then(|r| r.timestamp_ms)
+                                    .ok_or_else(|| ApiError::bad_request(format!(
+                                        "no message with a timestamp at partition {partition} offset {offset}"
+                                    )))?;
+                                let aligned = ts_starts_blocking(&handle, &topic, &wm, anchor_ts)?;
+                                timeline::Anchor::OffsetForwardAligned { partition, offset, aligned }
+                            } else {
+                                timeline::Anchor::Offset { partition, offset }
+                            }
                         }
                         TimelineAnchorInput::Timestamp { ts_ms } => {
                             let resolved = ts_starts_blocking(&handle, &topic, &wm, ts_ms)?;

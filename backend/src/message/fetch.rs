@@ -179,6 +179,28 @@ pub fn fetch_ranges_blocking(
     Ok(FetchOutcome { records: out, complete })
 }
 
+/// Fetches exactly one record at `(partition, offset)` — a bounded,
+/// single-record read. Owner ruling 2026-08-15: this is how a forward
+/// offset-anchor jump resolves the anchored message's own timestamp (so
+/// every OTHER partition can align at that same moment — see
+/// `Anchor::OffsetForwardAligned` in `timeline.rs`). Same consumer
+/// discipline as every other fetch here (`fetch_ranges_blocking`, its own
+/// throwaway consumer, the same internal deadline) — not a special,
+/// unbounded path. Returns `None` if there's no message at that exact
+/// position (already past the high watermark, or the offset lands on a
+/// hole — a compacted/tombstoned record).
+pub fn fetch_one_record_blocking(
+    cfg: &ClusterConfig,
+    topic: &str,
+    partition: i32,
+    offset: i64,
+) -> Result<Option<RawRecord>, ApiError> {
+    let cancelled = AtomicBool::new(false);
+    let range = PartitionRange { partition, start: offset, end: offset + 1 };
+    let outcome = fetch_ranges_blocking(cfg, topic, std::slice::from_ref(&range), 1, &cancelled)?;
+    Ok(outcome.records.into_iter().next())
+}
+
 pub async fn to_message_out(records: Vec<RawRecord>, sr: Option<&SchemaRegistry>) -> Vec<MessageOut> {
     let mut out = Vec::with_capacity(records.len());
     for r in records {
