@@ -858,7 +858,11 @@ describe('Timeline', () => {
       expect(screen.queryByTestId('live-pill')).not.toBeInTheDocument()
     })
 
-    it('jump to offset issues a back page anchored at partition+offset, clears the store, and pauses', async () => {
+    // Owner ruling 2026-08-15: offset/timestamp jumps now read FORWARD from
+    // the target (was 'back') — the backend aligns every other partition at
+    // the target's own timestamp instead of pinning them at their high
+    // watermark, so the old back-anchored "reads as broken" jump is gone.
+    it('jump to offset issues a forward page anchored at partition+offset, clears the store, and pauses', async () => {
       mockTail()
       const user = userEvent.setup()
       render(<Timeline cluster="prod" topic="orders" />)
@@ -872,11 +876,11 @@ describe('Timeline', () => {
 
       expect(screen.queryByText('p0·9')).not.toBeInTheDocument()
       expect(FakeEventSource.instances[1].url).toBe(
-        '/api/clusters/prod/topics/orders/timeline?direction=back&limit=100&anchor=offset&partition=1&offset=77',
+        '/api/clusters/prod/topics/orders/timeline?direction=forward&limit=100&anchor=offset&partition=1&offset=77',
       )
     })
 
-    it('jump to timestamp issues a back page anchored at ts_ms, clears the store, and pauses', async () => {
+    it('jump to timestamp issues a forward page anchored at ts_ms, clears the store, and pauses', async () => {
       mockTail()
       const user = userEvent.setup()
       render(<Timeline cluster="prod" topic="orders" />)
@@ -889,7 +893,7 @@ describe('Timeline', () => {
 
       expect(screen.queryByText('p0·9')).not.toBeInTheDocument()
       expect(FakeEventSource.instances[1].url).toBe(
-        '/api/clusters/prod/topics/orders/timeline?direction=back&limit=100&anchor=timestamp&ts_ms=1700000000000',
+        '/api/clusters/prod/topics/orders/timeline?direction=forward&limit=100&anchor=timestamp&ts_ms=1700000000000',
       )
     })
 
@@ -1000,13 +1004,17 @@ describe('Timeline', () => {
       }
     })
 
-    it('jump to offset scrolls the viewport back to the top once its page lands', async () => {
+    // Owner ruling 2026-08-15: offset/timestamp jumps now land like
+    // 'beginning' does — scrolled to the BOTTOM (the target is the oldest
+    // loaded row, newer rows above it), not the top.
+    it('jump to offset scrolls the viewport to the bottom (oldest visible) once its page lands', async () => {
       mockTail()
       const user = userEvent.setup()
       render(<Timeline cluster="prod" topic="orders" />)
       await emit(0, 'match', mk(9))
       await emit(0, 'page_end', { cursor: cur({ 0: 9 }), exhausted: false })
 
+      const restoreHeight = stubScrollHeight(4000)
       const scroll = spyOnScrollTop()
       try {
         await user.click(screen.getByTestId('jump-offset'))
@@ -1015,10 +1023,37 @@ describe('Timeline', () => {
         await user.click(screen.getByTestId('jump-offset-apply'))
         await emit(1, 'match', mk(30))
         scroll.setter.mockClear()
-        await emit(1, 'page_end', { cursor: null, exhausted: true })
-        expect(scroll.setter).toHaveBeenCalledWith(0)
+        await emit(1, 'page_end', { cursor: cur({ 0: 31 }), exhausted: false })
+        // scrollTop = scrollHeight (the clamp-to-bottom trick) — asserting
+        // the stubbed 4000 (not a hardcoded 0) proves it read scrollHeight
+        // rather than coincidentally landing on the same value as "top".
+        expect(scroll.setter).toHaveBeenCalledWith(4000)
       } finally {
         scroll.restore()
+        restoreHeight()
+      }
+    })
+
+    it('jump to timestamp scrolls the viewport to the bottom (oldest visible) once its page lands', async () => {
+      mockTail()
+      const user = userEvent.setup()
+      render(<Timeline cluster="prod" topic="orders" />)
+      await emit(0, 'match', mk(9))
+      await emit(0, 'page_end', { cursor: cur({ 0: 9 }), exhausted: false })
+
+      const restoreHeight = stubScrollHeight(4000)
+      const scroll = spyOnScrollTop()
+      try {
+        await user.click(screen.getByTestId('jump-timestamp'))
+        await user.type(screen.getByTestId('jump-timestamp-input'), '1700000000000')
+        await user.click(screen.getByTestId('jump-timestamp-apply'))
+        await emit(1, 'match', mk(30))
+        scroll.setter.mockClear()
+        await emit(1, 'page_end', { cursor: cur({ 0: 31 }), exhausted: false })
+        expect(scroll.setter).toHaveBeenCalledWith(4000)
+      } finally {
+        scroll.restore()
+        restoreHeight()
       }
     })
   })
@@ -1292,45 +1327,18 @@ describe('Timeline', () => {
       expect(toggle).toHaveAttribute('aria-pressed', 'true')
     })
 
-    // Fix round 1 (review of 079f30f), C2: an anchor bootstrap's opposite-
-    // side edge seed only ever covers partitions that returned ≥1 row THIS
-    // PAGE — a multi-partition anchor page where one partition genuinely
-    // contributes zero rows (not the all-empty case forwardAnchorFallback
-    // was originally built for, but a partial one) would otherwise mint a
-    // top cursor silently missing that partition's key entirely: worse
-    // than null, since nothing would ever trigger recovery for it. The
-    // store now reads `edges().top` as null whenever it's incomplete this
-    // way (not just empty), so Timeline's EXISTING forward-anchor fallback
-    // (re-issue the same anchor with direction=forward) handles the
-    // partial case identically to the all-empty one it already covered.
-    it("an offset jump whose anchor page returns rows for only ONE of several partitions re-issues the SAME anchor forward on the next top-scroll, never a partial cursor", async () => {
-      mockTail()
-      const user = userEvent.setup()
-      render(<Timeline cluster="prod" topic="orders" />)
-      await emit(0, 'match', mk(9))
-      await emit(0, 'page_end', { cursor: cur({ 0: 9 }), exhausted: false })
-
-      await user.click(screen.getByTestId('jump-offset'))
-      await user.type(screen.getByTestId('jump-offset-partition-input'), '1')
-      await user.type(screen.getByTestId('jump-offset-value-input'), '77')
-      await user.click(screen.getByTestId('jump-offset-apply'))
-      // The anchor page's own continuation (rule 1, authoritative) covers
-      // BOTH partitions the request touched — but only partition 0
-      // returned a row this page; partition 1 genuinely had none here.
-      await emit(1, 'match', mk(5))
-      await emit(1, 'page_end', { cursor: cur({ 0: 5, 1: 3 }), exhausted: false })
-
-      // Scrolling up: edges().top is incomplete (partition 1 never got a
-      // row to seed the top map from) — must NOT follow a partial cursor
-      // that would silently omit partition 1 forever. Re-issues the SAME
-      // offset anchor with direction=forward instead (the existing
-      // fallback, exercised here by the PARTIAL case, not just the
-      // all-empty one).
-      scrollToTopFarFromBottom()
-      expect(FakeEventSource.instances.at(-1)!.url).toBe(
-        url({ direction: 'forward', limit: '100', anchor: 'offset', partition: '1', offset: '77' }),
-      )
-    })
+    // REMOVED (owner ruling 2026-08-15): this used to prove that a BACK-
+    // anchored offset jump's partial top-map seed (only partitions that
+    // returned ≥1 row got seeded) was masked complete-or-null by the store's
+    // C2 check, and that Timeline's forward-anchor fallback recovered from
+    // it by re-issuing the SAME anchor with direction=forward. Offset jumps
+    // are now THEMSELVES forward-anchored (see `handleJump`'s 'offset'
+    // case) — a forward bootstrap's top map is always seeded authoritatively
+    // from rule 1 (the response's own continuation cursor), regardless of
+    // which partitions returned rows, so this exact scenario can no longer
+    // arise from any jump. The underlying store mechanism (C2 completeness
+    // masking) remains directly unit-tested, unchanged, in
+    // `timelineSlidingStore.test.ts`.
   })
 
   // Window cap honesty (design spec v1.4, owner ruling 2026-08-15): the

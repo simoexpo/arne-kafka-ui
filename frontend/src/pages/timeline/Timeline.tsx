@@ -53,11 +53,14 @@ type PauseReason = 'none' | 'auto' | 'explicit'
 // anchor params, not just a kind tag, for two reasons: (1) a settled filter
 // change re-reads from this same context (unchanged from v1.3 — only
 // 'beginning' gets its own re-anchor, everything else falls back to
-// back/latest); (2) NEW in task 3 — loadNewer's forward-anchor fallback
-// (see its own comment below) needs to re-issue the EXACT same anchor with
-// direction=forward when the store's top edge was never seeded at all (a
-// zero-row anchor bootstrap page never seeds the opposite-side map — see
-// createSlidingWindowStore's own doc comment on that one gap).
+// back/latest); (2) task 3's loadNewer forward-anchor fallback (see its own
+// comment below) used to need this to re-issue the EXACT same anchor with
+// direction=forward when the store's top edge was never seeded at all.
+// Owner ruling 2026-08-15: 'offset'/'timestamp' jumps are now THEMSELVES
+// forward-direction bootstraps (mirroring 'beginning'), so that fallback's
+// own precondition (a back-anchored offset/timestamp bootstrap) can no
+// longer arise from any call site in this file — see the fallback's own
+// comment for why it's kept anyway.
 type AnchorContext =
   | { kind: 'default' }
   | { kind: 'beginning' }
@@ -156,10 +159,13 @@ export function Timeline({
   const gestureScannedRef = useRef(0)
   const gestureMatchesRef = useRef(0)
 
-  // Viewport repositioning after a jump: 'now'/'offset'/'timestamp' land
-  // looking at the top of the new window; 'beginning' lands at the start of
-  // history looking forward, so the bottom (oldest-visible) edge is what
-  // matters there. Tracked separately from pendingDirectionRef/wasLoadingRef
+  // Viewport repositioning after a jump: 'now' lands looking at the top of
+  // its new window. 'beginning'/'offset'/'timestamp' (owner ruling
+  // 2026-08-15: the latter two were 'back'-anchored and top-landing before —
+  // they now read forward from the target, same as 'beginning') land at the
+  // start of their loaded window looking forward, so the bottom
+  // (oldest-visible) edge — where the target itself sits — is what matters
+  // there. Tracked separately from pendingDirectionRef/wasLoadingRef
   // (which drive the empty-page auto-continue) via its own "was loading"
   // edge-detector, since the two concerns are independent and a jump's
   // first page can itself be an empty page that auto-continues further.
@@ -875,10 +881,11 @@ export function Timeline({
     // in-flight page) synchronously, BEFORE runPage starts the new one.
     reset()
     setAttached(false)
-    // 'beginning' lands at the start of history looking forward — the
-    // bottom (oldest-visible) edge is the meaningful anchor there. Every
-    // other jump lands looking at the top of its new window.
-    pendingScrollEdgeRef.current = target.kind === 'beginning' ? 'bottom' : 'top'
+    // Owner ruling 2026-08-15: 'beginning', 'offset', and 'timestamp' ALL
+    // land reading forward, the target as the OLDEST row of the loaded
+    // window — the bottom (oldest-visible) edge is the meaningful anchor
+    // for all three. Only 'now' lands looking at the top of its new window.
+    pendingScrollEdgeRef.current = target.kind === 'now' ? 'top' : 'bottom'
     switch (target.kind) {
       case 'now':
         anchorContextRef.current = { kind: 'default' }
@@ -901,18 +908,29 @@ export function Timeline({
         })
         break
       case 'offset':
+        // Owner ruling 2026-08-15 (was 'back'): reads forward from the
+        // target, landing it as the oldest loaded row — the backend aligns
+        // every OTHER partition at the target's own timestamp instead of
+        // pinning them at their high watermark (see
+        // `Anchor::OffsetForwardAligned` in `backend/src/message/
+        // timeline.rs`), so this is no longer the "reads as broken" jump it
+        // used to be.
         anchorContextRef.current = { kind: 'offset', partition: target.partition, offset: target.offset }
         pauseReasonRef.current = 'auto'
         runPage(
-          'back',
-          withFilter({ direction: 'back', limit: PAGE_LIMIT, anchor: 'offset', partition: target.partition, offset: target.offset }),
+          'forward',
+          withFilter({ direction: 'forward', limit: PAGE_LIMIT, anchor: 'offset', partition: target.partition, offset: target.offset }),
           { resetIteration: true, attach: false },
         )
         break
       case 'timestamp':
+        // Owner ruling 2026-08-15 (was 'back'): same forward-landing change
+        // as 'offset' above — the backend's timestamp anchor already
+        // resolves every partition's starting position independent of
+        // direction, so no backend change was needed here.
         anchorContextRef.current = { kind: 'timestamp', ts_ms: target.ts_ms }
         pauseReasonRef.current = 'auto'
-        runPage('back', withFilter({ direction: 'back', limit: PAGE_LIMIT, anchor: 'timestamp', ts_ms: target.ts_ms }), {
+        runPage('forward', withFilter({ direction: 'forward', limit: PAGE_LIMIT, anchor: 'timestamp', ts_ms: target.ts_ms }), {
           resetIteration: true,
           attach: false,
         })
@@ -921,23 +939,38 @@ export function Timeline({
     bump()
   }
 
-  // loadNewer's forward-anchor fallback (task 3): the store's top edge is
-  // only ever seeded from a page's OWN rows (same-direction continuation
-  // cursor, or — for an anchor bootstrap — the opposite-side row-offset
-  // seed; see createSlidingWindowStore's doc comment). A historical
-  // (offset/timestamp) anchor bootstrap that happens to return ZERO rows for
-  // every partition (a heavily filtered jump landing on a gap, say) never
-  // seeds the top map at all, so `edges().top` reads null — not because the
-  // window is attached, but because nothing above it has ever been
-  // recorded. The only way to read "above" such a jump is to re-issue the
-  // EXACT SAME anchor with direction=forward (anchors are caller
-  // parameters, not part of the cursor — the anchor partition property
-  // guarantees back(anchor) and forward(anchor) split the topic disjointly
-  // and completely, so this is exact, not a guess). 'beginning' never needs
-  // this (it's already forward-anchored — its own same-direction
-  // continuation cursor always advances via rule 1 regardless of row
-  // count) and neither does 'default' (always attached, edges().top is
-  // masked null for a different, correct reason).
+  // loadNewer's forward-anchor fallback (task 3). ORIGINAL rationale (still
+  // correct as general reasoning, but its own PRECONDITION no longer arises
+  // from any jump as of the owner's 2026-08-15 ruling — see below): the
+  // store's top edge is only ever seeded from a page's OWN rows
+  // (same-direction continuation cursor, or — for an anchor bootstrap — the
+  // opposite-side row-offset seed; see createSlidingWindowStore's doc
+  // comment). A historical, BACK-anchored (offset/timestamp) bootstrap that
+  // happens to return ZERO rows for every partition (a heavily filtered
+  // jump landing on a gap, say) never seeds the top map at all, so
+  // `edges().top` reads null — not because the window is attached, but
+  // because nothing above it has ever been recorded. The only way to read
+  // "above" such a jump is to re-issue the EXACT SAME anchor with
+  // direction=forward (anchors are caller parameters, not part of the
+  // cursor — the anchor partition property guarantees back(anchor) and
+  // forward(anchor) split the topic disjointly and completely, so this is
+  // exact, not a guess).
+  //
+  // Owner ruling 2026-08-15: 'offset'/'timestamp' jumps (see `handleJump`)
+  // are now THEMSELVES forward-direction bootstraps, exactly like
+  // 'beginning' already was — so the same reasoning that always exempted
+  // 'beginning' here ("it's already forward-anchored — its own
+  // same-direction continuation cursor always advances via rule 1
+  // regardless of row count") now applies to them too, and this fallback's
+  // own precondition (a BACK-anchored offset/timestamp bootstrap) can no
+  // longer be produced by any call site in this file. Left in place —
+  // harmless and unreachable, not deleted — as defense-in-depth: `Anchor::
+  // Offset` with `direction=back` is still valid, documented backend
+  // behavior (see `backend/src/message/timeline.rs`), so a future call site
+  // that legitimately re-introduces a back-anchored offset/timestamp
+  // bootstrap here would immediately regain a working fallback rather than
+  // a silent dead end. 'default' still never needs this either (always
+  // attached, `edges().top` masked null for a different, correct reason).
   const forwardAnchorFallback = (): TimelinePageParams | null => {
     const ctx = anchorContextRef.current
     if (ctx.kind === 'offset') return { direction: 'forward', limit: PAGE_LIMIT, anchor: 'offset', partition: ctx.partition, offset: ctx.offset }
