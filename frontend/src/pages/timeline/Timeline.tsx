@@ -39,6 +39,14 @@ const TOP_PIN_THRESHOLD = 20
 // magnitude as TOP_PIN_THRESHOLD, kept as its own named constant since it
 // guards a different feature (load-older, not live-pause).
 const BOTTOM_PIN_THRESHOLD = 20
+// Bounds a jump landing's settling re-snaps (see `settlingRef`'s own
+// comment on `Timeline`) — content that never genuinely stabilizes (a
+// pathological case, not the expected one) must still eventually stop
+// re-snapping and resume normal scroll handling, the same
+// never-loop-forever discipline as `ITERATION_CAP`. A real-browser probe
+// observed settling resolve within 2-3 events; this leaves generous
+// headroom without risking a runaway loop.
+const MAX_SETTLE_ATTEMPTS = 10
 
 type Direction = 'back' | 'forward'
 // 'none': live inserts straight into the store (only takes effect while
@@ -184,18 +192,39 @@ export function Timeline({
   // target — genuinely the bottom-most loaded row a moment ago — ends up
   // stranded above it, rendering "in the middle" of the now-larger window.
   //
-  // Fix: recognize that ONE echoed event by VALUE, not by "whichever scroll
-  // happens to arrive next" (an earlier version of this fix used a plain
-  // one-shot boolean flag — wrong, because it could swallow a genuinely
-  // later, unrelated user scroll if nothing happened to consume it first,
-  // e.g. a jump landing followed by a filter change and only THEN a real
-  // scroll: no scroll event fires in between to consume the flag, so it was
-  // still armed and ate the real one). Recording the EXACT scrollTop value
-  // `scrollToEdge` just set (its return value) instead means only a scroll
-  // event reporting that precise value gets treated as the echo — cleared
-  // immediately whether it matches or not, so a stale value can never
-  // linger to misfire against some later, coincidentally-different scroll.
-  const expectedLandingScrollTopRef = useRef<number | null>(null)
+  // Two fix attempts were tried and REJECTED before this one (both refuted
+  // by a real-browser probe, not just reasoning — see the owner's own
+  // reproduction instructions): (1) a one-shot boolean "swallow the very
+  // next scroll event" — wrong, because it could swallow a genuinely LATER
+  // unrelated scroll if nothing happened to consume it first, and — the
+  // real killer — (2) recording the EXACT scrollTop `scrollToEdge` just
+  // set and matching by value — wrong because the virtualizer keeps
+  // measuring REAL row heights via `ResizeObserver` (jsdom has none — a
+  // real browser does) for a few scroll-event cycles AFTER we land,
+  // changing `scrollHeight` — and therefore the true bottom's scrollTop —
+  // out from under us before the echo we're expecting even arrives. A
+  // probe confirmed this exactly: `scrollHeight` at arm time (3405) had
+  // already grown to 3768 by the first echo, so the "exact value" never
+  // matched, the event fell through as if genuine, and re-triggered the
+  // same bug.
+  //
+  // Fix: track SETTLING, not a single value. `{ edge, lastScrollHeight }`
+  // means "we're still watching this jump's landing settle" — armed with
+  // `lastScrollHeight: null` (nothing observed yet). Every scroll event
+  // while settling: if `scrollHeight` differs from the last observed value
+  // (content is STILL resizing — including the very first observation,
+  // trivially "different" from `null`), re-snap to the edge's CURRENT true
+  // position (never treated as a pagination trigger) and keep watching. It
+  // takes exactly two CONSECUTIVE events reporting the SAME `scrollHeight`
+  // to conclude settling is over — genuinely stable content, not a
+  // still-resizing view — at which point normal scroll handling resumes.
+  // `settleAttemptsRef` bounds the worst case (content that never
+  // genuinely stabilizes, e.g. a fast live tail) at `MAX_SETTLE_ATTEMPTS`
+  // re-snaps before giving up and processing normally regardless — the
+  // same "never loop forever" discipline as the iteration-cap elsewhere in
+  // this file.
+  const settlingRef = useRef<{ edge: 'top' | 'bottom'; lastScrollHeight: number | null } | null>(null)
+  const settleAttemptsRef = useRef(0)
 
   // Scroll anchoring (design spec v1.3 "Scroll anchoring", owner feedback
   // 2026-08-15; ROW-IDENTITY rewrite, fix round 1, M1 — review of 079f30f):
@@ -750,10 +779,15 @@ export function Timeline({
     const edge = pendingScrollEdgeRef.current
     if (edge === null) return
     pendingScrollEdgeRef.current = null
-    // See expectedLandingScrollTopRef's own comment: records the EXACT
-    // value just assigned (or `null` — nothing to expect an echo of — if
-    // the scroll element wasn't mounted to receive it at all).
-    expectedLandingScrollTopRef.current = listRef.current?.scrollToEdge(edge) ?? null
+    const landed = listRef.current?.scrollToEdge(edge)
+    // See settlingRef's own comment: only arm settling-detection if the
+    // scroll element was actually mounted to receive the assignment at all
+    // (a zero-row anchor page renders Panel's loading skeleton instead —
+    // nothing to watch settle).
+    if (landed !== null && landed !== undefined) {
+      settlingRef.current = { edge, lastScrollHeight: null }
+      settleAttemptsRef.current = 0
+    }
   }, [state.loading])
 
   // Scroll anchoring (row-identity rewrite, fix round 1 M1; per-batch, fix
@@ -1013,9 +1047,9 @@ export function Timeline({
   // loads the next older page automatically, guarded by not already loading
   // (`loadOlder`/`loadNewer` themselves no-op on a null cursor or an
   // exhausted, never-trimmed direction). The symmetric top edge only ever
-  // matters once a beginning-jump (or an offset/timestamp jump — see the
-  // forward-anchor fallback) has opened a forward cursor — reusing the same
-  // top-pin check that already drives live-pause auto-resume.
+  // matters once a beginning/offset/timestamp jump has opened a forward
+  // cursor — reusing the same top-pin check that already drives
+  // live-pause auto-resume.
   //
   // When the continue affordance (I2's partial-match budget stop, or the
   // iteration-cap stop) is showing for a direction, the sentinel must drive
@@ -1024,16 +1058,27 @@ export function Timeline({
   // would silently drop the running scanned/matches totals the continue
   // affordance is displaying, exactly the "silent stop" I2 exists to avoid.
   const handleScroll = (scrollTop: number, scrollHeight: number, clientHeight: number) => {
-    // See expectedLandingScrollTopRef's own comment: swallow exactly the
-    // scroll event that reports the value our own landing scrollToEdge call
-    // just assigned — never treat it as a pagination trigger. Cleared
-    // unconditionally on the FIRST scroll event after arming, matching or
-    // not, so a stale expectation can never linger to misfire against some
-    // later, unrelated scroll.
-    if (expectedLandingScrollTopRef.current !== null) {
-      const expected = expectedLandingScrollTopRef.current
-      expectedLandingScrollTopRef.current = null
-      if (scrollTop === expected) return
+    // See settlingRef's own comment: a jump landing keeps re-snapping to
+    // its edge (never treated as a pagination trigger) until scrollHeight
+    // reports the SAME value on two consecutive events (or the attempt cap
+    // is hit) — i.e., until the virtualizer's post-mount remeasurement has
+    // genuinely stopped moving the true edge out from under us. The event
+    // that CONFIRMS stability is itself still just an echo of the PREVIOUS
+    // re-snap we issued, not evidence of a real user gesture — so it, too,
+    // is consumed here (settling ends, but this exact event never reaches
+    // the pagination checks below); the next TRULY independent scroll event
+    // is what may legitimately trigger `loadOlder`/`loadNewer`.
+    if (settlingRef.current !== null) {
+      const { edge, lastScrollHeight } = settlingRef.current
+      const stillMoving = lastScrollHeight === null || scrollHeight !== lastScrollHeight
+      settleAttemptsRef.current += 1
+      if (stillMoving && settleAttemptsRef.current <= MAX_SETTLE_ATTEMPTS) {
+        settlingRef.current = { edge, lastScrollHeight: scrollHeight }
+        listRef.current?.scrollToEdge(edge)
+      } else {
+        settlingRef.current = null
+      }
+      return
     }
     const pinnedTop = scrollTop < TOP_PIN_THRESHOLD
     if (pinnedTop) {

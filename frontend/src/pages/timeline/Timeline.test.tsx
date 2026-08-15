@@ -162,22 +162,40 @@ function scrollToTopFarFromBottom() {
   }
 }
 
-// Real browsers (unlike jsdom) fire a genuine native 'scroll' event the
-// instant JS assigns `el.scrollTop = ...` — including for a jump's own
-// landing `scrollToEdge` call. Timeline recognizes exactly that one echoed
-// event, BY VALUE (see `expectedLandingScrollTopRef`'s own comment), so it
-// never mistakenly fires a bottom/top-sentinel pagination request. jsdom
-// never produces that echo on its own, so any test that jumps and then
-// wants to prove a GENUINE subsequent scroll still triggers pagination
-// must fire this first — exactly mirroring what a real browser already did
-// automatically — or its own real scroll could otherwise be misread as
-// (or itself mask) the still-armed expectation. Reads the CURRENT
-// `scrollTop` straight off the element (whatever the landing's own
-// scrollToEdge call actually set it to) rather than guessing a value, so
-// this always matches regardless of jsdom's unstubbed defaults.
+// Real browsers (unlike jsdom) fire genuine native 'scroll' events while a
+// jump's landing settles — the virtualizer keeps remeasuring real row
+// heights via `ResizeObserver` (jsdom has none) for a couple of cycles
+// after `scrollToEdge`, moving the true edge each time. Timeline treats
+// this as SETTLING (see `settlingRef`'s own comment on `Timeline`), never a
+// pagination trigger, until `scrollHeight` reports the SAME value on two
+// CONSECUTIVE events. jsdom never produces that cascade on its own, so any
+// test that jumps and then wants to prove a GENUINE subsequent scroll still
+// triggers pagination must close settling out first — exactly mirroring
+// what a real browser's own cascade already resolved automatically — or
+// its own real scroll would itself be read as still-settling and
+// swallowed.
+//
+// Fires the SAME stubbed scrollHeight/clientHeight twice in a row (closing
+// settling on the second call — nothing else changed `scrollHeight` in
+// between), at a scrollTop that is DELIBERATELY neither pinned-top nor
+// near-bottom: closing settling still runs the SECOND call through normal
+// `handleScroll` (that's what "closing" means — settling stops swallowing
+// as of this exact event), so a value that would itself trivially satisfy
+// a sentinel (jsdom's unstubbed default is 0/0/0, which satisfies BOTH)
+// would fire an unwanted pagination request as a side effect of merely
+// closing out the helper — defeating its own purpose of being a neutral,
+// nothing-happens close.
 function consumeLandingEcho() {
   const el = screen.getByTestId('timeline-scroll')
-  fireEvent.scroll(el, { target: { scrollTop: el.scrollTop } })
+  const restoreScrollHeight = stubScrollHeight(2000)
+  const restoreClientHeight = stubClientHeight(600)
+  try {
+    fireEvent.scroll(el, { target: { scrollTop: 500 } })
+    fireEvent.scroll(el, { target: { scrollTop: 500 } })
+  } finally {
+    restoreScrollHeight()
+    restoreClientHeight()
+  }
 }
 
 describe('Timeline', () => {
@@ -745,6 +763,7 @@ describe('Timeline', () => {
       await user.click(screen.getByTestId('jump-beginning'))
       await emit(1, 'match', mk(2))
       await emit(1, 'page_end', { cursor: cur({ 0: 3 }), exhausted: false })
+      consumeLandingEcho() // the real browser's own echo of this jump's scrollToEdge — see its own comment
       // Rows now just [2] (offset 2, index 0 — uniform 40px rows in jsdom,
       // no ResizeObserver).
 
@@ -1113,23 +1132,23 @@ describe('Timeline', () => {
     // Owner-reported bug (2026-08-15): after an offset/timestamp jump, the
     // target rendered in the MIDDLE of the page instead of at the bottom
     // edge. Root cause (found via a real-browser probe, not visible in
-    // jsdom): a real browser fires a genuine native 'scroll' event when JS
-    // assigns `el.scrollTop = ...` — jsdom does NOT, which is exactly why
-    // the tests above never caught this. That echoed scroll event lands
-    // exactly at the bottom (scrollToEdge('bottom') just put it there),
-    // which trivially satisfies the bottom-sentinel's "near the bottom"
-    // check — firing an UNSOLICITED loadOlder() immediately after landing.
-    // The older page it fetches appends BELOW the target (correct, back
-    // pages append below and don't move the viewport when nothing above
-    // the reader trims — see the scroll-anchoring comment on `pendingAnchorRef`),
-    // but that's exactly the bug: the viewport does NOT follow down to the
-    // NEW bottom, so the target — genuinely the bottom-most loaded row a
-    // moment ago — ends up stranded above it, rendering "in the middle".
-    // This test simulates that echoed scroll event directly (the same way
-    // every other test here drives scroll-sentinel behavior, via
-    // `fireEvent.scroll`) and asserts it must NOT trigger a pagination
-    // request — while a genuinely later, real user scroll still must.
-    it('the scroll event a real browser fires for the landing scrollToEdge call does not trigger an extra pagination request', async () => {
+    // jsdom, and NOT fully explained by the first fix attempt either — see
+    // `settlingRef`'s own comment on `Timeline` for the full history): a
+    // real browser's virtualizer keeps remeasuring real row heights via
+    // `ResizeObserver` for a couple of scroll-event cycles after landing,
+    // moving the true bottom each time and firing a genuine native 'scroll'
+    // event for every one of those moves — each of which trivially
+    // satisfies the bottom-sentinel's "near the bottom" check, firing an
+    // UNSOLICITED `loadOlder()`. The older page it fetches appends BELOW
+    // the target (correct — back pages don't move the viewport when
+    // nothing above the reader trims), but the viewport never follows down
+    // to the NEW bottom, so the target — genuinely the bottom-most loaded
+    // row a moment ago — ends up stranded above it, rendering "in the
+    // middle". This test simulates that settling CASCADE directly (a
+    // scrollHeight that keeps changing across a couple of events, then
+    // stabilizes) and asserts none of it triggers a pagination request —
+    // while a genuinely later, real user scroll still must.
+    it('the settling cascade a real browser fires while a jump lands does not trigger an extra pagination request', async () => {
       mockTail()
       const user = userEvent.setup()
       render(<Timeline cluster="prod" topic="orders" />)
@@ -1137,9 +1156,11 @@ describe('Timeline', () => {
       await emit(0, 'page_end', { cursor: cur({ 0: 9 }), exhausted: false })
 
       // Stubbed BEFORE the jump lands, so scrollToEdge('bottom') computes a
-      // realistic non-zero "bottom" (4000) — same as a real browser's own
-      // actual scrollHeight, unlike jsdom's unstubbed default of 0.
-      const restoreScrollHeight = stubScrollHeight(4000)
+      // realistic non-zero "bottom" (3405) — same as a real browser's own
+      // actual scrollHeight at that moment, unlike jsdom's unstubbed
+      // default of 0. The value itself mirrors the real-browser probe that
+      // found this bug.
+      const restoreScrollHeight = stubScrollHeight(3405)
       const restoreClientHeight = stubClientHeight(600)
       try {
         await user.click(screen.getByTestId('jump-offset'))
@@ -1153,22 +1174,34 @@ describe('Timeline', () => {
         await emit(1, 'page_end', { cursor: cur({ 0: 31 }), exhausted: false })
         expect(FakeEventSource.instances).toHaveLength(2) // landing page only, nothing auto-triggered yet
 
-        // The echoed native scroll event: scrollTop === scrollHeight, exactly
-        // what scrollToEdge('bottom') just set — must be swallowed once.
-        fireEvent.scroll(screen.getByTestId('timeline-scroll'), { target: { scrollTop: 4000 } })
+        // First echo: the virtualizer's remeasurement has already grown
+        // scrollHeight (probe-observed: 3405 -> 3768) — still settling.
+        // (Re-stubbing directly, not via a second `stubScrollHeight()` call
+        // — that would return its OWN restore function pointing back at
+        // THIS stub, not the true original; one `restoreScrollHeight` at
+        // the end, from the FIRST call, is all the cleanup this needs.)
+        Object.defineProperty(Element.prototype, 'scrollHeight', { configurable: true, get: () => 3768 })
+        fireEvent.scroll(screen.getByTestId('timeline-scroll'), { target: { scrollTop: 3768 } })
+        expect(FakeEventSource.instances).toHaveLength(2) // still swallowed — content is still resizing
+
+        // Second echo: SAME scrollHeight as the first — settling is done.
+        // This closing event is itself consumed too (still just an echo of
+        // our own last re-snap, not a real gesture).
+        fireEvent.scroll(screen.getByTestId('timeline-scroll'), { target: { scrollTop: 3768 } })
+        expect(FakeEventSource.instances).toHaveLength(2) // still no extra request
       } finally {
         restoreScrollHeight()
         restoreClientHeight()
       }
-      expect(FakeEventSource.instances).toHaveLength(2) // still no extra request — the echo was suppressed
 
-      // A genuinely later user scroll to the bottom must still page normally
-      // — the suppression is a single one-shot swallow, not a broken feature.
-      // Cursor is 30 (mk(30)'s own offset), not the mocked page_end cursor
-      // (31): the bottom map is opposite-seeded from this anchor bootstrap's
-      // own INSERTED ROW offsets (the only source for the side the request
-      // itself didn't touch — direction is 'forward' here, so `31` feeds
-      // the TOP map instead; see createSlidingWindowStore's own doc comment).
+      // A genuinely later, independent user scroll to the bottom must still
+      // page normally — settling is a bounded, self-closing window, not a
+      // broken feature. Cursor is 30 (mk(30)'s own offset), not the mocked
+      // page_end cursor (31): the bottom map is opposite-seeded from this
+      // anchor bootstrap's own INSERTED ROW offsets (the only source for
+      // the side the request itself didn't touch — direction is 'forward'
+      // here, so `31` feeds the TOP map instead; see
+      // createSlidingWindowStore's own doc comment).
       scrollToBottom()
       expect(FakeEventSource.instances).toHaveLength(3)
       expect(FakeEventSource.instances[2].url).toBe(url({ direction: 'back', limit: '100', cursor: cur({ 0: 30 }) }))
