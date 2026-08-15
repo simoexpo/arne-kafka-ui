@@ -708,6 +708,64 @@ describe('Timeline', () => {
       // committed, content never reset along the way.
       expect(screen.getByText('31 messages')).toBeInTheDocument()
     })
+
+    // Real-browser stall (rollout drill, 2026-08-15, ~24k-message topic):
+    // the down-walk died PERMANENTLY the moment the window reached its row
+    // cap — 20 pages in, no 21st request, no error, no affordance. The
+    // mechanism is this: past the cap a back page is height-NEUTRAL (it
+    // appends N rows below and trims exactly N off the top), so the scroll
+    // container's scrollHeight stops growing. Scroll anchoring existed only
+    // for 'forward' pages ("a back page appends below, it doesn't move the
+    // viewport") — but a back page that ALSO trims above the viewport moves
+    // every remaining row UP by the trimmed height while scrollTop stays
+    // numerically unchanged. A reader at the bottom (which is what triggered
+    // the load) therefore stays pinned at scrollTop === max, the entire
+    // window silently slides underneath them (they never see the page they
+    // just loaded), and — since scrollTop is already at the max of an
+    // unchanged scrollHeight — the browser has no reason to ever emit
+    // another scroll event. The bottom sentinel is scroll-event-driven and
+    // only scroll-event-driven, so pagination is dead for good. This is the
+    // exact mirror of the forward case (which works in the live app
+    // precisely BECAUSE its anchoring leaves the reader off the top edge).
+    // Invisible to every other test here because jsdom synthesizes scroll
+    // events directly rather than deciding whether a real browser would
+    // have emitted one — so the property under test is the anchoring
+    // itself, which is pure state/measurement logic.
+    it('a back page that trims the top keeps the reader on their junction row instead of pinning them to the bottom', async () => {
+      mockTail()
+      render(<Timeline cluster="prod" topic="orders" windowCap={3} />)
+      await emit(0, 'match', mk(9))
+      await emit(0, 'match', mk(8))
+      await emit(0, 'match', mk(7))
+      await emit(0, 'page_end', { cursor: cur({ 0: 7 }), exhausted: false })
+      // Rows [9,8,7] — exactly at cap(3); uniform 40px rows in jsdom (no
+      // ResizeObserver), so offsets are 0/40/80.
+
+      scrollToBottom() // reader at the bottom -> fires the next back page
+      expect(FakeEventSource.instances).toHaveLength(2)
+
+      const scroll = spyOnScrollTop()
+      try {
+        scroll.setter.mockClear()
+        await emit(1, 'match', mk(6))
+        await emit(1, 'match', mk(5))
+        await emit(1, 'page_end', { cursor: cur({ 0: 5 }), exhausted: false })
+        // 5 rows against cap(3): the two NEWEST (p0·9, p0·8) trim off the
+        // top — 80px of content removed above the reader.
+        expect(screen.queryByText('p0·9')).not.toBeInTheDocument()
+        expect(screen.queryByText('p0·8')).not.toBeInTheDocument()
+        // Junction row = the last row committed before this page (p0·7, at
+        // index 2, offset 80). After the trim it sits at index 0 (offset 0),
+        // so scrollTop is nudged by 0 - 80 = -80: from scrollToBottom's 200
+        // down to 120. The reader keeps looking at p0·7 with the newly
+        // loaded rows below them — and, in a real browser, is no longer
+        // pinned at the maximum scroll offset, so their next downward scroll
+        // is a genuine position change that fires a genuine scroll event.
+        expect(scroll.setter).toHaveBeenCalledWith(120)
+      } finally {
+        scroll.restore()
+      }
+    })
   })
 
   describe('jump control', () => {

@@ -196,8 +196,23 @@ export function Timeline({
   // index after the batch/commit renders and adjusts scrollTop by the
   // difference in `MessageList#rowOffsetAt` — robust to a simultaneous
   // trim (which only ever happens BELOW this row) and to estimate-vs-
-  // measured drift (both reads go through the same virtualizer API). Not
-  // used for 'back' (appends below, doesn't move the viewport).
+  // measured drift (both reads go through the same virtualizer API).
+  //
+  // 'back' pages need the SAME treatment, for the mirror-image reason
+  // (real-browser stall found in the 2026-08-15 rollout drill; the original
+  // "a back page appends below, it doesn't move the viewport" was only true
+  // BELOW the cap). Once the window is full, every back page trims exactly
+  // as many rows off the TOP as it appends at the bottom: total height stops
+  // changing, and every remaining row shifts UP by the trimmed height while
+  // scrollTop stays numerically unchanged. The reader — sitting at the
+  // bottom, which is what fired the sentinel in the first place — is
+  // therefore left pinned at scrollTop === max: the whole window slides
+  // underneath them (they never see the page they just asked for), and the
+  // browser, having no position change to report on an unchanged
+  // scrollHeight, never fires another scroll event. Since scroll is the ONLY
+  // pagination affordance, that killed the down-walk permanently at the cap.
+  // The capture site differs from 'forward' (commit-time, not per-batch —
+  // see runPage's `onPageEnd`), the consumption is identical.
   //
   // `priorTop` is ALWAYS `0` here (fix round 2, N4 — flagged as "correct
   // by accident" otherwise): the junction row captured is, by construction,
@@ -435,6 +450,31 @@ export function Timeline({
           // or, worse, the WRONG one, since the row this batch's own
           // capture chained from may no longer be at index 0 by the time
           // this callback runs (see `pendingAnchorRef`'s own comment).
+          //
+          // A 'back' page needs its own capture, HERE rather than per-batch
+          // (see the back-anchoring comment below `pendingAnchorRef` for
+          // why it is needed at all): a back page's rows rank OLDER, so both
+          // its overlay batches and its commit append BELOW everything
+          // already rendered — appending never moves an existing row, so
+          // only the commit's own top TRIM can move the reader, and only the
+          // commit knows whether one happened. The junction row is the LAST
+          // committed row (the reader is at the bottom — that is what fired
+          // the bottom sentinel — and a back commit only ever trims the TOP,
+          // so this row always survives). Its rendered offset is read BEFORE
+          // `insertPage` runs, since `rowOffsetAt` reports the LAST RENDER's
+          // measurements and this page's commit has not rendered yet. Safe
+          // against an already-rendered overlay for the same reason: those
+          // rows sit below this one, so its own offset is identical either
+          // way.
+          let backAnchor: { partition: number; offset: number; priorTop: number } | null = null
+          if (direction === 'back') {
+            const committed = storeRef.current.rows()
+            const lastIndex = committed.length - 1
+            const priorTop = lastIndex >= 0 ? listRef.current?.rowOffsetAt(lastIndex) ?? null : null
+            if (priorTop !== null) {
+              backAnchor = { partition: committed[lastIndex].partition, offset: committed[lastIndex].offset, priorTop }
+            }
+          }
           const outcome = storeRef.current.insertPage(rows, direction, pendingStartPositionsRef.current, cursor, {
             attach: pendingAttachRef.current,
           })
@@ -482,6 +522,11 @@ export function Timeline({
             return
           }
           noteOutcome(outcome)
+          // Arm the back-direction anchor only if this commit actually
+          // trimmed above the reader — below the cap a back page moves
+          // nothing (delta would be exactly 0 anyway) and the viewport must
+          // be left strictly alone.
+          if (backAnchor !== null && outcome.trimmedTop > 0) pendingAnchorRef.current = backAnchor
           // "Just became store-attached" catch-up: covers BOTH a detached
           // window's forward page catching the tail (v1.3's reattach) AND
           // an anchor bootstrap ('now', or mount) whose own attach:true just
