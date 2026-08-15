@@ -54,8 +54,14 @@ export const MessageList = forwardRef<
     // element (found via its data-testid), stubbing scrollHeight/clientHeight
     // since jsdom never actually lays anything out.
     onScroll?: (scrollTop: number, scrollHeight: number, clientHeight: number) => void
+    // The (partition, offset) landed on by the most recent offset jump —
+    // Timeline clears this on every subsequent jump/filter-change (both call
+    // `storeRef.current.clear()`), so it only ever reflects the CURRENT
+    // window's own jump, never a stale one from a window already left.
+    // `null`/`undefined` (no jump, or a non-offset jump) marks nothing.
+    jumpTarget?: { partition: number; offset: number } | null
   }
->(function MessageList({ messages, onScroll }, ref) {
+>(function MessageList({ messages, onScroll, jumpTarget }, ref) {
   const parentRef = useRef<HTMLDivElement>(null)
   const virtualizer = useVirtualizer({
     count: messages.length,
@@ -118,6 +124,8 @@ export const MessageList = forwardRef<
             m.timestamp_ms !== null &&
             prev.timestamp_ms !== null &&
             m.timestamp_ms > prev.timestamp_ms
+          const isJumpTarget =
+            jumpTarget != null && m.partition === jumpTarget.partition && m.offset === jumpTarget.offset
           return (
             <div
               key={`${m.partition}-${m.offset}-${item.index}`}
@@ -125,7 +133,7 @@ export const MessageList = forwardRef<
               data-index={item.index}
               style={{ position: 'absolute', top: 0, left: 0, width: '100%', transform: `translateY(${item.start}px)` }}
             >
-              <MessageRow message={m} tsInverted={tsInverted} />
+              <MessageRow message={m} tsInverted={tsInverted} isJumpTarget={isJumpTarget} />
             </div>
           )
         })}

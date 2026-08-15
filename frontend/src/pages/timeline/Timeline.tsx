@@ -290,6 +290,18 @@ export function Timeline({
   // now-wrong hardcoded assumption.
   const pendingAnchorRef = useRef<{ partition: number; offset: number; priorTop: number } | null>(null)
 
+  // Owner-requested (2026-08-15): the row landed on by an offset jump gets a
+  // highlighted marker (MessageRow's `isJumpTarget`) so the reader can find
+  // it at a glance in the loaded window. Real state (not a ref): it only
+  // ever changes on a jump or a filter settle — both already re-render via
+  // other state/bump — and MessageList needs it on every render, not just
+  // via an imperative escape hatch. Cleared (set back to null) by every
+  // jump (including non-offset ones — see handleJump) and by a settled
+  // filter change (see applyFilter), both of which already clear the store
+  // itself: the highlight only ever makes sense for the window it was set
+  // in, never carried forward into a different one.
+  const [jumpTarget, setJumpTarget] = useState<{ partition: number; offset: number } | null>(null)
+
   const [live, setLive] = useState(true)
   const [tailErrorText, setTailErrorText] = useState<string | null>(null)
   const tailHandleRef = useRef<{ close: () => void } | null>(null)
@@ -650,6 +662,9 @@ export function Timeline({
       // A pending scroll-anchor capture belongs to the window being
       // discarded — applying it to the fresh one would yank the viewport.
       pendingAnchorRef.current = null
+      // The old window's jump highlight (if any) belongs to the window
+      // being discarded too — see jumpTarget's own comment.
+      setJumpTarget(null)
       bufferRef.current = []
       bufferReceivedRef.current = 0
       bufferOverflowRef.current = false
@@ -931,6 +946,10 @@ export function Timeline({
     // never let it adjust the post-jump viewport (defense-in-depth: today
     // capture and consumption share one commit, but that's implicit).
     pendingAnchorRef.current = null
+    // Every jump belongs to a fresh window — the previous jump's own
+    // highlight (if any) never carries forward. Only the 'offset' case
+    // below re-sets it for the new target; every other kind leaves it null.
+    setJumpTarget(target.kind === 'offset' ? { partition: target.partition, offset: target.offset } : null)
     bufferRef.current = []
     bufferReceivedRef.current = 0
     bufferOverflowRef.current = false
@@ -1220,7 +1239,7 @@ export function Timeline({
         hasData={rows.length > 0}
         loading={state.loading && rows.length === 0}
       >
-        <MessageList ref={listRef} messages={rows} onScroll={handleScroll} />
+        <MessageList ref={listRef} messages={rows} onScroll={handleScroll} jumpTarget={jumpTarget} />
       </Panel>
       {continueDirection === 'back' ? (
         <button

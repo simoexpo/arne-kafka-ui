@@ -37,4 +37,15 @@ describe('MessageRow', () => {
     render(<MessageRow message={msg({ timestamp_ms: 100 })} />)
     expect(screen.queryByTestId('ts-inversion')).not.toBeInTheDocument()
   })
+  it('marks the jump target with a highlighted background and a marker', () => {
+    render(<MessageRow message={msg()} isJumpTarget />)
+    const row = screen.getByTestId('message-row')
+    expect(row.className).toMatch(/emerald/)
+    expect(screen.getByTestId('jump-target')).toBeInTheDocument()
+  })
+  it('renders no jump-target marker or highlight by default', () => {
+    render(<MessageRow message={msg()} />)
+    expect(screen.queryByTestId('jump-target')).not.toBeInTheDocument()
+    expect(screen.getByTestId('message-row').className).not.toMatch(/emerald/)
+  })
 })

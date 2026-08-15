@@ -3,7 +3,15 @@ import type { MessageOut } from '../../api/types'
 import { EncodingBadge } from './EncodingBadge'
 import { PayloadView } from './PayloadView'
 
-export function MessageRow({ message, tsInverted = false }: { message: MessageOut; tsInverted?: boolean }) {
+export function MessageRow({
+  message,
+  tsInverted = false,
+  isJumpTarget = false,
+}: {
+  message: MessageOut
+  tsInverted?: boolean
+  isJumpTarget?: boolean
+}) {
   const [open, setOpen] = useState(false)
   const ts = message.timestamp_ms === null ? '—' : new Date(message.timestamp_ms).toISOString()
   const preview = message.value === null ? '∅ null' : message.value.text.replaceAll('\n', ' ')
@@ -12,9 +20,22 @@ export function MessageRow({ message, tsInverted = false }: { message: MessageOu
     <div
       data-testid="message-row"
       onClick={() => setOpen((o) => !o)}
-      className="cursor-pointer border-b border-zinc-100 px-2 py-1.5 font-mono text-xs hover:bg-zinc-50 dark:border-zinc-800 dark:hover:bg-zinc-900"
+      className={`cursor-pointer border-b border-zinc-100 px-2 py-1.5 font-mono text-xs dark:border-zinc-800 ${
+        isJumpTarget
+          ? 'bg-emerald-50 hover:bg-emerald-100 dark:bg-emerald-950/40 dark:hover:bg-emerald-950/60'
+          : 'hover:bg-zinc-50 dark:hover:bg-zinc-900'
+      }`}
     >
       <div className="flex items-center gap-3">
+        {isJumpTarget && (
+          <span
+            data-testid="jump-target"
+            role="img"
+            aria-label="Jump target"
+            title={`Jump target: p${message.partition}·${message.offset}`}
+            className="h-1.5 w-1.5 shrink-0 rounded-full bg-emerald-500"
+          />
+        )}
         <span className="whitespace-nowrap text-zinc-500">{ts}</span>
         {tsInverted && (
           <svg

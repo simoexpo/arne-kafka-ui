@@ -973,6 +973,78 @@ describe('Timeline', () => {
       )
     })
 
+    it('after an offset jump, the target row carries the jump-target marker; other rows do not', async () => {
+      mockTail()
+      const user = userEvent.setup()
+      render(<Timeline cluster="prod" topic="orders" />)
+      await emit(0, 'match', mk(9))
+      await emit(0, 'page_end', { cursor: cur({ 0: 9 }), exhausted: false })
+
+      await user.click(screen.getByTestId('jump-offset'))
+      await user.type(screen.getByTestId('jump-offset-partition-input'), '1')
+      await user.type(screen.getByTestId('jump-offset-value-input'), '77')
+      await user.click(screen.getByTestId('jump-offset-apply'))
+
+      await emit(1, 'match', mk(77, { partition: 1 }))
+      await emit(1, 'match', mk(78, { partition: 1 }))
+      await emit(1, 'page_end', { cursor: cur({ 1: 79 }), exhausted: false })
+
+      expect(screen.getAllByTestId('jump-target')).toHaveLength(1)
+      const rows = screen.getAllByTestId('message-row')
+      const markedRow = rows.find((r) => r.textContent?.includes('p1·77'))
+      expect(markedRow?.querySelector('[data-testid="jump-target"]')).toBeInTheDocument()
+      const unmarkedRow = rows.find((r) => r.textContent?.includes('p1·78'))
+      expect(unmarkedRow?.querySelector('[data-testid="jump-target"]')).not.toBeInTheDocument()
+    })
+
+    it('a subsequent jump clears the previous offset jump highlight', async () => {
+      mockTail()
+      const user = userEvent.setup()
+      render(<Timeline cluster="prod" topic="orders" />)
+      await emit(0, 'match', mk(9))
+      await emit(0, 'page_end', { cursor: cur({ 0: 9 }), exhausted: false })
+
+      await user.click(screen.getByTestId('jump-offset'))
+      await user.type(screen.getByTestId('jump-offset-partition-input'), '1')
+      await user.type(screen.getByTestId('jump-offset-value-input'), '77')
+      await user.click(screen.getByTestId('jump-offset-apply'))
+      await emit(1, 'match', mk(77, { partition: 1 }))
+      await emit(1, 'page_end', { cursor: cur({ 1: 78 }), exhausted: false })
+      expect(screen.getAllByTestId('jump-target')).toHaveLength(1)
+
+      await user.click(screen.getByTestId('jump-now'))
+      await emit(2, 'page_end', { cursor: null, exhausted: true })
+      expect(screen.queryAllByTestId('jump-target')).toHaveLength(0)
+    })
+
+    it('a filter change clears a previous offset jump highlight', async () => {
+      mockTail()
+      const user = userEvent.setup()
+      render(<Timeline cluster="prod" topic="orders" />)
+      await emit(0, 'match', mk(9))
+      await emit(0, 'page_end', { cursor: cur({ 0: 9 }), exhausted: false })
+
+      await user.click(screen.getByTestId('jump-offset'))
+      await user.type(screen.getByTestId('jump-offset-partition-input'), '1')
+      await user.type(screen.getByTestId('jump-offset-value-input'), '77')
+      await user.click(screen.getByTestId('jump-offset-apply'))
+      await emit(1, 'match', mk(77, { partition: 1 }))
+      await emit(1, 'page_end', { cursor: cur({ 1: 78 }), exhausted: false })
+      expect(screen.getAllByTestId('jump-target')).toHaveLength(1)
+
+      vi.useFakeTimers()
+      try {
+        fireEvent.change(screen.getByLabelText('filter messages'), { target: { value: 'v77' } })
+        await act(async () => {
+          vi.advanceTimersByTime(500)
+        })
+      } finally {
+        vi.useRealTimers()
+      }
+      await emit(2, 'page_end', { cursor: null, exhausted: true })
+      expect(screen.queryAllByTestId('jump-target')).toHaveLength(0)
+    })
+
     it('a jump resets BOTH directions: a stale pre-jump back cursor cannot fire a request, and a post-jump top-scroll uses the fresh cursor', async () => {
       mockTail()
       const user = userEvent.setup()

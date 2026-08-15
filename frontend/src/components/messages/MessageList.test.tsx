@@ -50,4 +50,20 @@ describe('MessageList', () => {
     render(<MessageList messages={rows} />)
     expect(screen.queryAllByTestId('ts-inversion')).toHaveLength(0)
   })
+  it('marks exactly the row matching jumpTarget partition+offset', () => {
+    const rows = [
+      msg({ partition: 1, offset: 5 }),
+      msg({ partition: 0, offset: 2 }),
+      msg({ partition: 0, offset: 5 }), // same offset, different partition — must not match
+    ]
+    render(<MessageList messages={rows} jumpTarget={{ partition: 0, offset: 2 }} />)
+    expect(screen.getAllByTestId('jump-target')).toHaveLength(1)
+    const marked = screen.getAllByTestId('message-row')[1]
+    expect(marked.querySelector('[data-testid="jump-target"]')).toBeInTheDocument()
+  })
+  it('marks no row when jumpTarget is null', () => {
+    const rows = [msg({ partition: 0, offset: 2 })]
+    render(<MessageList messages={rows} jumpTarget={null} />)
+    expect(screen.queryAllByTestId('jump-target')).toHaveLength(0)
+  })
 })
