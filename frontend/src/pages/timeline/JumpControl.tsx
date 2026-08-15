@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { DateTimePicker } from '../../components/DateTimePicker'
+import { DateTimePicker, formatDateTimeMillis, parseDateTimeMillis } from '../../components/DateTimePicker'
 import { formatTimestamp } from '../../lib/format'
 import { useTimeDisplayMode } from '../../lib/timeDisplayMode'
 
@@ -29,11 +29,16 @@ export function JumpControl({ onJump }: { onJump: (target: JumpTarget) => void }
   const [expanded, setExpanded] = useState<Expanded>('none')
   const [partitionText, setPartitionText] = useState('')
   const [offsetText, setOffsetText] = useState('')
-  const [tsText, setTsText] = useState('')
+  // Datetime-with-milliseconds text, browser-local — same representation
+  // and parser the picker's own in-popover textbox uses (picker3, owner
+  // ruling 2026-08-16), so this is the ONE outer textbox: typing here or
+  // picking via the calendar-icon popover both flow through the same
+  // format/parse pair.
+  const [dtText, setDtText] = useState('')
 
   const partition = parseNonNegativeInt(partitionText)
   const offset = parseNonNegativeInt(offsetText)
-  const tsMs = parseNonNegativeInt(tsText)
+  const tsMs = parseDateTimeMillis(dtText)
   const offsetValid = partition !== null && offset !== null
   const tsValid = tsMs !== null
 
@@ -132,16 +137,16 @@ export function JumpControl({ onJump }: { onJump: (target: JumpTarget) => void }
         <div className="flex flex-wrap items-center gap-1">
           <input
             data-testid="jump-timestamp-input"
-            aria-label="timestamp (epoch ms)"
-            placeholder="epoch ms"
-            value={tsText}
-            onChange={(e) => setTsText(e.target.value)}
+            aria-label="timestamp (local time, with milliseconds)"
+            placeholder="yyyy-mm-dd hh:mm:ss.mmm"
+            value={dtText}
+            onChange={(e) => setDtText(e.target.value)}
             onKeyDown={(e) => e.key === 'Enter' && applyTimestamp()}
-            className="w-32 rounded border border-zinc-300 px-1 py-0.5 dark:border-zinc-700 dark:bg-zinc-900"
+            className="w-44 rounded border border-zinc-300 px-1 py-0.5 dark:border-zinc-700 dark:bg-zinc-900"
           />
           <DateTimePicker
             valueMs={tsMs}
-            onChange={(ms) => setTsText(String(ms))}
+            onChange={(ms) => setDtText(formatDateTimeMillis(ms))}
             ariaLabel="pick timestamp (local time)"
           />
           <span className="text-[10px] text-zinc-500 dark:text-zinc-400">local</span>
