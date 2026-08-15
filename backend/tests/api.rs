@@ -784,6 +784,39 @@ async fn timeline_accepts_a_client_constructed_cursor() {
     assert_eq!(end["exhausted"], true, "{end}");
 }
 
+/// M1 fix (review finding): `Cursor.direction` is documented as
+/// "informational only" but was a serde-required field with no default —
+/// a client following that doc and omitting `direction` entirely would get
+/// a 400 on a perfectly valid cursor. Now `#[serde(default)]`'d: a
+/// hand-built cursor carrying ONLY `positions` (no `direction` key at all)
+/// must decode and work end-to-end, identically to
+/// `timeline_accepts_a_client_constructed_cursor` above.
+#[tokio::test]
+async fn timeline_accepts_a_client_cursor_without_direction_field() {
+    use base64::Engine as _;
+
+    let bootstrap = start_kafka().await;
+    create_topic(&bootstrap, "tl-client-cursor-no-direction-topic", 1).await;
+    produce(&bootstrap, "tl-client-cursor-no-direction-topic", 10).await;
+    let state = state_for(&bootstrap, vec![]);
+
+    // No "direction" key at all — just the payload that actually matters.
+    let client_json = serde_json::json!({ "positions": [[0, 5]] });
+    let client_cursor = base64::engine::general_purpose::STANDARD.encode(client_json.to_string());
+
+    let events = collect_sse(
+        app(state),
+        &format!("/api/clusters/test/topics/tl-client-cursor-no-direction-topic/timeline?direction=forward&limit=10&cursor={}", urlencoding::encode(&client_cursor)),
+        200,
+    ).await;
+    assert!(events.iter().all(|(n, _)| n != "error"), "cursor without a direction field must be accepted: {events:?}");
+    let values: Vec<String> = events.iter().filter(|(n, _)| n == "match")
+        .map(|(_, m)| m["value"]["text"].as_str().unwrap().to_string()).collect();
+    assert_eq!(values, vec!["v5", "v6", "v7", "v8", "v9"], "must honor the position exactly even without direction: {values:?}");
+    let (_, end) = events.iter().find(|(n, _)| n == "page_end").expect("page_end present").clone();
+    assert_eq!(end["exhausted"], true, "{end}");
+}
+
 /// Fix round 1, M2: `limit=0` is nonsensical (an empty page forever) and
 /// must 400, not silently return zero records forever.
 #[tokio::test]

@@ -35,31 +35,49 @@ pub enum Direction {
     Forward,
 }
 
+impl Default for Direction {
+    /// Arbitrary. `Cursor.direction` is informational only (see `Cursor`'s
+    /// doc comment) — the backend never reads it back for anything besides
+    /// debugging/logging — so this only exists to give `#[serde(default)]`
+    /// something to produce when a client-constructed cursor omits the
+    /// field entirely, which the documented wire format explicitly allows.
+    fn default() -> Self {
+        Direction::Forward
+    }
+}
+
 /// An opaque, per-partition offset map plus the direction it was minted in.
 ///
 /// **Wire format (documented contract, spec v1.6):** standard-alphabet
-/// base64 of the compact JSON `{"direction":"back"|"forward","positions":
-/// [[partition,offset],...]}` — `positions` is an array of 2-element
+/// base64 of the compact JSON `{"positions":[[partition,offset],...]
+/// ,"direction":"back"|"forward"}` — `positions` is an array of 2-element
 /// `[i32, i64]` pairs, one per partition, in no particular guaranteed
-/// order. This is deliberately client-constructible: the sliding-window
-/// frontend mints its own cursors from row offsets it already tracks
-/// (rather than only ever replaying a cursor the backend handed back), so
-/// the format is a contract, not an implementation detail — see
-/// `tests/api.rs`'s `timeline_accepts_a_client_constructed_cursor` for a
-/// cursor built without this Rust type at all.
+/// order; `direction` is OPTIONAL (see below — omitting it decodes fine).
+/// This is deliberately client-constructible: the sliding-window frontend
+/// mints its own cursors from row offsets it already tracks (rather than
+/// only ever replaying a cursor the backend handed back), so the format is
+/// a contract, not an implementation detail — see `tests/api.rs`'s
+/// `timeline_accepts_a_client_constructed_cursor` and
+/// `timeline_accepts_a_client_cursor_without_direction_field` for cursors
+/// built without this Rust type at all.
 ///
-/// **`direction` is informational only.** It records which direction the
-/// cursor was minted in (useful for debugging/logging), but the backend
-/// never enforces it against a request: the REQUEST's own `direction` query
-/// param is authoritative for how `positions` are read (see
-/// `api::messages::timeline_sse`, where the decoded `direction` field is
-/// intentionally unused). Per the design's bound-semantics ruling, this is
-/// exact, not a loose convention: a `Back` request treats `positions` as
+/// **`direction` is informational only, and optional in the wire format**
+/// (`#[serde(default)]` — a missing field decodes as `Direction::default()`,
+/// an arbitrary placeholder, never a decode error). It records which
+/// direction the cursor was minted in (useful for debugging/logging), but
+/// the backend never enforces it against a request: the REQUEST's own
+/// `direction` query param is authoritative for how `positions` are read
+/// (see `api::messages::timeline_sse`, where the decoded `direction` field
+/// is intentionally unused). Per the design's bound-semantics ruling, this
+/// is exact, not a loose convention: a `Back` request treats `positions` as
 /// exclusive uppers; a `Forward` request treats the identical numbers as
 /// inclusive lowers (see `Direction`'s doc comment, and `page_windows`,
 /// whose arithmetic is where this is actually implemented) — so following a
 /// back-minted cursor with `direction=forward` is a well-defined re-read of
-/// the region just below that cursor, not a version mismatch.
+/// the region just below that cursor, not a version mismatch. Making the
+/// field optional matches this: a client-constructed cursor built purely
+/// from `positions` (the only part that ever matters) must not be forced to
+/// invent a meaningless `direction` just to satisfy the codec.
 ///
 /// Every decoded cursor is treated as untrusted input regardless of origin:
 /// positions are clamped into each partition's *current* watermark range
@@ -67,6 +85,7 @@ pub enum Direction {
 /// watermarks is dropped.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Cursor {
+    #[serde(default)]
     pub direction: Direction,
     pub positions: Vec<(i32, i64)>,
 }
@@ -880,6 +899,19 @@ mod tests {
         assert!(Cursor::decode("garbage!").is_err());
     }
 
+    /// M1 fix: `direction` is optional in the wire format
+    /// (`#[serde(default)]`) — a client-constructed cursor built purely
+    /// from `positions`, with no `direction` key at all, must decode
+    /// cleanly rather than 400 on a missing required field.
+    #[test]
+    fn cursor_decodes_without_direction_field() {
+        let json = r#"{"positions":[[0,5],[1,3]]}"#;
+        let encoded = base64::engine::general_purpose::STANDARD.encode(json);
+        let decoded = Cursor::decode(&encoded).unwrap();
+        assert_eq!(decoded.positions, vec![(0, 5), (1, 3)]);
+        assert_eq!(decoded.direction, Direction::default());
+    }
+
     #[test]
     fn latest_positions_are_high_watermarks() {
         let p = initial_positions(WM, &Anchor::Latest);
@@ -908,6 +940,22 @@ mod tests {
             range::PartitionRange { partition: 0, start: 10, end: 13 },
             range::PartitionRange { partition: 1, start: 0, end: 3 },
         ]);
+    }
+
+    /// L1 fix (review finding): every other `page_windows` test positions
+    /// `p` exactly ON a watermark, where `.clamp(lo, hi)` can mask an
+    /// off-by-one in the window arithmetic itself. This pins a genuinely
+    /// mid-range position (lo=0, hi=100, p=60, span=10, nowhere near either
+    /// watermark): `Back` must yield the exclusive-upper window `[50, 60)`
+    /// (offsets ≤ 59), `Forward` the inclusive-lower window `[60, 70)`
+    /// (offsets ≥ 60) — verified to have teeth by mutation (see report).
+    #[test]
+    fn page_windows_mid_range_position_back_and_forward() {
+        let wm: &[(i32, i64, i64)] = &[(0, 0, 100)];
+        let back = page_windows(&[(0, 60)], wm, Direction::Back, 10);
+        assert_eq!(back, vec![range::PartitionRange { partition: 0, start: 50, end: 60 }]);
+        let forward = page_windows(&[(0, 60)], wm, Direction::Forward, 10);
+        assert_eq!(forward, vec![range::PartitionRange { partition: 0, start: 60, end: 70 }]);
     }
 
     #[test]
