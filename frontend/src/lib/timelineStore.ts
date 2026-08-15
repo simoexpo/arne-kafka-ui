@@ -241,8 +241,23 @@ export interface SlidingWindowStore {
  * ## Edge-map maintenance invariant (read this before touching a map-update
  * site)
  *
- * Both maps are updated by exactly two kinds of event, and NEVER by a third
- * ad hoc path — this is what keeps a trimmed region's re-read exact:
+ * **Fix round 1 correction:** an earlier version of this comment claimed
+ * "a partition not touched by a trim already correctly describes its
+ * boundary" as if only trims could move a partition's held offsets. That's
+ * false — rows arrive above the top boundary from THREE independent
+ * sources (a forward page's own rows, an anchor's own rows, and a live
+ * insert), and the third one was not updating `topMap` at all. A partition
+ * whose live-delivered row sat above a stale `topMap` entry, later spared
+ * by an UNRELATED partition's top trim, kept that stale entry — and a
+ * cursor minted from it re-delivered a row already held (a real,
+ * proven-by-test duplicate; see `timelineSlidingStore.test.ts`'s "C1
+ * regression" tests). The invariant below is the corrected one: it
+ * explicitly accounts for all three sources, and adds a completeness
+ * backfill at every top trim as a second, independent guarantee.
+ *
+ * Both maps are updated by exactly three kinds of event, and NEVER by a
+ * fourth ad hoc path — this is what keeps a trimmed (or never-yet-loaded)
+ * region's re-read exact and duplicate-free:
  *
  * 1. **Same-direction page continuation** (authoritative, hole-safe): every
  *    `insertPage` call updates the map matching its own `direction`
@@ -262,7 +277,28 @@ export interface SlidingWindowStore {
  *    the window, letting a later follow-cursor re-fetch rows already held —
  *    a duplicate. Whenever `contCursor` is non-null, rule 1's authoritative
  *    value immediately overrides this estimate anyway.
- * 2. **Row-exact trim** (`enforceCap`): when a trim removes rows from a
+ * 2. **Live insert** (`insertLive`, its own ceiling, fix round 1 C1a): live
+ *    rows extend the top edge exactly like a forward page's rows do, but
+ *    carry no cursor at all — so `topMap.set(p, max(topMap.get(p) ?? -Inf,
+ *    max(inserted offsets for p) + 1))` is the ONLY thing that ever advances
+ *    `topMap` for a live-delivered partition. Applied on every live insert,
+ *    regardless of `attached` — the point isn't to change what `edges().top`
+ *    reports right now (still masked to `null` while attached), it's to make
+ *    sure the map underneath is never more than one call stale, so that
+ *    whenever attachment DOES later end, a correct boundary is already
+ *    sitting there instead of a stale one. GUARDED, though (review
+ *    follow-up on the property walk's live-only-partition fixture): only
+ *    when this insert's own lowest offset is at or below the existing
+ *    boundary (or there is none yet) — a live insert isn't tied to any
+ *    request, so nothing guarantees its offsets are contiguous with what the
+ *    map already promises; a partition detached earlier (rows evicted,
+ *    `topMap` correctly left pointing at the exact recovery offset) that
+ *    then receives a live row ABOVE that boundary must not have the
+ *    boundary dragged past the still-unrecovered gap below it — that would
+ *    silently strand the evicted rows forever, a real gap this store found
+ *    in its own adversarial property-walk fixture (a live-only partition
+ *    surviving a detach, then receiving a second, later live batch).
+ * 3. **Row-exact trim** (`enforceCap`): when a trim removes rows from a
  *    side, the map on THAT side is updated, per partition, from the EXACT
  *    offsets just trimmed for that partition — never from a broader "what's
  *    left" computation. Top trim (bottom-insert overflow): for each
@@ -273,19 +309,33 @@ export interface SlidingWindowStore {
  *    (top/live-insert overflow): for each partition with ≥1 row trimmed,
  *    `bottomMap.set(p, max(trimmed offsets for p) + 1)` — one past the
  *    largest trimmed offset is exactly the exclusive upper bound that
- *    recovers the trimmed set. A partition NOT touched by a given trim (no
- *    rows of its own were among the N trimmed) is left alone — its existing
- *    entry, planted by rule 1 or an earlier rule-2 event, already correctly
- *    describes its boundary and trimming a DIFFERENT partition's rows tells
- *    us nothing new about it. This is also what makes "a partition fully
+ *    recovers the trimmed set. This is also what makes "a partition fully
  *    trimmed out of the window" safe: its rows vanish from `partitions`, but
- *    its map entry — planted the last time rule 1 or rule 2 touched it — is
+ *    its map entry — planted by rule 1, 2, or an earlier rule-3 event — is
  *    untouched by that disappearance and remains exactly correct.
  *
- * The one gap neither rule can fill on its own: an **anchor page** (no
- * request cursor exists at all, `startPositions === null`) has no
+ *    **Completeness backfill (fix round 1, C1b), top trim only:** a
+ *    partition NOT touched by a given top trim is not automatically safe
+ *    the way the paragraph above assumes for the SIDE that trim didn't
+ *    touch — a live insert (rule 2) could have raised its held offsets
+ *    without rule 2 having run for it yet (a call ordering this store's
+ *    signature can't rule out from the trim's point of view), or it could
+ *    hold rows that were never seeded by rule 1 or rule 2 at all (e.g. an
+ *    anchor page that returned zero rows for it, before any live insert or
+ *    page ever mentioned it again). So every top trim ALSO backfills, for
+ *    every partition still holding rows that this trim did NOT touch,
+ *    `topMap.set(p, max(remaining offsets for p) + 1)` — computed directly
+ *    from `partitions`' actual post-trim contents, not from any prior map
+ *    state. This makes `topMap`, immediately after any top trim (the exact
+ *    moment `attached` flips `false` and the map stops being masked),
+ *    complete over every partition the window currently holds — regardless
+ *    of which of rules 1/2/3 last touched any given partition, or whether
+ *    any of them ever did.
+ *
+ * The one gap none of the three rules fill on their own: an **anchor page**
+ * (no request cursor exists at all, `startPositions === null`) has no
  * continuation on its OPPOSITE side to draw from (rule 1 only updates the
- * SAME-direction map) and nothing has ever been trimmed there yet (rule 2
+ * SAME-direction map) and nothing has ever been trimmed there yet (rule 3
  * hasn't fired). For that one case, and ONLY that case, the opposite-side
  * map is seeded directly from the just-fetched rows' own offsets — per
  * partition, `max(offset) + 1` (back anchor's opposite/top side) or
@@ -385,6 +435,21 @@ export function createSlidingWindowStore(cap = 2000): SlidingWindowStore {
     return Object.fromEntries(map)
   }
 
+  // Loop-based min/max — NOT a spread into `Math.min`/`Math.max` (`Math.min(...xs)`),
+  // which blows the call stack (`RangeError`) somewhere past ~65k arguments.
+  // `xs` here is bounded by a single trim/insert's size, which has no
+  // built-in ceiling, so this must hold for arbitrarily large inputs.
+  function minOf(xs: number[]): number {
+    let m = Infinity
+    for (const x of xs) if (x < m) m = x
+    return m
+  }
+  function maxOf(xs: number[]): number {
+    let m = -Infinity
+    for (const x of xs) if (x > m) m = x
+    return m
+  }
+
   function mergeCursorInto(map: Map<number, number>, cursor: string): void {
     const decoded = decodeCursor(cursor)
     for (const [p, v] of Object.entries(decoded)) map.set(Number(p), v)
@@ -395,8 +460,9 @@ export function createSlidingWindowStore(cap = 2000): SlidingWindowStore {
    * ('bottom-insert' for a `back` page — extends older rows — 'top-insert'
    * for a `forward` page or a live insert — extends newer rows). Overflow
    * always trims from the OPPOSITE end, exactly `excess` rows, updating that
-   * side's edge map from the exact trimmed offsets (rule 2 — see this
-   * function's home doc comment above). A top trim also detaches the window.
+   * side's edge map from the exact trimmed offsets (rule 3, plus its
+   * completeness backfill on a top trim — see this function's home doc
+   * comment above). A top trim also detaches the window.
    */
   function enforceCap(kind: 'bottom-insert' | 'top-insert'): InsertOutcome {
     const excess = totalCount() - cap
@@ -417,14 +483,35 @@ export function createSlidingWindowStore(cap = 2000): SlidingWindowStore {
       // A back-page insert grows the bottom; overflow trims the TOP
       // (newest) rows exactly — the window slides down and detaches.
       for (let i = 0; i < excess; i++) recordTrim(merged[i])
-      for (const [p, offsets] of trimmedByPartition) topMap.set(p, Math.min(...offsets))
+      for (const [p, offsets] of trimmedByPartition) topMap.set(p, minOf(offsets))
+
+      // Completeness backfill (fix round 1, C1b): a partition can be
+      // holding rows in the window RIGHT NOW without ever having had its
+      // own top boundary planted — e.g. it contributed zero rows to the
+      // anchor page (so the anchor opposite-side seed skipped it) and
+      // hasn't been top-trimmed before either — or `topMap` can be stale
+      // relative to what's actually in the window (a live insert raised a
+      // partition's held offsets past its old boundary — see
+      // `insertLive`'s own ceiling update, which prevents this going
+      // forward, but this backfill is the belt-and-braces guarantee at the
+      // one moment it would otherwise bite: detachment, when `edges().top`
+      // stops being masked by `attached` and starts being trusted). Any
+      // partition still holding rows that this trim did NOT touch gets its
+      // boundary set fresh from what's actually still there —
+      // `max(remaining offsets) + 1` — so the minted top edge is complete
+      // over every partition the window holds, not just the ones this
+      // particular trim happened to touch.
+      for (const [p, arr] of partitions) {
+        if (trimmedByPartition.has(p) || arr.length === 0) continue
+        topMap.set(p, arr[arr.length - 1].offset + 1) // `arr` is offset-ascending: last entry is the max
+      }
       attached = false
       result = { trimmedTop: excess, trimmedBottom: 0 }
     } else {
       // A forward-page or live insert grows the top; overflow trims the
       // BOTTOM (oldest) rows exactly.
       for (let i = 0; i < excess; i++) recordTrim(merged[merged.length - 1 - i])
-      for (const [p, offsets] of trimmedByPartition) bottomMap.set(p, Math.max(...offsets) + 1)
+      for (const [p, offsets] of trimmedByPartition) bottomMap.set(p, maxOf(offsets) + 1)
       result = { trimmedTop: 0, trimmedBottom: excess }
     }
     cachedRows = null
@@ -438,8 +525,8 @@ export function createSlidingWindowStore(cap = 2000): SlidingWindowStore {
       if (startPositions === null) {
         // Anchor bootstrap: seed the OPPOSITE-direction edge from row
         // offsets — the one case with no continuation to draw from on that
-        // side at all (see the home doc comment's "one gap neither rule can
-        // fill" section).
+        // side at all (see the home doc comment's "one gap none of the three
+        // rules fill" section).
         if (direction === 'back') {
           for (const [p, max] of insertedMax) topMap.set(p, max + 1)
         } else {
@@ -479,7 +566,39 @@ export function createSlidingWindowStore(cap = 2000): SlidingWindowStore {
       return enforceCap(direction === 'back' ? 'bottom-insert' : 'top-insert')
     },
     insertLive(rows) {
-      insertRows(rows)
+      const { insertedMin, insertedMax } = insertRows(rows)
+      // Fix round 1, C1a: live rows extend the top edge exactly like a
+      // forward page's own rows do (see insertPage's same-direction
+      // floor/ceiling rule above), but a live insert carries no cursor at
+      // all — so this is the ONLY place that ever advances `topMap` for it.
+      // Without this, a partition's live-delivered rows can sit in the
+      // window above a stale (or entirely absent) `topMap` entry: the next
+      // time some OTHER partition's top trim detaches the window, a cursor
+      // minted from that stale entry re-delivers a row already held (a
+      // duplicate) — proven by this file's C1 regression test (A). Applying
+      // it immediately, on every live insert, means the map is never wrong
+      // for longer than one call, regardless of whether a trim ever touches
+      // this partition again (the enforceCap backfill below is the second,
+      // independent line of defense for the moment a trim actually happens).
+      //
+      // Guarded (fix round 1, review follow-up on M1's adversarial fixture):
+      // only advance when this insert's own lowest offset reaches AT OR
+      // BELOW the existing boundary (or there is none yet). A live insert is
+      // not tied to any request, so nothing guarantees it's contiguous with
+      // what the map already promises — a partition detached earlier (rows
+      // evicted, `topMap` left pointing at the exact recovery offset) that
+      // then receives a live row ABOVE that boundary must NOT have the
+      // boundary dragged forward past the still-unrecovered gap: that would
+      // silently strand the evicted rows below it forever (found by the
+      // property walk's live-only partition once it survives a detach and
+      // receives a second, later live batch).
+      for (const [p, max] of insertedMax) {
+        const existing = topMap.get(p)
+        const min = insertedMin.get(p)!
+        if (existing === undefined || min <= existing) {
+          topMap.set(p, Math.max(existing ?? -Infinity, max + 1))
+        }
+      }
       return enforceCap('top-insert')
     },
     rows() {

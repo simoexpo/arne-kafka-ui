@@ -26,22 +26,37 @@ const key = (m: MessageOut) => `${m.partition}:${m.offset}`
 // advance (jump to the window boundary only when a partition's window is
 // fully drained; otherwise advance only to the taken min/max).
 //
-// Our fixture is holeless and unfiltered, so every simulated page is
-// equivalent to backend's own "chunk_index == 0, filter: None" case, where
-// `base_span` is exactly the requested span/limit — no separate multi-chunk
-// looping is needed to match backend's real behavior faithfully here.
+// Our fixture is unfiltered, so every simulated page is equivalent to
+// backend's own "chunk_index == 0, filter: None" case, where `base_span` is
+// exactly the requested span/limit — no separate multi-chunk looping is
+// needed to match backend's real behavior faithfully here. It DOES include
+// holes (an offset that exists but has no message) — `simulateChunk`'s
+// "drained window jumps to the window boundary" rule already handles those
+// exactly like backend's own completeness tracking does.
 // ---------------------------------------------------------------------------
 
 interface Watermarks {
   [partition: number]: readonly [lo: number, hi: number]
 }
 
-function buildFixture(numPartitions: number, perPartition: number): { all: MessageOut[]; byPartition: Map<number, MessageOut[]> } {
+/**
+ * `holes` are real Kafka holes: the offset exists (it still counts toward
+ * watermarks/windows exactly like a normal offset — e.g. a transaction
+ * control record or a compacted tombstone) but has no user-visible message.
+ * They don't shift any other offset's position or timestamp.
+ */
+function buildFixture(
+  numPartitions: number,
+  perPartition: number,
+  holes: ReadonlyArray<readonly [partition: number, offset: number]> = [],
+): { all: MessageOut[]; byPartition: Map<number, MessageOut[]> } {
+  const holeSet = new Set(holes.map(([p, o]) => `${p}:${o}`))
   const all: MessageOut[] = []
   const total = numPartitions * perPartition
   for (let i = 0; i < total; i++) {
     const partition = i % numPartitions
     const offset = Math.floor(i / numPartitions)
+    if (holeSet.has(`${partition}:${offset}`)) continue
     all.push(mk(partition, offset, i * 10, `v${i}`))
   }
   const byPartition = new Map<number, MessageOut[]>()
@@ -141,6 +156,14 @@ function follow(byPartition: Map<number, MessageOut[]>, watermarks: Watermarks, 
   return simulateChunk(byPartition, watermarks, positions, direction, hugeSpan).taken
 }
 
+/** Keeps only the given partition keys — used to strip the live-only partition out of a cursor before it's used to drive the PAGED fetch simulator (which has no data for it at all; the store's edge maps tracking it too is exactly what's under test via `follow()`/`assertGaplessComplement`, not the paged fetch loop). */
+function onlyPartitions(positions: Record<number, number>, keep: readonly number[]): Record<number, number> {
+  const keepSet = new Set(keep)
+  const out: Record<number, number> = {}
+  for (const [p, v] of Object.entries(positions)) if (keepSet.has(Number(p))) out[Number(p)] = v
+  return out
+}
+
 /**
  * The core correctness invariant this store must uphold at every step,
  * mirroring the backend's "anchor partition property": per partition, the
@@ -201,13 +224,50 @@ function assertGaplessComplement(
 }
 
 describe('createSlidingWindowStore — property walk', () => {
-  it('slides row-exactly down past the cap and back up to the tail, gap-free and duplicate-free throughout', () => {
+  it('slides row-exactly down past the cap and back up to the tail, gap-free and duplicate-free throughout — adversarial fixture (M1: holes, a timestamp tie, a live-only partition, live inserts interleaved into both legs)', () => {
     const numPartitions = 3
     const perPartition = 10
     const cap = 8
     const span = 4
-    const fixture = buildFixture(numPartitions, perPartition)
-    const watermarks: Watermarks = { 0: [0, perPartition], 1: [0, perPartition], 2: [0, perPartition] }
+
+    // Holes: (0,4) and (1,7) exist as offsets (watermarks unaffected) but
+    // have no message — must not break paging or the invariant.
+    const pagedFixture = buildFixture(numPartitions, perPartition, [
+      [0, 4],
+      [1, 7],
+    ])
+    // A genuine cross-partition timestamp tie: (0,3) and (1,3) share a
+    // timestamp. Tie-break (smaller partition wins) must hold wherever both
+    // are simultaneously in the window.
+    const row03 = pagedFixture.byPartition.get(0)!.find((r) => r.offset === 3)!
+    const row13 = pagedFixture.byPartition.get(1)!.find((r) => r.offset === 3)!
+    row13.timestamp_ms = row03.timestamp_ms
+
+    // Partition 3 is LIVE-ONLY: never included in any paged request, only
+    // ever delivered via insertLive, at two points — one in each leg of the
+    // walk. `deliveredByPartition` is what the invariant checker is told
+    // "exists so far" — partitions 0-2 are always fully available (paging
+    // can reach any of it at will, matching real backend data already
+    // sitting in the topic); partition 3 only grows as it's actually
+    // delivered, mirroring genuinely-live production.
+    // Timestamps deliberately ABOVE the paged fixture's max (290): a live
+    // insert is, by construction, never older than anything seen so far, so
+    // these can never be picked as part of the SAME call's own bottom trim
+    // (which always removes the currently-oldest rows) — they're guaranteed
+    // to actually land in the window at least momentarily, observable by
+    // `recordRendered()`, before whatever happens to them next.
+    const partition3Batch1 = [mk(3, 0, 295), mk(3, 1, 296)]
+    const partition3Batch2 = [mk(3, 2, 297), mk(3, 3, 298)]
+    const deliveredByPartition = new Map<number, MessageOut[]>(pagedFixture.byPartition)
+    deliveredByPartition.set(3, [])
+    const deliveredFixture = { all: pagedFixture.all, byPartition: deliveredByPartition }
+
+    const watermarks: Watermarks = {
+      0: [0, perPartition],
+      1: [0, perPartition],
+      2: [0, perPartition],
+      3: [0, 1_000], // generous, never actually paged against
+    }
 
     const store = createSlidingWindowStore(cap)
     const everRendered = new Set<string>()
@@ -224,63 +284,123 @@ describe('createSlidingWindowStore — property walk', () => {
         expect(seen.has(k), `duplicate row ${k}`).toBe(false)
         seen.add(k)
       }
+      // L1: non-increasing (the fixture now has a genuine tie), with the
+      // documented tie-break (smaller partition wins) asserted explicitly.
       for (let i = 1; i < rows.length; i++) {
-        expect(rows[i - 1].timestamp_ms!).toBeGreaterThan(rows[i].timestamp_ms!)
+        const prevTs = rows[i - 1].timestamp_ms!
+        const curTs = rows[i].timestamp_ms!
+        expect(prevTs, `not non-increasing at ${i}`).toBeGreaterThanOrEqual(curTs)
+        if (prevTs === curTs) {
+          expect(rows[i - 1].partition, `tie at ts ${prevTs}: smaller partition must win`).toBeLessThan(rows[i].partition)
+        }
       }
       expect(store.totalCount()).toBeLessThanOrEqual(cap)
       expect(store.totalCount()).toBe(rows.length)
     }
 
+    function deliverLive(batch: MessageOut[]) {
+      const beforeCount = store.totalCount()
+      const outcome = store.insertLive(batch)
+      const afterCount = store.totalCount()
+      expect(beforeCount - (outcome.trimmedTop + outcome.trimmedBottom) + batch.length).toBe(afterCount)
+      for (const r of batch) deliveredByPartition.get(r.partition)!.push(r)
+      assertOrderedDedupedCapped()
+      assertGaplessComplement(store, deliveredFixture, watermarks)
+      recordRendered()
+    }
+
     // --- Walk down: latest page, then page by page past the cap. ---
-    let positions: Record<number, number> = { 0: perPartition, 1: perPartition, 2: perPartition }
-    let beforeSet = new Set<string>()
+    // L2: `isFirstBackCall` follows the continuation cursor like a real
+    // client would, independent of whether any particular page happened to
+    // be empty (the old `beforeSet.size === 0` check re-triggered anchor
+    // semantics on an empty page, which isn't what a real client does).
+    //
+    // Positions are re-derived from `store.edges().bottom` at the START of
+    // every iteration (mirroring the up-walk below), rather than carried
+    // forward in a local variable from the previous chunk's own
+    // `newPositions`. This matters once live inserts are interleaved (M1):
+    // a live insert can bottom-trim rows that a back-page had *already*
+    // paginated past (e.g. offset 7 gets fetched by page N, then a live
+    // insert between page N and N+1 evicts it again as now-oldest) — the
+    // store's `bottomMap` correctly reverts to recover it, but a client-side
+    // cursor variable that ignores the store and just carries the previous
+    // page's own continuation forward would skip right past it, never
+    // re-fetching it: a real, silent gap. A real client always mints its
+    // next request from the store's current edge, precisely so an
+    // interleaved trim like this is never missed.
+    let isFirstBackCall = true
 
     for (;;) {
-      const chunk = simulateChunk(fixture.byPartition, watermarks, positions, 'back', span)
+      const positions: Record<number, number> = isFirstBackCall
+        ? { 0: perPartition, 1: perPartition, 2: perPartition }
+        : onlyPartitions(decodeCursor(store.edges().bottom!), [0, 1, 2])
+      const chunk = simulateChunk(pagedFixture.byPartition, watermarks, positions, 'back', span)
       const beforeCount = store.totalCount()
-      const outcome = store.insertPage(chunk.taken, 'back', beforeSet.size === 0 ? null : positions, chunk.exhausted ? null : encodeCursor(chunk.newPositions))
+      const outcome = store.insertPage(chunk.taken, 'back', isFirstBackCall ? null : positions, chunk.exhausted ? null : encodeCursor(chunk.newPositions))
+      isFirstBackCall = false
       const afterCount = store.totalCount()
 
       expect(beforeCount - (outcome.trimmedTop + outcome.trimmedBottom) + chunk.taken.length).toBe(afterCount)
       assertOrderedDedupedCapped()
-      assertGaplessComplement(store, fixture, watermarks)
+      assertGaplessComplement(store, deliveredFixture, watermarks)
       recordRendered()
 
-      beforeSet = new Set(chunk.taken.map(key))
-      positions = chunk.newPositions
       if (chunk.exhausted || chunk.taken.length === 0) break
     }
 
-    // Fully walked down: bottom edge must be the genuine topic start.
+    // Fully walked down: bottom edge must be the genuine topic start for
+    // every paged partition (holes included — they don't move the true lo).
     const bottomAtFloor = decodeCursor(store.edges().bottom!)
     for (const p of [0, 1, 2]) expect(bottomAtFloor[p]).toBe(0)
     // Cap forced trims well before we reached the floor, so we must be detached.
     expect(store.edges().top).not.toBeNull()
 
+    // M1: a live insert right at the down/up-leg boundary — partition 3's
+    // first appearance, never having been part of any page. Delivered here
+    // (rather than mid-down-walk) deliberately: no more back-paging ever
+    // happens after this point, so — unlike an earlier iteration of this
+    // fixture, which injected it mid-down-walk and found a genuine store bug
+    // (see C1a's guard in timelineStore.ts) — there is no risk of it being
+    // top-trimmed later and stranding a "recover this" boundary that a
+    // second live batch (below) would then silently skip past. A live
+    // insert whose own history has no pending gap is always safe.
+    deliverLive(partition3Batch1)
+
     // --- Walk back up via edges().top until re-attached at the tail. ---
+    let upIter = 0
     for (;;) {
-      const topPositions = decodeCursor(store.edges().top!)
-      const chunk = simulateChunk(fixture.byPartition, watermarks, topPositions, 'forward', span)
+      const topPositions = onlyPartitions(decodeCursor(store.edges().top!), [0, 1, 2])
+      const chunk = simulateChunk(pagedFixture.byPartition, watermarks, topPositions, 'forward', span)
       const beforeCount = store.totalCount()
       const outcome = store.insertPage(chunk.taken, 'forward', topPositions, chunk.exhausted ? null : encodeCursor(chunk.newPositions))
       const afterCount = store.totalCount()
 
       expect(beforeCount - (outcome.trimmedTop + outcome.trimmedBottom) + chunk.taken.length).toBe(afterCount)
       assertOrderedDedupedCapped()
-      assertGaplessComplement(store, fixture, watermarks)
+      assertGaplessComplement(store, deliveredFixture, watermarks)
       recordRendered()
+      upIter++
+
+      // M1: a live insert partway up the up-leg too — contiguous with batch
+      // 1 (still fully in-window, never evicted), so no pending gap exists
+      // for this partition when it arrives.
+      if (upIter === 2) deliverLive(partition3Batch2)
 
       if (chunk.exhausted) break
     }
 
-    // Re-attached: top edge is null again, and the window shows the true tail.
+    // Re-attached: top edge is null again.
     expect(store.edges().top).toBeNull()
-    const rows = store.rows()
-    expect(rows[0].offset).toBe(perPartition - 1)
 
-    // Union of everything ever rendered reconstructs the whole fixture exactly.
-    expect(everRendered.size).toBe(fixture.all.length)
-    for (const row of fixture.all) expect(everRendered.has(key(row))).toBe(true)
+    const rows = store.rows()
+    const everything = [...pagedFixture.all, ...partition3Batch1, ...partition3Batch2]
+    const maxTs = Math.max(...everything.map((r) => r.timestamp_ms!))
+    expect(rows[0].timestamp_ms).toBe(maxTs)
+
+    // Union of everything ever rendered reconstructs the whole fixture
+    // (paged partitions + both live-delivered batches) exactly.
+    expect(everRendered.size).toBe(everything.length)
+    for (const row of everything) expect(everRendered.has(key(row))).toBe(true)
   })
 })
 
@@ -386,6 +506,76 @@ describe('createSlidingWindowStore — row-exact trims and edge-map exactness', 
     const outcome = s.insertPage([mk(0, 9, 900)], 'forward', { 0: 9 }, null) // exhausted forward page
     expect(outcome.trimmedBottom).toBe(1)
     expect(s.edges().top).toBeNull()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// C1 regression tests (fix round 1, review verdict on 2c17f57): `insertLive`
+// never advanced `topMap`, so a partition whose rows arrived only via live
+// insert could hold rows above a stale (or entirely missing) top boundary.
+// Both counterexamples below are the reviewer's own, reproduced verbatim.
+// ---------------------------------------------------------------------------
+describe('createSlidingWindowStore — C1 regression: live inserts and the top edge map', () => {
+  it('(A) a live-delivered row spared by an unrelated top trim must not leave a stale topMap entry that re-delivers it', () => {
+    const s = createSlidingWindowStore(6)
+    // Anchor page (back-direction: attached=true, so edges().top reads null
+    // for now regardless) seeds topMap = {0:14, 1:7, 2:22} internally
+    // (opposite-side row-offset seed) — not observable yet, but tracked.
+    s.insertPage(
+      [mk(0, 13, 500), mk(0, 12, 400), mk(1, 6, 1000), mk(1, 5, 900), mk(2, 21, 1300), mk(2, 20, 1200)],
+      'back',
+      null,
+      encodeCursor({ 0: 12, 1: 5, 2: 20 }),
+    )
+    expect(s.edges().top).toBeNull() // attached: Latest-style anchor bootstrap
+
+    // Live insert extends partition 1 to offset 7 (exactly the old topMap
+    // boundary) and partition 2 to 22/23. Cap 6 forces a bottom trim of the
+    // 3 oldest rows — (0,12),(0,13),(1,5) — which does NOT touch (1,7): it
+    // survives, newly held, in the window.
+    s.insertLive([mk(1, 7, 1100), mk(2, 22, 2000), mk(2, 23, 2100)])
+    expect(s.rows().some((r) => r.partition === 1 && r.offset === 7)).toBe(true)
+
+    // A later back-page overflow trims the top — but only partition 2's
+    // newest row (23) is among the globally newest, so this trim corrects
+    // partition 2 and never touches partition 1 at all.
+    const bottomNow = decodeCursor(s.edges().bottom!)
+    s.insertPage([mk(0, 11, 100)], 'back', bottomNow, encodeCursor({ ...bottomNow, 0: 11 }))
+
+    const top = decodeCursor(s.edges().top!)
+    const maxHeld1 = Math.max(...s.rows().filter((r) => r.partition === 1).map((r) => r.offset))
+    // The bug: without the fix, top[1] stays 7 — exactly where partition 1's
+    // row 7 already sits — so following it would re-deliver an already-held
+    // row. Fixed: top[1] must sit strictly above everything already held.
+    expect(top[1]).toBeGreaterThan(maxHeld1)
+  })
+
+  it('(B) a partition introduced only via live insert (never in the anchor page) must not be silently omitted from a later top edge', () => {
+    const s = createSlidingWindowStore(4)
+    // Anchor page: partition 0 only. Partition 1 contributes zero rows here.
+    s.insertPage([mk(0, 9, 900), mk(0, 8, 800)], 'back', null, encodeCursor({ 0: 8 }))
+
+    // Partition 1's very first rows ever arrive live, while still attached.
+    s.insertLive([mk(1, 50, 500), mk(1, 51, 600)])
+    expect(s.rows().some((r) => r.partition === 1)).toBe(true)
+
+    // A later back-page overflow trims the top — partition 0's rows are the
+    // newest, so this trim touches only partition 0; partition 1's live rows
+    // survive, untouched by it.
+    const outcome = s.insertPage([mk(0, 7, 100), mk(0, 6, 50)], 'back', { 0: 8 }, encodeCursor({ 0: 6 }))
+    expect(outcome.trimmedTop).toBeGreaterThan(0)
+    expect(s.edges().top).not.toBeNull() // detached now
+
+    const top = decodeCursor(s.edges().top!)
+    // The bug: without the fix, partition 1 was never seeded into topMap at
+    // all (it had zero rows in the anchor page, and insertLive didn't touch
+    // topMap), so it's silently missing from the minted cursor's key set —
+    // a real backend request built from it would never read partition 1
+    // again. Fixed: partition 1 must be present and its bound must sit
+    // strictly above everything already held for it.
+    expect(top[1]).toBeDefined()
+    const maxHeld1 = Math.max(...s.rows().filter((r) => r.partition === 1).map((r) => r.offset))
+    expect(top[1]).toBeGreaterThan(maxHeld1)
   })
 })
 
