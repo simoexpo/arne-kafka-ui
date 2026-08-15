@@ -103,6 +103,12 @@ async function settle(ms = 500) {
   })
 }
 
+// Timeline.tsx show-delays the filtered-scan progress row ~400ms from scan
+// start (PROGRESS_SHOW_DELAY_MS) — this is deliberately > 400 (not exactly
+// 400) so a fake-timer boundary quirk can never make an "it should be
+// visible by now" assertion flaky.
+const PAST_SHOW_DELAY_MS = 401
+
 async function mountAndSettleInitial() {
   render(<Timeline cluster="prod" topic="orders" />)
   await emit(0, 'page_end', { cursor: null, exhausted: true })
@@ -186,7 +192,35 @@ describe('Timeline filter box', () => {
     expect(screen.getByText('p0·6')).toBeInTheDocument()
   })
 
-  it('shows an inline progress row with a Cancel button while a filtered scan runs, and Cancel closes the stream without auto-continuing', async () => {
+  // Owner ruling 2026-08-16 (sliding-window followups, "NEXT STEP"): a
+  // filtered scan that resolves in milliseconds must never flash the
+  // progress row at all — not even a same-tick "scanned 0 · 0 matches"
+  // blink. The row is show-delayed ~400ms from when the scan starts
+  // loading; a page that ends before that never crosses the threshold, so
+  // the pending timer is cleared before it can ever fire.
+  it('a filtered scan that resolves before the show-delay never renders the progress row', async () => {
+    mockTail()
+    await mountAndSettleInitial()
+
+    typeFilter('value:zzz')
+    await settle() // the 500ms debounce settle — the scan itself hasn't started loading until this fires
+    const idx = FakeEventSource.instances.length - 1
+    // Resolves near-instantly: progress + page_end with no time advance
+    // between them.
+    await emit(idx, 'progress', { scanned: 40, matches: 0, budget: 250000 })
+    await emit(idx, 'page_end', { cursor: null, exhausted: true })
+    expect(screen.queryByTestId('filter-progress')).not.toBeInTheDocument()
+
+    // Prove the timer was genuinely cleared, not merely "hasn't fired yet"
+    // — advancing well past the show-delay afterward must not summon it.
+    await settle(1000)
+    expect(screen.queryByTestId('filter-progress')).not.toBeInTheDocument()
+  })
+
+  // Same ruling: a scan that's STILL loading once the show-delay elapses
+  // must show the row with the correct running totals, and Cancel must
+  // still work exactly as before.
+  it('a filtered scan still running past the show-delay shows the progress row with correct totals, and Cancel closes the stream without auto-continuing', async () => {
     mockTail()
     await mountAndSettleInitial()
 
@@ -194,7 +228,10 @@ describe('Timeline filter box', () => {
     await settle()
     const idx = FakeEventSource.instances.length - 1
     await emit(idx, 'progress', { scanned: 40, matches: 0, budget: 250000 })
+    // Not yet past the show-delay: still nothing rendered.
+    expect(screen.queryByTestId('filter-progress')).not.toBeInTheDocument()
 
+    await settle(PAST_SHOW_DELAY_MS)
     expect(screen.getByText('scanned 40 · 0 matches')).toBeInTheDocument()
     const cancelBtn = screen.getByTestId('cancel-scan')
 
@@ -266,6 +303,10 @@ describe('Timeline filter box', () => {
     }
     expect(totalRowsHeight()).toBe(25 * 40)
 
+    // Past the show-delay so the Cancel button (inside the progress row)
+    // has actually rendered — this test is about cancel's effect on the
+    // store, not about the row's own show-delay (covered elsewhere).
+    await settle(PAST_SHOW_DELAY_MS)
     fireEvent.click(screen.getByTestId('cancel-scan'))
     // uncommitted, dropped with the overlay: back to the empty state, not
     // just a smaller row count.
@@ -425,9 +466,10 @@ describe('Timeline filter box', () => {
     expect(btn).toHaveTextContent(`scanned ${totalScanned} records · 0 matches — continue`)
 
     fireEvent.click(btn)
-    // Immediately after clicking continue (before any new progress arrives)
+    // Clicking continue starts a new in-flight page — past the show-delay,
     // the running total must still reflect everything scanned before the
-    // click — it must NOT have been reset back to 0.
+    // click, NOT reset back to 0 (before any new progress event arrives).
+    await settle(PAST_SHOW_DELAY_MS)
     expect(screen.getByText(`scanned ${totalScanned} · 0 matches`)).toBeInTheDocument()
 
     const idx2 = FakeEventSource.instances.length - 1
@@ -462,7 +504,9 @@ describe('Timeline filter box', () => {
     // must still reflect what was scanned before it, exactly like clicking
     // the button does ("clicking continue after the cap preserves prior
     // gesture totals"). A naive scroll-triggered `loadOlder()` would instead
-    // start a fresh gesture and reset the totals to 0.
+    // start a fresh gesture and reset the totals to 0. (Past the show-delay:
+    // this new page is deliberately left running long enough to render.)
+    await settle(PAST_SHOW_DELAY_MS)
     expect(screen.getByText('scanned 5000 · 1 matches')).toBeInTheDocument()
   })
 

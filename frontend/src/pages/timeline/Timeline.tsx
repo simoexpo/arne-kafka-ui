@@ -48,6 +48,17 @@ const BOTTOM_PIN_THRESHOLD = 20
 // observed settling resolve within 2-3 events; this leaves generous
 // headroom without risking a runaway loop.
 const MAX_SETTLE_ATTEMPTS = 10
+// Owner ruling 2026-08-16 (sliding-window followups, "NEXT STEP"): a
+// filtered scan that resolves in milliseconds (e.g. scroll-up after a
+// timestamp jump with a filter active, re-scanning a range already mostly
+// cached) flashed the progress row + Cancel button showing "scanned 0 · 0
+// matches" — the intended machinery (real progress, cancellable) surfacing
+// with zero information content, gone before a human could read or act on
+// it. Show-delaying the row this long means only a scan a human could
+// plausibly WATCH ever renders it; totals/cancel behavior for a genuinely
+// slow scan are unaffected — this only gates whether the row appears at
+// all, never what it shows once it does.
+const PROGRESS_SHOW_DELAY_MS = 400
 
 type Direction = 'back' | 'forward'
 // 'none': live inserts straight into the store (only takes effect while
@@ -1174,6 +1185,24 @@ export function Timeline({
     ? `scanned ${progressScanned} records · ${progressMatches} matches — continue`
     : 'scanned far, nothing found here — continue'
 
+  // Show-delay the progress row (see PROGRESS_SHOW_DELAY_MS above): starts a
+  // timer the moment a filtered scan begins loading, cleared (and the flag
+  // reset) the instant it stops — whether that's a genuine page_end, an
+  // error, or an explicit cancel; `state.loading` covers all three
+  // uniformly (see useTimelinePage). A scan that never runs this long never
+  // flips the flag at all, so a fast page renders nothing extra — not even
+  // for one frame.
+  const scanRunning = filterActive && state.loading
+  const [progressVisible, setProgressVisible] = useState(false)
+  useEffect(() => {
+    if (!scanRunning) {
+      setProgressVisible(false)
+      return
+    }
+    const id = setTimeout(() => setProgressVisible(true), PROGRESS_SHOW_DELAY_MS)
+    return () => clearTimeout(id)
+  }, [scanRunning])
+
   return (
     // Flex column filling whatever height TopicDetailPage's tab-body slot
     // hands it (owner feedback 2026-08-15): every row of chrome here (header,
@@ -1215,7 +1244,7 @@ export function Timeline({
       </div>
       <div className="flex flex-wrap items-center gap-3">
         <FilterInput value={filterText} onChange={setFilterText} placeholder="filter messages…" ariaLabel="filter messages" />
-        {filterActive && state.loading && (
+        {progressVisible && (
           <div data-testid="filter-progress" className="flex items-center gap-2 text-xs text-zinc-500 dark:text-zinc-400">
             <span>{`scanned ${progressScanned} · ${progressMatches} matches`}</span>
             <button
