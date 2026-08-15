@@ -215,7 +215,26 @@ export interface SlidingWindowStore {
     startPositions: Record<number, number> | null,
     contCursor: string | null,
   ): InsertOutcome
-  /** Live-tail rows: always extend the newest (top) end. */
+  /**
+   * Live-tail rows: always extend the newest (top) end.
+   *
+   * PRECONDITION (enforced — throws if violated): only call this while
+   * attached (`edges().top === null`). This is not an arbitrary rule: the
+   * per-partition ceiling this method advances `topMap` with is only sound
+   * while attached, because attached means every partition is genuinely
+   * caught up to the tail — the live feed then delivers each partition's
+   * real records in strictly increasing offset order, so any apparent
+   * "jump" between what the window already holds and a new live row can
+   * only be a span of legitimate holes (compaction tombstones, transaction
+   * markers), never a skipped real record. Advancing past a hole loses
+   * nothing. While DETACHED, a partition can be mid-recovery (some of its
+   * offsets evicted and still owed to a future forward page) and a live
+   * row arriving anyway could sit above that gap — advancing the ceiling
+   * would then abandon the gap forever, which is exactly why v1.3's design
+   * buffers live rows instead of applying them while detached: this store
+   * enforces that contract at the boundary rather than trying to make the
+   * update rule safe for a case that should never reach it.
+   */
   insertLive(rows: MessageOut[]): InsertOutcome
   /** Merged rows, newest-first (partition offset order within a partition, timestamp merge across partitions — same rule as the v1.4 store above). */
   rows(): readonly MessageOut[]
@@ -241,19 +260,56 @@ export interface SlidingWindowStore {
  * ## Edge-map maintenance invariant (read this before touching a map-update
  * site)
  *
- * **Fix round 1 correction:** an earlier version of this comment claimed
- * "a partition not touched by a trim already correctly describes its
- * boundary" as if only trims could move a partition's held offsets. That's
- * false — rows arrive above the top boundary from THREE independent
- * sources (a forward page's own rows, an anchor's own rows, and a live
- * insert), and the third one was not updating `topMap` at all. A partition
- * whose live-delivered row sat above a stale `topMap` entry, later spared
- * by an UNRELATED partition's top trim, kept that stale entry — and a
- * cursor minted from it re-delivered a row already held (a real,
- * proven-by-test duplicate; see `timelineSlidingStore.test.ts`'s "C1
- * regression" tests). The invariant below is the corrected one: it
- * explicitly accounts for all three sources, and adds a completeness
- * backfill at every top trim as a second, independent guarantee.
+ * **Revision history, so the reasoning that got REJECTED is on record and
+ * doesn't get reinvented:** an earlier version of this comment claimed "a
+ * partition not touched by a trim already correctly describes its
+ * boundary" — true only once `insertLive` also touched `topMap`, which it
+ * originally didn't (fix round 1, C1: a live-delivered row could sit above
+ * a stale or absent `topMap` entry forever). The FIRST fix for that added a
+ * live-insert ceiling GUARDED by "only advance if this insert's own lowest
+ * offset is at or below the existing boundary." Round 2 review proved that
+ * guard's protection was illusory: given a window holding partition P's
+ * offsets 90-99 with `topMap[P] = 100`, a live insert of `P:150` is
+ * discontinuous with the boundary either way — guarding leaves `topMap[P]`
+ * at 100 (offset 150 sits in the window UNRECORDED by either map, silently
+ * unaccounted, not merely "stale") while removing the guard advances to 151
+ * and stray `[100,150)` is stranded. Neither choice is safe **as a general
+ * rule** — which is the tell that the right fix isn't a smarter update
+ * rule, it's a precondition on when `insertLive` may be called at all. See
+ * below.
+ *
+ * **The resolution:** `insertLive` throws unless the store is attached
+ * (`edges().top === null`) — enforced at the top of the method, not left
+ * to caller discipline. This isn't an arbitrary restriction; it's the exact
+ * condition that makes an UNGUARDED, unconditional per-partition ceiling
+ * correct:
+ *
+ * - While **attached**, every partition is, by definition, genuinely caught
+ *   up to the tail (nothing anywhere is mid-recovery — see `attached`'s own
+ *   paragraph below for why that's true store-wide, not just per
+ *   partition). The live feed (a real Kafka tail) delivers each partition's
+ *   records in strictly increasing offset order. So ANY live batch for a
+ *   partition already represented in the window is either contiguous with
+ *   what's held, or separated from it only by a span of offsets that are
+ *   real Kafka holes (compaction tombstones, transaction control records —
+ *   offsets that exist but were never going to produce a row). Advancing
+ *   `topMap` across a hole span loses nothing, because there was never a
+ *   real record there to lose. A partition with NO prior window presence
+ *   (first-ever appearance, live-delivered) has no boundary to be
+ *   discontinuous with in the first place. Either way, the plain
+ *   `topMap.set(p, max(topMap.get(p) ?? -Infinity, max(inserted offsets for
+ *   p) + 1))` ceiling is exact — no guard needed, none present.
+ * - While **detached**, a partition CAN be mid-recovery (rule 3's trim
+ *   bookkeeping is exactly what tracks that), and nothing about a live
+ *   feed's offset-ordering guarantee helps: a row arriving "live" while
+ *   detached could easily sit above a real, unrecovered gap. This is
+ *   precisely why v1.3 (and Task 3, which owns the live subscription)
+ *   buffers live rows instead of applying them while detached — the same
+ *   "auto-pause" behavior the design doc describes for the live pill. This
+ *   store enforces that contract at its own boundary (throws) rather than
+ *   trying to make the update rule safe for a case that should never reach
+ *   it: a caller bug here is a programming error, not a data condition to
+ *   quietly tolerate.
  *
  * Both maps are updated by exactly three kinds of event, and NEVER by a
  * fourth ad hoc path — this is what keeps a trimmed (or never-yet-loaded)
@@ -277,27 +333,38 @@ export interface SlidingWindowStore {
  *    the window, letting a later follow-cursor re-fetch rows already held —
  *    a duplicate. Whenever `contCursor` is non-null, rule 1's authoritative
  *    value immediately overrides this estimate anyway.
- * 2. **Live insert** (`insertLive`, its own ceiling, fix round 1 C1a): live
- *    rows extend the top edge exactly like a forward page's rows do, but
- *    carry no cursor at all — so `topMap.set(p, max(topMap.get(p) ?? -Inf,
- *    max(inserted offsets for p) + 1))` is the ONLY thing that ever advances
- *    `topMap` for a live-delivered partition. Applied on every live insert,
- *    regardless of `attached` — the point isn't to change what `edges().top`
- *    reports right now (still masked to `null` while attached), it's to make
- *    sure the map underneath is never more than one call stale, so that
- *    whenever attachment DOES later end, a correct boundary is already
- *    sitting there instead of a stale one. GUARDED, though (review
- *    follow-up on the property walk's live-only-partition fixture): only
- *    when this insert's own lowest offset is at or below the existing
- *    boundary (or there is none yet) — a live insert isn't tied to any
- *    request, so nothing guarantees its offsets are contiguous with what the
- *    map already promises; a partition detached earlier (rows evicted,
- *    `topMap` correctly left pointing at the exact recovery offset) that
- *    then receives a live row ABOVE that boundary must not have the
- *    boundary dragged past the still-unrecovered gap below it — that would
- *    silently strand the evicted rows forever, a real gap this store found
- *    in its own adversarial property-walk fixture (a live-only partition
- *    surviving a detach, then receiving a second, later live batch).
+ * 2. **Live insert while attached** (`insertLive`, its own ceiling):
+ *    unconditionally `topMap.set(p, max(topMap.get(p) ?? -Infinity,
+ *    max(inserted offsets for p) + 1))`, per partition the batch touched —
+ *    the ONLY thing that ever advances `topMap` for a live-delivered
+ *    partition, since live rows carry no cursor at all. Sound only because
+ *    of the attached precondition above; the method throws otherwise, so
+ *    this rule and its precondition must be read together, never one
+ *    without the other.
+ *
+ *    The BOTTOM map needs no equivalent live-side mechanism, and this is a
+ *    completeness argument, not an omission: while attached, every live (or
+ *    re-attach-flush — see below) row's offset is, per partition, always
+ *    ≥ that partition's high watermark at the moment of attachment, which
+ *    is itself ≥ every offset already in the window for that partition,
+ *    which is itself ≥ `bottomMap[p]` (the exclusive upper bound for
+ *    reading older — always at or below the window's own oldest-held
+ *    offset by construction of rule 3 below). A live row can therefore
+ *    never legally arrive below `bottomMap[p]`; there is no lower boundary
+ *    for it to invalidate. (One cheap defensive line remains anyway — see
+ *    `insertLive`'s own comment — purely as a belt-and-suspenders against a
+ *    future caller bug, not because this invariant is expected to need it.)
+ *
+ *    **Re-attach buffer flush** (v1.3 semantics, modeled here explicitly):
+ *    when a detached window re-attaches (a forward page reports
+ *    `exhausted`), any live rows Task 3 buffered while detached get flushed
+ *    through `insertLive` immediately after — now legal, since the store is
+ *    attached again. Every one of those rows is, by the same offset-
+ *    monotonicity argument, either strictly above the window's current top
+ *    (a genuine extension — the ceiling advances normally) or at-or-below
+ *    an offset the just-exhausted forward page already fetched (an exact
+ *    duplicate — `insertRows`' `seen` dedup silently drops it, same as any
+ *    other overlapping delivery). Neither case is a gap risk.
  * 3. **Row-exact trim** (`enforceCap`): when a trim removes rows from a
  *    side, the map on THAT side is updated, per partition, from the EXACT
  *    offsets just trimmed for that partition — never from a broader "what's
@@ -314,23 +381,23 @@ export interface SlidingWindowStore {
  *    its map entry — planted by rule 1, 2, or an earlier rule-3 event — is
  *    untouched by that disappearance and remains exactly correct.
  *
- *    **Completeness backfill (fix round 1, C1b), top trim only:** a
- *    partition NOT touched by a given top trim is not automatically safe
- *    the way the paragraph above assumes for the SIDE that trim didn't
- *    touch — a live insert (rule 2) could have raised its held offsets
- *    without rule 2 having run for it yet (a call ordering this store's
- *    signature can't rule out from the trim's point of view), or it could
- *    hold rows that were never seeded by rule 1 or rule 2 at all (e.g. an
- *    anchor page that returned zero rows for it, before any live insert or
- *    page ever mentioned it again). So every top trim ALSO backfills, for
- *    every partition still holding rows that this trim did NOT touch,
- *    `topMap.set(p, max(remaining offsets for p) + 1)` — computed directly
- *    from `partitions`' actual post-trim contents, not from any prior map
- *    state. This makes `topMap`, immediately after any top trim (the exact
- *    moment `attached` flips `false` and the map stops being masked),
- *    complete over every partition the window currently holds — regardless
- *    of which of rules 1/2/3 last touched any given partition, or whether
- *    any of them ever did.
+ *    **Completeness backfill, top trim only:** a partition NOT touched by
+ *    a given top trim is not automatically safe the way the paragraph
+ *    above assumes for the side that trim didn't touch — it could hold
+ *    rows that were never seeded by rule 1 or rule 2 at all (e.g. an
+ *    anchor page that returned zero rows for it, discovered only later by
+ *    a plain `insertPage('back', ...)` call, which never touches `topMap`).
+ *    So every top trim ALSO backfills, for every partition still holding
+ *    rows that this trim did NOT touch, `topMap.set(p, max(remaining
+ *    offsets for p) + 1)` — computed directly from `partitions`' actual
+ *    post-trim contents, not from any prior map state. This makes
+ *    `topMap`, immediately after any top trim (the exact moment `attached`
+ *    flips `false` and the map stops being masked), complete over every
+ *    partition the window currently holds — regardless of which of rules
+ *    1/2/3 last touched any given partition, or whether any of them ever
+ *    did. (This is also the mutation-tested "only load-bearing path" case:
+ *    a partition holding rows the CURRENT trim doesn't touch, whose
+ *    `topMap` entry has no other source — see `timelineSlidingStore.test.ts`.)
  *
  * The one gap none of the three rules fill on their own: an **anchor page**
  * (no request cursor exists at all, `startPositions === null`) has no
@@ -359,7 +426,12 @@ export interface SlidingWindowStore {
  * reports `null` exactly while `attached`, regardless of `topMap`'s stored
  * content — the map keeps tracking underneath so the moment a top trim
  * detaches the window, a correct boundary is already sitting there from
- * whichever rule last touched it.
+ * whichever rule last touched it. Crucially, a forward page only reports
+ * `exhausted` once EVERY partition in that request's own cursor has reached
+ * its true high watermark — so `attached === true` really does mean every
+ * tracked partition is caught up store-wide, not just the partitions that
+ * page happened to mention; this is what rule 2's soundness argument above
+ * leans on.
  */
 export function createSlidingWindowStore(cap = 2000): SlidingWindowStore {
   const partitions = new Map<number, MessageOut[]>()
@@ -485,22 +557,20 @@ export function createSlidingWindowStore(cap = 2000): SlidingWindowStore {
       for (let i = 0; i < excess; i++) recordTrim(merged[i])
       for (const [p, offsets] of trimmedByPartition) topMap.set(p, minOf(offsets))
 
-      // Completeness backfill (fix round 1, C1b): a partition can be
+      // Completeness backfill (fix round 1, C1b; mutation-verified — see
+      // timelineSlidingStore.test.ts's N1 tests): a partition can be
       // holding rows in the window RIGHT NOW without ever having had its
       // own top boundary planted — e.g. it contributed zero rows to the
-      // anchor page (so the anchor opposite-side seed skipped it) and
-      // hasn't been top-trimmed before either — or `topMap` can be stale
-      // relative to what's actually in the window (a live insert raised a
-      // partition's held offsets past its old boundary — see
-      // `insertLive`'s own ceiling update, which prevents this going
-      // forward, but this backfill is the belt-and-braces guarantee at the
-      // one moment it would otherwise bite: detachment, when `edges().top`
-      // stops being masked by `attached` and starts being trusted). Any
-      // partition still holding rows that this trim did NOT touch gets its
-      // boundary set fresh from what's actually still there —
-      // `max(remaining offsets) + 1` — so the minted top edge is complete
-      // over every partition the window holds, not just the ones this
-      // particular trim happened to touch.
+      // anchor page (so the anchor opposite-side seed skipped it), or was
+      // first discovered by a plain `back` page (rule 1 only ever touches
+      // `bottomMap` for that direction) — and hasn't been top-trimmed
+      // before either. Any partition still holding rows that THIS trim did
+      // NOT touch gets its boundary set fresh from what's actually still
+      // there — `max(remaining offsets) + 1` — so the minted top edge is
+      // complete over every partition the window holds the instant
+      // `attached` flips `false` and `edges().top` stops being masked,
+      // regardless of which of rules 1/2/3 last touched any given
+      // partition, or whether any of them ever did.
       for (const [p, arr] of partitions) {
         if (trimmedByPartition.has(p) || arr.length === 0) continue
         topMap.set(p, arr[arr.length - 1].offset + 1) // `arr` is offset-ascending: last entry is the max
@@ -566,39 +636,25 @@ export function createSlidingWindowStore(cap = 2000): SlidingWindowStore {
       return enforceCap(direction === 'back' ? 'bottom-insert' : 'top-insert')
     },
     insertLive(rows) {
-      const { insertedMin, insertedMax } = insertRows(rows)
-      // Fix round 1, C1a: live rows extend the top edge exactly like a
-      // forward page's own rows do (see insertPage's same-direction
-      // floor/ceiling rule above), but a live insert carries no cursor at
-      // all — so this is the ONLY place that ever advances `topMap` for it.
-      // Without this, a partition's live-delivered rows can sit in the
-      // window above a stale (or entirely absent) `topMap` entry: the next
-      // time some OTHER partition's top trim detaches the window, a cursor
-      // minted from that stale entry re-delivers a row already held (a
-      // duplicate) — proven by this file's C1 regression test (A). Applying
-      // it immediately, on every live insert, means the map is never wrong
-      // for longer than one call, regardless of whether a trim ever touches
-      // this partition again (the enforceCap backfill below is the second,
-      // independent line of defense for the moment a trim actually happens).
-      //
-      // Guarded (fix round 1, review follow-up on M1's adversarial fixture):
-      // only advance when this insert's own lowest offset reaches AT OR
-      // BELOW the existing boundary (or there is none yet). A live insert is
-      // not tied to any request, so nothing guarantees it's contiguous with
-      // what the map already promises — a partition detached earlier (rows
-      // evicted, `topMap` left pointing at the exact recovery offset) that
-      // then receives a live row ABOVE that boundary must NOT have the
-      // boundary dragged forward past the still-unrecovered gap: that would
-      // silently strand the evicted rows below it forever (found by the
-      // property walk's live-only partition once it survives a detach and
-      // receives a second, later live batch).
-      for (const [p, max] of insertedMax) {
-        const existing = topMap.get(p)
-        const min = insertedMin.get(p)!
-        if (existing === undefined || min <= existing) {
-          topMap.set(p, Math.max(existing ?? -Infinity, max + 1))
-        }
+      // Precondition, enforced (fix round 2 — see the class doc comment's
+      // "The resolution" section): only sound while attached. A caller
+      // violating this is a programming error (Task 3 must buffer live rows
+      // while detached, per v1.3), not a data condition to tolerate quietly.
+      if (!attached) {
+        throw new Error(
+          'insertLive called while detached: live rows must be buffered by the caller until the window re-attaches (edges().top === null)',
+        )
       }
+      // N2 defensive drop (belt-and-suspenders, NOT load-bearing — see the
+      // class doc comment's bottom-map completeness argument for why a
+      // legal attached live row can never legitimately sit below
+      // `bottomMap[p]`): silently ignore one anyway, counted nowhere, purely
+      // against a future caller bug.
+      const safeRows = rows.filter((r) => r.offset >= (bottomMap.get(r.partition) ?? -Infinity))
+      const { insertedMax } = insertRows(safeRows)
+      // Unconditional ceiling (fix round 2, restored — see the class doc
+      // comment's rule 2): sound only because of the attached check above.
+      for (const [p, max] of insertedMax) topMap.set(p, Math.max(topMap.get(p) ?? -Infinity, max + 1))
       return enforceCap('top-insert')
     },
     rows() {
