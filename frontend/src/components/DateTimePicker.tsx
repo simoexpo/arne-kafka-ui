@@ -1,4 +1,5 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState, type UIEvent } from 'react'
+import { useTimeDisplayMode, type TimeDisplayMode } from '../lib/timeDisplayMode'
 
 // Owner ruling 2026-08-15 (picker2, superseding an earlier native-popup
 // `color-scheme` attempt): verified empirically that Chrome's own
@@ -11,16 +12,25 @@ import { useEffect, useRef, useState } from 'react'
 // entirely from Betrachtung's own `dark:` classes — nothing here is at
 // the mercy of the browser's opinion.
 //
-// Owner ruling 2026-08-16 (picker3): reworked layout — calendar grid on
-// the LEFT, three independently-scrollable time columns (hour/minute/
-// second, wheel-picker style) on the RIGHT. Below date+time sits a single
-// editable textbox showing the full picked datetime INCLUDING
-// milliseconds; picking a day or a time column value zeroes the
-// milliseconds (the textbox is the only way to set a non-zero value).
-// The outer trigger is now a bare calendar-icon button — the "current
-// value, editable" textbox this used to render itself now lives one level
-// up, in the caller (see JumpControl), so there is exactly one textbox
-// between the two components, not two.
+// Owner ruling 2026-08-16 (picker3): calendar grid on the LEFT, three
+// independently-scrollable time columns (hour/minute/second, wheel-picker
+// style) on the RIGHT. Below date+time sits a single editable textbox
+// showing the full picked datetime INCLUDING milliseconds; picking a day
+// or a time column value zeroes the milliseconds (the textbox is the only
+// way to set a non-zero value).
+//
+// Owner ruling 2026-08-16 (picker3 feedback round): the component is
+// self-contained like `FilterInput` — it owns BOTH the outer textbox
+// (epoch ms, editable, exactly the pre-picker3 field) AND a calendar-icon
+// button embedded at its right edge (not a separate sibling button). It
+// also now follows the app-wide UTC/local display toggle
+// (`lib/timeDisplayMode`): every date/time field in the popover — the
+// calendar grid, the three time columns, the "today" marker, and the
+// internal datetime-with-millis textbox — is read and written through
+// `decompose`/`compose` below, which pick UTC or local `Date` accessors
+// per the CURRENT mode. Two instants a day apart in one zone can be the
+// same wall-clock day in the other; whichever zone is active, Apply always
+// reconstructs the exact same epoch ms the fields represent.
 
 const MONTH_NAMES = [
   'January', 'February', 'March', 'April', 'May', 'June',
@@ -36,6 +46,11 @@ function pad3(n: number): string {
   return String(n).padStart(3, '0')
 }
 
+// Calendar-only arithmetic (days-in-month, day-of-week for the 1st) never
+// depends on which zone is being VIEWED — "August 2026 has 31 days" and
+// "August 1 2026 is a Saturday" are zone-independent calendar facts, not
+// instants. Only converting an epoch ms INSTANT to/from wall-clock fields
+// (`decompose`/`compose` below) is zone-sensitive.
 function daysInMonth(year: number, month: number): number {
   return new Date(year, month + 1, 0).getDate()
 }
@@ -54,6 +69,29 @@ type FullDateTime = {
   minute: number
   second: number
   millis: number
+}
+
+// The only two zone-sensitive operations: reading an epoch-ms INSTANT as
+// wall-clock fields, and turning wall-clock fields back into an instant.
+// `mode` picks UTC or local `Date` accessors/constructors — same instant,
+// different fields, in general.
+function decompose(ms: number, mode: TimeDisplayMode): FullDateTime {
+  const d = new Date(ms)
+  return mode === 'utc'
+    ? {
+        year: d.getUTCFullYear(), month: d.getUTCMonth(), day: d.getUTCDate(),
+        hour: d.getUTCHours(), minute: d.getUTCMinutes(), second: d.getUTCSeconds(), millis: d.getUTCMilliseconds(),
+      }
+    : {
+        year: d.getFullYear(), month: d.getMonth(), day: d.getDate(),
+        hour: d.getHours(), minute: d.getMinutes(), second: d.getSeconds(), millis: d.getMilliseconds(),
+      }
+}
+
+function compose(dt: FullDateTime, mode: TimeDisplayMode): number {
+  return mode === 'utc'
+    ? Date.UTC(dt.year, dt.month, dt.day, dt.hour, dt.minute, dt.second, dt.millis)
+    : new Date(dt.year, dt.month, dt.day, dt.hour, dt.minute, dt.second, dt.millis).getTime()
 }
 
 const FULL_DATETIME_RE = /^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2}):(\d{2})\.(\d{3})$/
@@ -81,26 +119,17 @@ function parseFull(text: string): FullDateTime | null {
   return { year, month, day, hour, minute, second, millis }
 }
 
-// Shared with callers (JumpControl's own outer textbox) so the "datetime
-// with milliseconds, browser-local" representation is formatted and parsed
-// identically everywhere it appears — one source of truth for the format.
-export function formatDateTimeMillis(ms: number): string {
-  const d = new Date(ms)
-  return formatFull({
-    year: d.getFullYear(),
-    month: d.getMonth(),
-    day: d.getDate(),
-    hour: d.getHours(),
-    minute: d.getMinutes(),
-    second: d.getSeconds(),
-    millis: d.getMilliseconds(),
-  })
+// Zone-aware format/parse for the popover's OWN "datetime with
+// milliseconds" textbox — exported so the round-trip (and the toggle's
+// effect on it) is directly unit-testable without rendering the component.
+export function formatDateTimeMillis(ms: number, mode: TimeDisplayMode): string {
+  return formatFull(decompose(ms, mode))
 }
 
-export function parseDateTimeMillis(text: string): number | null {
+export function parseDateTimeMillis(text: string, mode: TimeDisplayMode): number | null {
   const p = parseFull(text)
   if (!p) return null
-  return new Date(p.year, p.month, p.day, p.hour, p.minute, p.second, p.millis).getTime()
+  return compose(p, mode)
 }
 
 function CalendarIcon() {
@@ -112,51 +141,150 @@ function CalendarIcon() {
   )
 }
 
-function TimeColumn({ label, testidPrefix, count, selected, onSelect }: {
+// Looping wheel-column mechanics (owner ruling 2026-08-16, wheel-picker
+// follow-up): hour/minute/second are rendered as an iOS-style endless
+// wheel — the value list is repeated 3× back-to-back (so there's always
+// more list both above and below whatever's centered) and the SELECTED
+// value's row in the MIDDLE copy is kept perfectly vertically centered in
+// the viewport. Real drag/wheel scroll physics only exist in a real
+// browser (jsdom has no layout engine — `scrollTop` is just a stored
+// number, `scrollHeight`/`clientHeight` are always 0), so the geometry is
+// factored into small pure functions below, unit-tested directly; the
+// click-to-select behavior is unit-tested through the DOM as before, and
+// the actual scroll/wrap FEEL is verified in the browser pass, not here.
+export const WHEEL_ROW_HEIGHT_PX = 24
+export const WHEEL_VISIBLE_ROWS = 5
+export const WHEEL_VIEWPORT_HEIGHT_PX = WHEEL_ROW_HEIGHT_PX * WHEEL_VISIBLE_ROWS
+
+// Row index (within the 3×-tripled list) of the MIDDLE copy of `selected`.
+export function wheelCenteredIndex(selected: number, count: number): number {
+  return count + selected
+}
+
+// `scrollTop` that puts row `idx` (top-aligned at `idx * rowHeight`)
+// exactly vertically centered within a `viewportHeight`-tall viewport.
+export function wheelScrollTopForIndex(
+  idx: number,
+  rowHeight: number = WHEEL_ROW_HEIGHT_PX,
+  viewportHeight: number = WHEEL_VIEWPORT_HEIGHT_PX,
+): number {
+  return idx * rowHeight + rowHeight / 2 - viewportHeight / 2
+}
+
+// Standard "3× list, silently re-center near an edge" infinite-scroll
+// technique: while the reader is scrolling anywhere within the middle
+// third, do nothing; once they've drifted into the outer thirds (meaning
+// they're approaching the start/end of the tripled DOM list), jump the
+// scroll position by exactly one block-height (`count * rowHeight`) in the
+// opposite direction. Every block is an identical copy of the same values,
+// so the jump is invisible to the reader — the value under the centerline
+// doesn't change, only which copy is now "current". Returns null when no
+// rewrap is needed yet.
+export function wheelRewrapScrollTop(
+  scrollTop: number,
+  count: number,
+  rowHeight: number = WHEEL_ROW_HEIGHT_PX,
+): number | null {
+  const blockHeight = count * rowHeight
+  if (scrollTop < blockHeight * 0.5) return scrollTop + blockHeight
+  if (scrollTop > blockHeight * 1.5) return scrollTop - blockHeight
+  return null
+}
+
+function TimeColumn({ label, testidPrefix, count, selected, onSelect, open }: {
   label: string
   testidPrefix: string
   count: number
   selected: number
   onSelect: (n: number) => void
+  open: boolean
 }) {
+  const listRef = useRef<HTMLDivElement>(null)
+
+  // Snap-center the selection whenever the popover opens or the selection
+  // changes (click, or a typed textbox edit resolving to a new value).
+  useEffect(() => {
+    if (!open || !listRef.current) return
+    listRef.current.scrollTop = wheelScrollTopForIndex(wheelCenteredIndex(selected, count))
+  }, [open, selected, count])
+
+  const onScroll = (e: UIEvent<HTMLDivElement>) => {
+    const el = e.currentTarget
+    const corrected = wheelRewrapScrollTop(el.scrollTop, count)
+    if (corrected !== null) el.scrollTop = corrected
+  }
+
   return (
     <div className="flex flex-col items-center">
       <span className="mb-1 text-[10px] text-zinc-400 dark:text-zinc-500">{label}</span>
       <div
+        ref={listRef}
+        onScroll={onScroll}
         data-testid={`datetime-picker-${testidPrefix}-list`}
         aria-label={`${label} column`}
-        className="h-32 w-10 overflow-y-auto rounded border border-zinc-200 dark:border-zinc-800"
+        // Scrollable, just no visible scrollbar chrome — still
+        // wheel/drag/click-scrollable, with the selection auto-centered.
+        className="h-[120px] w-10 overflow-y-auto rounded border border-zinc-200 [scrollbar-width:none] dark:border-zinc-800 [&::-webkit-scrollbar]:hidden"
       >
-        {Array.from({ length: count }, (_, n) => n).map((n) => {
-          const isSelected = n === selected
-          return (
-            <button
-              key={n}
-              type="button"
-              aria-label={`${label} ${pad2(n)}`}
-              aria-pressed={isSelected}
-              data-testid={`datetime-picker-${testidPrefix}-${pad2(n)}`}
-              onClick={() => onSelect(n)}
-              className={
-                isSelected
-                  ? 'block w-full bg-emerald-500 py-0.5 text-center font-medium text-white'
-                  : 'block w-full py-0.5 text-center hover:bg-zinc-100 dark:hover:bg-zinc-800'
-              }
-            >
-              {pad2(n)}
-            </button>
-          )
-        })}
+        {[0, 1, 2].map((block) => (
+          <div key={block}>
+            {Array.from({ length: count }, (_, n) => n).map((n) => {
+              const isSelected = n === selected
+              // Only the middle (2nd) copy is the "canonical" element:
+              // it alone carries the stable data-testid/aria-label/
+              // aria-pressed a test (or a screen reader) should see —
+              // the other two copies are purely the wrap illusion.
+              const canonical = block === 1
+              return (
+                <button
+                  key={`${block}-${n}`}
+                  type="button"
+                  tabIndex={canonical ? 0 : -1}
+                  aria-hidden={canonical ? undefined : true}
+                  aria-label={canonical ? `${label} ${pad2(n)}` : undefined}
+                  aria-pressed={canonical ? isSelected : undefined}
+                  data-testid={canonical ? `datetime-picker-${testidPrefix}-${pad2(n)}` : undefined}
+                  onClick={() => onSelect(n)}
+                  className={
+                    isSelected
+                      ? 'flex h-6 w-full items-center justify-center bg-emerald-500 font-medium text-white'
+                      : 'flex h-6 w-full items-center justify-center hover:bg-zinc-100 dark:hover:bg-zinc-800'
+                  }
+                >
+                  {pad2(n)}
+                </button>
+              )
+            })}
+          </div>
+        ))}
       </div>
     </div>
   )
 }
 
-export function DateTimePicker({ valueMs, onChange, ariaLabel }: {
+export function DateTimePicker({
+  valueMs,
+  onChange,
+  ariaLabel,
+  textValue,
+  onTextChange,
+  onTextEnter,
+  textTestId,
+  textAriaLabel,
+  textPlaceholder,
+}: {
   valueMs: number | null
   onChange: (ms: number) => void
   ariaLabel: string
+  textValue: string
+  onTextChange: (text: string) => void
+  onTextEnter?: () => void
+  textTestId: string
+  textAriaLabel: string
+  textPlaceholder: string
 }) {
+  const mode = useTimeDisplayMode()
+  const modeLabel = mode === 'utc' ? 'UTC' : 'local'
   const [open, setOpen] = useState(false)
   const containerRef = useRef<HTMLDivElement>(null)
 
@@ -170,16 +298,7 @@ export function DateTimePicker({ valueMs, onChange, ariaLabel }: {
   const [text, setText] = useState('')
 
   const openPopover = () => {
-    const seed = valueMs !== null ? new Date(valueMs) : new Date()
-    const dt: FullDateTime = {
-      year: seed.getFullYear(),
-      month: seed.getMonth(),
-      day: seed.getDate(),
-      hour: seed.getHours(),
-      minute: seed.getMinutes(),
-      second: seed.getSeconds(),
-      millis: seed.getMilliseconds(),
-    }
+    const dt = decompose(valueMs !== null ? valueMs : Date.now(), mode)
     setViewYear(dt.year)
     setViewMonth(dt.month)
     setPickedDay(dt.day)
@@ -212,27 +331,41 @@ export function DateTimePicker({ valueMs, onChange, ariaLabel }: {
     }
   }, [open])
 
-  // Wheel-picker columns are tall lists (24/60/60 rows) in a short viewport
-  // — without this, the selected value is routinely scrolled out of view
-  // (e.g. minute 45 sits well past the visible 00-05). `scrollIntoView` is a
-  // no-op in jsdom (no layout engine, nothing to scroll) so this is inert
-  // under the test suite and only does real work in a real browser.
+
+  // The popover follows the app-wide UTC/local toggle LIVE, even while
+  // already open: if the mode changes mid-session, the currently-picked
+  // fields are re-decomposed from the SAME underlying instant under the
+  // new zone, rather than silently reinterpreting the old fields (which
+  // would drift the epoch). Closed popovers don't need this — the next
+  // `openPopover()` re-derives fresh from `valueMs` under whatever mode is
+  // then current.
+  const prevMode = useRef(mode)
   useEffect(() => {
-    if (!open || !containerRef.current) return
-    const selectors = [
-      '[data-testid^="datetime-picker-hour-"][aria-pressed="true"]',
-      '[data-testid^="datetime-picker-minute-"][aria-pressed="true"]',
-      '[data-testid^="datetime-picker-second-"][aria-pressed="true"]',
-    ]
-    for (const sel of selectors) {
-      containerRef.current.querySelector(sel)?.scrollIntoView?.({ block: 'center' })
+    if (prevMode.current === mode) return
+    if (open) {
+      const epoch = compose(
+        { year: viewYear, month: viewMonth, day: pickedDay, hour: pickedHour, minute: pickedMinute, second: pickedSecond, millis: pickedMillis },
+        prevMode.current,
+      )
+      const dt = decompose(epoch, mode)
+      setViewYear(dt.year)
+      setViewMonth(dt.month)
+      setPickedDay(dt.day)
+      setPickedHour(dt.hour)
+      setPickedMinute(dt.minute)
+      setPickedSecond(dt.second)
+      setPickedMillis(dt.millis)
+      setText(formatFull(dt))
     }
-  }, [open, pickedHour, pickedMinute, pickedSecond])
+    prevMode.current = mode
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mode])
 
   // Clamping here keeps the selection on a day the new grid actually renders;
   // without it, Jan 31 → Feb would keep an invisible day-31 selection that
   // Date() rolls into March on Apply. Browsing months is not itself "picking
-  // a date/time", so milliseconds are preserved (not reset) across nav.
+  // a date/time", so milliseconds are preserved (not reset) across nav. This
+  // is pure calendar arithmetic (see `daysInMonth` above) — zone-independent.
   const goToMonth = (monthOffset: number) => {
     const d = new Date(viewYear, viewMonth + monthOffset, 1)
     const newYear = d.getFullYear()
@@ -284,7 +417,7 @@ export function DateTimePicker({ valueMs, onChange, ariaLabel }: {
     }))
   }
 
-  const handleTextChange = (newText: string) => {
+  const handleInternalTextChange = (newText: string) => {
     setText(newText)
     const p = parseFull(newText)
     if (!p) return
@@ -302,25 +435,37 @@ export function DateTimePicker({ valueMs, onChange, ariaLabel }: {
 
   const apply = () => {
     if (!parsed) return
-    onChange(new Date(parsed.year, parsed.month, parsed.day, parsed.hour, parsed.minute, parsed.second, parsed.millis).getTime())
+    onChange(compose(parsed, mode))
     setOpen(false)
   }
 
   const monthLen = daysInMonth(viewYear, viewMonth)
   const leadBlanks = leadingBlankCount(viewYear, viewMonth)
-  const today = new Date()
+  const today = decompose(Date.now(), mode)
   const isToday = (day: number) =>
-    today.getFullYear() === viewYear && today.getMonth() === viewMonth && today.getDate() === day
+    today.year === viewYear && today.month === viewMonth && today.day === day
 
   return (
     <div className="relative inline-block" ref={containerRef}>
+      <input
+        type="text"
+        data-testid={textTestId}
+        aria-label={textAriaLabel}
+        placeholder={textPlaceholder}
+        value={textValue}
+        onChange={(e) => onTextChange(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter') onTextEnter?.()
+        }}
+        className="w-32 rounded border border-zinc-300 bg-transparent px-1.5 py-0.5 pr-6 dark:border-zinc-700 dark:bg-zinc-900"
+      />
       <button
         type="button"
         data-testid="datetime-picker-trigger"
-        aria-label={ariaLabel}
+        aria-label={`${ariaLabel} (${modeLabel})`}
         aria-expanded={open}
         onClick={() => (open ? setOpen(false) : openPopover())}
-        className="flex items-center justify-center rounded border border-zinc-300 p-1 text-zinc-600 hover:bg-zinc-100 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-800"
+        className="absolute right-1 top-1/2 flex -translate-y-1/2 items-center justify-center rounded p-0.5 text-zinc-500 hover:bg-zinc-100 dark:text-zinc-400 dark:hover:bg-zinc-800"
       >
         <CalendarIcon />
       </button>
@@ -329,6 +474,14 @@ export function DateTimePicker({ valueMs, onChange, ariaLabel }: {
           data-testid="datetime-picker-popover"
           className="absolute z-20 mt-1 w-80 rounded-lg border border-zinc-200 bg-white p-2 text-xs shadow-lg dark:border-zinc-800 dark:bg-zinc-900"
         >
+          <div className="mb-1 flex justify-end">
+            <span
+              data-testid="datetime-picker-zone-label"
+              className="rounded bg-zinc-100 px-1 py-0.5 text-[9px] font-medium uppercase tracking-wide text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400"
+            >
+              {modeLabel}
+            </span>
+          </div>
           <div className="flex gap-2">
             <div className="w-44">
               <div className="mb-1 flex items-center justify-between">
@@ -381,9 +534,9 @@ export function DateTimePicker({ valueMs, onChange, ariaLabel }: {
               </div>
             </div>
             <div className="flex flex-1 justify-center gap-1">
-              <TimeColumn label="hour" testidPrefix="hour" count={24} selected={pickedHour} onSelect={selectHour} />
-              <TimeColumn label="minute" testidPrefix="minute" count={60} selected={pickedMinute} onSelect={selectMinute} />
-              <TimeColumn label="second" testidPrefix="second" count={60} selected={pickedSecond} onSelect={selectSecond} />
+              <TimeColumn label="hour" testidPrefix="hour" count={24} selected={pickedHour} onSelect={selectHour} open={open} />
+              <TimeColumn label="minute" testidPrefix="minute" count={60} selected={pickedMinute} onSelect={selectMinute} open={open} />
+              <TimeColumn label="second" testidPrefix="second" count={60} selected={pickedSecond} onSelect={selectSecond} open={open} />
             </div>
           </div>
           <div className="mt-2">
@@ -393,7 +546,7 @@ export function DateTimePicker({ valueMs, onChange, ariaLabel }: {
               data-testid="datetime-picker-text"
               placeholder="yyyy-mm-dd hh:mm:ss.mmm"
               value={text}
-              onChange={(e) => handleTextChange(e.target.value)}
+              onChange={(e) => handleInternalTextChange(e.target.value)}
               aria-invalid={!textValid}
               className="w-full rounded border border-zinc-300 px-1.5 py-1 text-center dark:border-zinc-700 dark:bg-zinc-950"
             />

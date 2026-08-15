@@ -4,7 +4,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { FakeEventSource } from '../../test/fake-event-source'
 import * as sse from '../../api/sse'
 import type { MessageOut, SseErrorData } from '../../api/types'
-import { formatDateTimeMillis } from '../../components/DateTimePicker'
 import { encodeCursor } from '../../lib/timelineCursor'
 import { setTimeDisplayMode } from '../../lib/timeDisplayMode'
 import { Timeline } from './Timeline'
@@ -997,7 +996,7 @@ describe('Timeline', () => {
       await emit(0, 'page_end', { cursor: cur({ 0: 9 }), exhausted: false })
 
       await user.click(screen.getByTestId('jump-timestamp'))
-      await user.type(screen.getByTestId('jump-timestamp-input'), formatDateTimeMillis(1700000000000))
+      await user.type(screen.getByTestId('jump-timestamp-input'), '1700000000000')
       await user.click(screen.getByTestId('jump-timestamp-apply'))
 
       expect(screen.queryByText('p0·9')).not.toBeInTheDocument()
@@ -1227,7 +1226,7 @@ describe('Timeline', () => {
       const scroll = spyOnScrollTop()
       try {
         await user.click(screen.getByTestId('jump-timestamp'))
-        await user.type(screen.getByTestId('jump-timestamp-input'), formatDateTimeMillis(1700000000000))
+        await user.type(screen.getByTestId('jump-timestamp-input'), '1700000000000')
         await user.click(screen.getByTestId('jump-timestamp-apply'))
         await emit(1, 'match', mk(30))
         scroll.setter.mockClear()

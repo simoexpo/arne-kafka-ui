@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { DateTimePicker, formatDateTimeMillis, parseDateTimeMillis } from '../../components/DateTimePicker'
+import { DateTimePicker } from '../../components/DateTimePicker'
 import { formatTimestamp } from '../../lib/format'
 import { useTimeDisplayMode } from '../../lib/timeDisplayMode'
 
@@ -19,26 +19,22 @@ function parseNonNegativeInt(text: string): number | null {
 }
 
 export function JumpControl({ onJump }: { onJump: (target: JumpTarget) => void }) {
-  // UTC/local display toggle (owner ruling 2026-08-15): the preview below
-  // follows this so it always speaks the SAME zone as the rows/header the
-  // reader is about to jump into — the picker itself, however, always
-  // interprets and shows browser-local wall-clock time (that's what a
-  // reader picking off a calendar expects), hence the "local" caption next
-  // to it never changes.
+  // UTC/local display toggle (owner ruling 2026-08-15, extended 2026-08-16
+  // picker3 feedback round): the preview below AND the picker popover both
+  // follow this now — the popover's calendar/columns/internal textbox all
+  // interpret and display in whichever zone is currently selected, so the
+  // reader always picks off the SAME zone the rows/header are showing. The
+  // outer textbox here, however, is the raw epoch-ms number — a zone-free
+  // representation, unchanged by the toggle (exactly the original ms field).
   const timeDisplayMode = useTimeDisplayMode()
   const [expanded, setExpanded] = useState<Expanded>('none')
   const [partitionText, setPartitionText] = useState('')
   const [offsetText, setOffsetText] = useState('')
-  // Datetime-with-milliseconds text, browser-local — same representation
-  // and parser the picker's own in-popover textbox uses (picker3, owner
-  // ruling 2026-08-16), so this is the ONE outer textbox: typing here or
-  // picking via the calendar-icon popover both flow through the same
-  // format/parse pair.
-  const [dtText, setDtText] = useState('')
+  const [msText, setMsText] = useState('')
 
   const partition = parseNonNegativeInt(partitionText)
   const offset = parseNonNegativeInt(offsetText)
-  const tsMs = parseDateTimeMillis(dtText)
+  const tsMs = parseNonNegativeInt(msText)
   const offsetValid = partition !== null && offset !== null
   const tsValid = tsMs !== null
 
@@ -135,21 +131,17 @@ export function JumpControl({ onJump }: { onJump: (target: JumpTarget) => void }
 
       {expanded === 'timestamp' && (
         <div className="flex flex-wrap items-center gap-1">
-          <input
-            data-testid="jump-timestamp-input"
-            aria-label="timestamp (local time, with milliseconds)"
-            placeholder="yyyy-mm-dd hh:mm:ss.mmm"
-            value={dtText}
-            onChange={(e) => setDtText(e.target.value)}
-            onKeyDown={(e) => e.key === 'Enter' && applyTimestamp()}
-            className="w-44 rounded border border-zinc-300 px-1 py-0.5 dark:border-zinc-700 dark:bg-zinc-900"
-          />
           <DateTimePicker
             valueMs={tsMs}
-            onChange={(ms) => setDtText(formatDateTimeMillis(ms))}
-            ariaLabel="pick timestamp (local time)"
+            onChange={(ms) => setMsText(String(ms))}
+            ariaLabel="pick timestamp"
+            textValue={msText}
+            onTextChange={setMsText}
+            onTextEnter={applyTimestamp}
+            textTestId="jump-timestamp-input"
+            textAriaLabel="timestamp (epoch ms)"
+            textPlaceholder="epoch ms"
           />
-          <span className="text-[10px] text-zinc-500 dark:text-zinc-400">local</span>
           {tsValid && (
             <span
               data-testid="jump-timestamp-preview"
