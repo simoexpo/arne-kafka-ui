@@ -12,6 +12,7 @@ use rdkafka::consumer::Consumer;
 use serde::Deserialize;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::StreamExt as _;
 
@@ -170,8 +171,22 @@ pub async fn timeline_sse(
     // is an anchor page (which needs watermarks to resolve positions) or a
     // cursor page (which needs them anyway, for `run_page`'s own windowing
     // and exhaustion check) — never two for the same request.
+    //
+    // Review fix (M1+M2, 2026-08-15): this whole block's `Result` used to be
+    // propagated straight out of the handler via `?` — turning e.g. the
+    // honest "no message at that offset" anchor failure into a plain HTTP
+    // 400 *before* the SSE stream ever opens. `EventSource` discards a
+    // non-200 response body wholesale, so the frontend saw generic
+    // "connection lost" instead of the real reason. `resolved` is now kept
+    // as a `Result` (not `?`-unwrapped here) specifically so its `Err` case
+    // can be emitted as an IN-STREAM `TimelineEvent::Error` below, the same
+    // envelope a mid-scan failure already uses — the one exception is a
+    // `spawn_blocking` `JoinError` (the task itself panicked): that's a
+    // genuine internal-server fault, not an honest rejection of anything
+    // the user did, so it still short-circuits as a pre-stream 500 via the
+    // `?` on the `spawn_blocking` join itself.
     type PositionsAndWatermarks = (Vec<(i32, i64)>, Vec<(i32, i64, i64)>);
-    let (positions, watermarks) = {
+    let resolved: Result<PositionsAndWatermarks, ApiError> = {
         let handle = handle.clone();
         let topic = topic.clone();
         tokio::task::spawn_blocking(move || -> Result<PositionsAndWatermarks, ApiError> {
@@ -215,12 +230,35 @@ pub async fn timeline_sse(
                 }
             };
             Ok((positions, wm))
-        }).await.map_err(|e| ApiError::internal(format!("task join: {e}")))??
+        }).await.map_err(|e| ApiError::internal(format!("task join: {e}")))?
     };
 
-    let budget = state.limits.timeline_scan_budget;
-    let (rx, cancel) = timeline::run_page(handle, topic, positions, watermarks, direction, limit, filter, budget);
-    let guard = CancelOnDrop(cancel);
+    // Both branches below feed the SAME `mpsc::Receiver<TimelineEvent>` ->
+    // `ReceiverStream` -> `.map(...)` shape, so `Sse<impl Stream<...>>`'s
+    // single concrete return type is satisfied either way, and the success
+    // path's `CancelOnDrop` guard keeps its ORIGINAL semantics exactly:
+    // tied to the stream's own `.map()` closure lifetime, so a client
+    // disconnect flips `cancel` (run_page's own internal flag) INSTANTLY —
+    // not only once some in-flight send happens to fail — preserving the
+    // "no zombie scans" guarantee. The error path never started a scan at
+    // all, so its own guard wraps a fresh, inert flag: nothing to cancel.
+    let (rx, guard): (mpsc::Receiver<TimelineEvent>, CancelOnDrop) = match resolved {
+        Ok((positions, watermarks)) => {
+            let budget = state.limits.timeline_scan_budget;
+            let (rx, cancel) = timeline::run_page(handle, topic, positions, watermarks, direction, limit, filter, budget);
+            (rx, CancelOnDrop(cancel))
+        }
+        Err(e) => {
+            // A fresh, single-purpose channel carrying exactly one event:
+            // `try_send` on a brand-new, empty channel can't fail for
+            // capacity reasons, and there is nothing else to send after
+            // it — the sender drops at the end of this arm, closing the
+            // channel once this one buffered event has been delivered.
+            let (tx, rx) = mpsc::channel::<TimelineEvent>(1);
+            let _ = tx.try_send(e.into());
+            (rx, CancelOnDrop(Arc::new(AtomicBool::new(false))))
+        }
+    };
     let stream = ReceiverStream::new(rx).map(move |event: TimelineEvent| {
         let _hold = &guard; // move the guard into the stream: dropped on disconnect
         Ok(Event::default().event(event.name()).data(serde_json::to_string(&event).unwrap_or_default()))

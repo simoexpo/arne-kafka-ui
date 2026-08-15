@@ -354,6 +354,36 @@ describe('Timeline', () => {
     expect(screen.getByText(/Connection to Betrachtung lost/)).toBeInTheDocument()
   })
 
+  // Review fix (M1+M2, 2026-08-15): a bad offset jump (no message at the
+  // target) used to 400 BEFORE the SSE stream opened — EventSource discards
+  // that non-200 body wholesale, so the frontend fell back to the generic
+  // transport-error path and showed "connection lost" instead of the real,
+  // honest reason. The backend now emits this as an in-stream `error` event
+  // (see `backend/src/api/messages.rs`), which reaches Timeline exactly like
+  // any other server-emitted page error — this pins that the REAL message
+  // renders, and that the generic connection-lost wording does NOT.
+  it('a bad offset jump renders its real server message, not generic connection-lost wording', async () => {
+    mockTail()
+    const user = userEvent.setup()
+    render(<Timeline cluster="prod" topic="orders" />)
+    await emit(0, 'match', mk(9))
+    await emit(0, 'page_end', { cursor: cur({ 0: 9 }), exhausted: false })
+
+    await user.click(screen.getByTestId('jump-offset'))
+    await user.type(screen.getByTestId('jump-offset-partition-input'), '1')
+    await user.type(screen.getByTestId('jump-offset-value-input'), '9999')
+    await user.click(screen.getByTestId('jump-offset-apply'))
+    await emit(1, 'error', {
+      code: 'bad_request',
+      message: 'no message with a timestamp at partition 1 offset 9999',
+      cluster: null,
+      retriable: false,
+    })
+
+    expect(screen.getByText('no message with a timestamp at partition 1 offset 9999')).toBeInTheDocument()
+    expect(screen.queryByText(/Connection to Betrachtung lost/)).not.toBeInTheDocument()
+  })
+
   it('renders a decode-error row loudly instead of skipping it', async () => {
     mockTail()
     render(<Timeline cluster="prod" topic="orders" />)

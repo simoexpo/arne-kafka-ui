@@ -50,17 +50,16 @@ type PauseReason = 'none' | 'auto' | 'explicit'
 
 // Which anchor the currently loaded window was bootstrapped from (task 3;
 // supersedes the v1.3-era 'default' | 'beginning' pair). Carries the FULL
-// anchor params, not just a kind tag, for two reasons: (1) a settled filter
-// change re-reads from this same context (unchanged from v1.3 — only
-// 'beginning' gets its own re-anchor, everything else falls back to
-// back/latest); (2) task 3's loadNewer forward-anchor fallback (see its own
-// comment below) used to need this to re-issue the EXACT same anchor with
-// direction=forward when the store's top edge was never seeded at all.
-// Owner ruling 2026-08-15: 'offset'/'timestamp' jumps are now THEMSELVES
-// forward-direction bootstraps (mirroring 'beginning'), so that fallback's
-// own precondition (a back-anchored offset/timestamp bootstrap) can no
-// longer arise from any call site in this file — see the fallback's own
-// comment for why it's kept anyway.
+// anchor params, not just a kind tag: a settled filter change re-reads from
+// this same context (unchanged from v1.3 — only 'beginning' gets its own
+// re-anchor, everything else falls back to back/latest). Task 3 also used
+// this to re-derive `loadNewer`'s forward-anchor fallback for a BACK-
+// anchored offset/timestamp bootstrap whose top map was never seeded — that
+// fallback was deleted (2026-08-15 review ruling) as unreachable, untested
+// dead code once 'offset'/'timestamp' jumps became forward-anchored
+// bootstraps themselves (see `handleJump`'s 'offset'/'timestamp' cases and
+// `loadNewer`'s own comment); a future call site reintroducing a
+// back-anchored bootstrap would need to re-derive it from this context.
 type AnchorContext =
   | { kind: 'default' }
   | { kind: 'beginning' }
@@ -967,45 +966,6 @@ export function Timeline({
     bump()
   }
 
-  // loadNewer's forward-anchor fallback (task 3). ORIGINAL rationale (still
-  // correct as general reasoning, but its own PRECONDITION no longer arises
-  // from any jump as of the owner's 2026-08-15 ruling — see below): the
-  // store's top edge is only ever seeded from a page's OWN rows
-  // (same-direction continuation cursor, or — for an anchor bootstrap — the
-  // opposite-side row-offset seed; see createSlidingWindowStore's doc
-  // comment). A historical, BACK-anchored (offset/timestamp) bootstrap that
-  // happens to return ZERO rows for every partition (a heavily filtered
-  // jump landing on a gap, say) never seeds the top map at all, so
-  // `edges().top` reads null — not because the window is attached, but
-  // because nothing above it has ever been recorded. The only way to read
-  // "above" such a jump is to re-issue the EXACT SAME anchor with
-  // direction=forward (anchors are caller parameters, not part of the
-  // cursor — the anchor partition property guarantees back(anchor) and
-  // forward(anchor) split the topic disjointly and completely, so this is
-  // exact, not a guess).
-  //
-  // Owner ruling 2026-08-15: 'offset'/'timestamp' jumps (see `handleJump`)
-  // are now THEMSELVES forward-direction bootstraps, exactly like
-  // 'beginning' already was — so the same reasoning that always exempted
-  // 'beginning' here ("it's already forward-anchored — its own
-  // same-direction continuation cursor always advances via rule 1
-  // regardless of row count") now applies to them too, and this fallback's
-  // own precondition (a BACK-anchored offset/timestamp bootstrap) can no
-  // longer be produced by any call site in this file. Left in place —
-  // harmless and unreachable, not deleted — as defense-in-depth: `Anchor::
-  // Offset` with `direction=back` is still valid, documented backend
-  // behavior (see `backend/src/message/timeline.rs`), so a future call site
-  // that legitimately re-introduces a back-anchored offset/timestamp
-  // bootstrap here would immediately regain a working fallback rather than
-  // a silent dead end. 'default' still never needs this either (always
-  // attached, `edges().top` masked null for a different, correct reason).
-  const forwardAnchorFallback = (): TimelinePageParams | null => {
-    const ctx = anchorContextRef.current
-    if (ctx.kind === 'offset') return { direction: 'forward', limit: PAGE_LIMIT, anchor: 'offset', partition: ctx.partition, offset: ctx.offset }
-    if (ctx.kind === 'timestamp') return { direction: 'forward', limit: PAGE_LIMIT, anchor: 'timestamp', ts_ms: ctx.ts_ms }
-    return null
-  }
-
   // Scroll is the only pagination affordance (no load-older/load-newer
   // buttons). Task 3: both read the store's OWN minted edge cursor directly
   // — no drop-flag/reposition machinery needed anymore, since every trim
@@ -1019,15 +979,22 @@ export function Timeline({
     if (cursor === null) return
     runPage('back', withFilter({ direction: 'back', limit: PAGE_LIMIT, cursor }), { resetIteration: true, attach: false })
   }
+  // Ruling (2026-08-15 review): the forward-anchor fallback this used to
+  // fall back to (re-issuing a BACK-anchored offset/timestamp jump's own
+  // anchor with direction=forward, when the top map was never seeded) was
+  // deleted as unreachable, untested dead code — 'offset'/'timestamp' jumps
+  // are now THEMSELVES forward-anchored bootstraps (see `handleJump`),
+  // exactly like 'beginning' already was, so their top map is always
+  // authoritatively seeded from rule 1 the same way 'beginning`'s always
+  // was; a null `edges().top` here can now only mean "nothing more to load"
+  // (`state.exhausted.forward` covers that case above already). If a future
+  // call site ever reintroduces a back-anchored offset/timestamp bootstrap,
+  // the spec/followups record how to re-derive this fallback.
   const loadNewer = () => {
     if (state.exhausted.forward && !topTrimmedSinceRef.current) return
     const cursor = storeRef.current.edges().top
-    if (cursor !== null) {
-      runPage('forward', withFilter({ direction: 'forward', limit: PAGE_LIMIT, cursor }), { resetIteration: true, attach: false })
-      return
-    }
-    const fallback = forwardAnchorFallback()
-    if (fallback) runPage('forward', withFilter(fallback), { resetIteration: true, attach: false })
+    if (cursor === null) return
+    runPage('forward', withFilter({ direction: 'forward', limit: PAGE_LIMIT, cursor }), { resetIteration: true, attach: false })
   }
 
   // Wired directly onto MessageList's real scroll element (scroll events

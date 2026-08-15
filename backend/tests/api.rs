@@ -801,6 +801,72 @@ async fn timeline_offset_anchor_forward_aligns_all_partitions_at_the_targets_tim
     assert_eq!(*p0_offsets.iter().min().unwrap(), 10, "partition 0's target offset must be the oldest row for its own partition");
 }
 
+/// Review fix (M1+M2, 2026-08-15): a bad forward offset anchor (no message
+/// at the exact target) used to 400 BEFORE the SSE stream opened —
+/// `EventSource` discards a non-200 body wholesale, so the frontend showed
+/// generic "connection lost" instead of the real, honest reason. It must
+/// now arrive as an IN-STREAM `error` event instead: status 200, a real SSE
+/// response, whose terminal event is `error` (not `page_end`), carrying the
+/// same ApiError envelope (`code`/`message`/`cluster`/`retriable`) any
+/// mid-scan failure already uses. This case targets a genuine compaction-
+/// style hole: `produce_transactional` leaves a real, unaddressable control
+/// record at offset `count` (the commit marker) — anchoring exactly there
+/// has no message to resolve a timestamp from.
+#[tokio::test]
+async fn timeline_offset_anchor_forward_at_a_hole_reports_an_in_stream_error_not_a_400() {
+    let bootstrap = start_kafka().await;
+    create_topic(&bootstrap, "tl-offset-forward-hole-topic", 1).await;
+    produce_transactional(&bootstrap, "tl-offset-forward-hole-topic", 5).await;
+    let state = state_for(&bootstrap, vec![]);
+
+    // `collect_sse` itself asserts status 200 — a real SSE response, never
+    // a pre-stream error status (see its own doc comment/assertion).
+    let events = collect_sse(
+        app(state),
+        "/api/clusters/test/topics/tl-offset-forward-hole-topic/timeline?direction=forward&limit=100&anchor=offset&partition=0&offset=5",
+        20,
+    ).await;
+    assert!(events.iter().all(|(n, _)| n != "match"), "no message exists at the hole: {events:?}");
+    assert!(!events.iter().any(|(n, _)| n == "page_end"), "must end in error, not page_end: {events:?}");
+    let (_, err) = events.iter().find(|(n, _)| n == "error").expect("an in-stream error event: {events:?}").clone();
+    assert_eq!(err["code"], "bad_request", "{err}");
+    assert!(
+        err["message"].as_str().unwrap().contains("partition 0 offset 5"),
+        "message must honestly name the exact target: {err}",
+    );
+    assert_eq!(err["retriable"], false, "{err}");
+}
+
+/// Review fix (M1+M2, continued): the "unexercised past-watermark path" —
+/// an offset anchor pointing entirely past the topic's current tail (not a
+/// mid-topic hole). Confirms `fetch_one_record_blocking` doesn't quietly
+/// resolve to some OTHER real record via `auto.offset.reset` (not set
+/// anywhere in this codebase — its default only ever applies to
+/// subscribe()-based consumption, never to `assign()`'s explicit offsets,
+/// but this pins the behavior empirically rather than by inference): must
+/// report the SAME honest in-stream error, never a `match` for a record the
+/// user never asked for.
+#[tokio::test]
+async fn timeline_offset_anchor_forward_past_the_high_watermark_reports_an_in_stream_error_not_a_wrong_record() {
+    let bootstrap = start_kafka().await;
+    create_topic(&bootstrap, "tl-offset-forward-past-tail-topic", 1).await;
+    produce(&bootstrap, "tl-offset-forward-past-tail-topic", 5).await; // offsets 0..4, high watermark 5
+    let state = state_for(&bootstrap, vec![]);
+
+    let events = collect_sse(
+        app(state),
+        "/api/clusters/test/topics/tl-offset-forward-past-tail-topic/timeline?direction=forward&limit=100&anchor=offset&partition=0&offset=5000",
+        20,
+    ).await;
+    assert!(events.iter().all(|(n, _)| n != "match"), "no wrong record may be silently returned: {events:?}");
+    let (_, err) = events.iter().find(|(n, _)| n == "error").expect("an in-stream error event: {events:?}").clone();
+    assert_eq!(err["code"], "bad_request", "{err}");
+    assert!(
+        err["message"].as_str().unwrap().contains("partition 0 offset 5000"),
+        "message must honestly name the exact target: {err}",
+    );
+}
+
 /// Documents and locks down the cursor's wire-format contract (spec v1.6:
 /// "a documented, client-constructible format"): base64 of the compact JSON
 /// `{"direction":"back"|"forward","positions":[[partition,offset],...]}`.
