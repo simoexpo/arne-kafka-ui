@@ -313,6 +313,40 @@ describe('useTimelinePage', () => {
     expect(result.current.state.exhausted.forward).toBe(true)
   })
 
+  // Fix round 1 (review of 079f30f), L1: `onMatches` (via `flush()`) can
+  // synchronously start a NEW `loadPage` call, bumping the generation —
+  // this must ALSO be re-checked immediately before firing the ORIGINAL
+  // page's own `onPageEnd` callback (not just before the internal
+  // setState/flush calls that already happen earlier in this same
+  // handler), or a superseded generation's `onPageEnd` would still fire,
+  // handing a caller (e.g. Timeline.tsx's synchronous store commit) a
+  // cursor/direction pairing that's no longer current.
+  it("onPageEnd is NOT called for a generation superseded by a loadPage started synchronously from its own onMatches", () => {
+    const { result } = renderHook(() => useTimelinePage('prod', 'orders'))
+    const firstOnPageEnd = vi.fn()
+    act(() => {
+      result.current.loadPage(
+        { direction: 'back', limit: 100, anchor: 'latest' },
+        (msgs) => {
+          if (msgs.some((m) => m.offset === 1)) {
+            result.current.loadPage({ direction: 'forward', limit: 100, anchor: 'beginning' }, vi.fn())
+          }
+        },
+        firstOnPageEnd,
+      )
+    })
+    const firstEs = FakeEventSource.instances[0]
+    act(() => {
+      firstEs.emit('match', mk(1))
+      firstEs.emit('page_end', { cursor: 'c-first', exhausted: false })
+    })
+    // The nested loadPage (started inside onMatches, before this handler
+    // ever reaches its own onPageEnd call) already bumped the generation —
+    // the FIRST page's onPageEnd must never fire for it.
+    expect(firstOnPageEnd).not.toHaveBeenCalled()
+    expect(FakeEventSource.instances[1]).toBeDefined() // the nested loadPage did start
+  })
+
   it('reset() clears both cursors, exhausted flags, error, progress, loading, and closes any in-flight stream', () => {
     const { result } = renderHook(() => useTimelinePage('prod', 'orders'))
     act(() => {

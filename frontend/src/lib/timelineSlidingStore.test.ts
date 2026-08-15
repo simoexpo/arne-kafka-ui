@@ -450,7 +450,7 @@ describe('createSlidingWindowStore — row-exact trims and edge-map exactness', 
     expect(decodeCursor(s.edges().bottom!)).toEqual({ 0: 1 })
 
     const outcome = s.insertLive([mk(0, 4, 400), mk(0, 5, 500)])
-    expect(outcome).toEqual({ trimmedTop: 0, trimmedBottom: 2 })
+    expect(outcome).toEqual({ trimmedTop: 0, trimmedBottom: 2, attached: true, rejectedStale: false })
     expect(s.rows().map((m) => m.offset)).toEqual([5, 4, 3])
     // Trimmed offsets {1,2}: bottom map must advance to max(trimmed)+1 = 3,
     // recovering exactly those two rows on a back-follow, no more no less.
@@ -468,7 +468,7 @@ describe('createSlidingWindowStore — row-exact trims and edge-map exactness', 
     expect(decodeCursor(s.edges().bottom!)).toEqual({ 0: 3 })
 
     const outcome = s.insertPage([mk(0, 2, 200), mk(0, 1, 100)], 'back', { 0: 3 }, encodeCursor({ 0: 0 }))
-    expect(outcome).toEqual({ trimmedTop: 2, trimmedBottom: 0 })
+    expect(outcome).toEqual({ trimmedTop: 2, trimmedBottom: 0, attached: false, rejectedStale: false })
     expect(s.rows().map((m) => m.offset)).toEqual([3, 2, 1])
     // Trimmed offsets {5,4}: top map must advance to min(trimmed) = 4,
     // recovering exactly those two rows on a forward-follow.
@@ -490,7 +490,7 @@ describe('createSlidingWindowStore — row-exact trims and edge-map exactness', 
     // Insert two older partition-0 rows: cap forces exactly 2 top trims (the
     // newest 2 rows overall: partition 1's offsets 9 and 8).
     const outcome = s.insertPage([mk(0, 7, 480), mk(0, 6, 470)], 'back', { 0: 8, 1: 8 }, encodeCursor({ 0: 6, 1: 8 }))
-    expect(outcome).toEqual({ trimmedTop: 2, trimmedBottom: 0 })
+    expect(outcome).toEqual({ trimmedTop: 2, trimmedBottom: 0, attached: false, rejectedStale: false })
     expect(s.rows().map((m) => `${m.partition}:${m.offset}`)).toEqual(['0:9', '0:8', '0:7', '0:6'])
     // Partition 1 is fully absent from the window now, but its edge must
     // survive with the exact recovering value (partition 0's own edge entry,
@@ -746,5 +746,276 @@ describe('createSlidingWindowStore — mutation-verified load-bearing paths (N1)
     // Mutation check: deleting the backfill loop in `enforceCap` turns this
     // `toBe(21)` into `toBe(undefined)` failing red; restoring it goes green.
     expect(decodeCursor(s.edges().top!)[1]).toBe(21)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Fix round 1 (review of 079f30f) — C1: the store's real `attached` state
+// was never directly observable. `edges().top === null` is NOT a safe
+// proxy for it — it's ALSO null whenever `topMap` is simply empty (a
+// zero-row anchor page, legal per the empty-page contract), which has
+// nothing to do with attachment. Callers that gated on that (Timeline.tsx)
+// could therefore treat a genuinely-detached, historical window as
+// attached, and go on to call `insertLive` on it — hitting the throw.
+// Exposed two ways per the review: a real `isAttached()` getter, and an
+// `attached` field on every `InsertOutcome` (so a caller reacting to a
+// JUST-LANDED page's own outcome doesn't need a second store call).
+// ---------------------------------------------------------------------------
+describe('createSlidingWindowStore — isAttached() and InsertOutcome.attached (C1, fix round 1)', () => {
+  it('a zero-row historical (attach:false) anchor bootstrap is NOT attached, even though edges().top also reads null — for an unrelated reason (an empty topMap, not attachment)', () => {
+    const s = createSlidingWindowStore(10)
+    // Empty-page contract: an anchor page can legitimately deliver ZERO
+    // rows (nothing in this window) with a non-null, not-exhausted cursor.
+    const outcome = s.insertPage([], 'back', null, encodeCursor({ 0: 8 }), { attach: false })
+    expect(s.edges().top).toBeNull() // masked by an EMPTY topMap (no rows ever seeded it)
+    expect(s.isAttached()).toBe(false) // the actual truth: this bootstrap never claimed to attach
+    expect(outcome.attached).toBe(false)
+  })
+
+  it('a Latest-style (attach:true) bootstrap IS attached, reflected identically by isAttached() and the outcome', () => {
+    const s = createSlidingWindowStore(10)
+    const outcome = s.insertPage([mk(0, 9, 900)], 'back', null, encodeCursor({ 0: 8 }), { attach: true })
+    expect(s.isAttached()).toBe(true)
+    expect(outcome.attached).toBe(true)
+  })
+
+  it('isAttached() flips false the instant a top trim detaches, matching the outcome from that same call', () => {
+    const s = createSlidingWindowStore(2)
+    s.insertPage([mk(0, 9, 900), mk(0, 8, 800)], 'back', null, encodeCursor({ 0: 8 }), { attach: true })
+    expect(s.isAttached()).toBe(true)
+    const outcome = s.insertPage([mk(0, 7, 700)], 'back', { 0: 8 }, encodeCursor({ 0: 7 })) // trims top -> detach
+    expect(outcome.trimmedTop).toBeGreaterThan(0)
+    expect(s.isAttached()).toBe(false)
+    expect(outcome.attached).toBe(false)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Fix round 1 — C2: an anchor bootstrap's opposite-side seed only ever
+// touches partitions that returned ≥1 row THIS PAGE (see the class doc
+// comment's "one gap" section) — a partition contributing zero rows to a
+// multi-partition anchor page (a real, unremarkable scenario, not just an
+// adversarial one) is silently OMITTED from that seed. Left unaddressed,
+// `edges().top` would mint a cursor missing that partition's key entirely —
+// worse than null, since a partial cursor doesn't trigger any recovery path
+// (Timeline's forward-anchor fallback only ever fires on a NULL top edge):
+// the backend would never be asked about that partition again, a permanent,
+// silent gap.
+//
+// Fix: `edges().top` treats the map as complete only when every partition
+// `bottomMap` currently knows about ALSO has a `topMap` entry. `bottomMap`
+// is the reliable "full partition list" reference specifically because,
+// right after a back-direction request (anchor OR continuation), rule 1
+// populates it authoritatively from the backend's own `cur_positions` —
+// which (per the design doc) already covers every partition the request
+// touched, including zero-row ones; an ANCHOR request's `cur_positions`
+// touches every partition of the topic, not just the ones with rows this
+// page. `topMap`'s own row-derived seed has no equivalent guarantee, which
+// is exactly the asymmetry this check exists to catch.
+//
+// This is deliberately a COMPUTED check (topMap keys ⊇ bottomMap keys) at
+// `edges()` call time, not a separately maintained/reset boolean flag: it
+// requires no extra state to keep correct across `clear()`, and it's
+// PRECISE rather than pessimistic — a single-partition topic (or any anchor
+// page that happens to cover every partition, e.g. this store's own
+// property walk below) is correctly read as complete immediately, while a
+// genuinely-incomplete multi-partition case is still caught. Every other
+// map-update rule (same-direction rule 1, the live-insert ceiling, the trim
+// backfill) is already proven complete over its own relevant partition set
+// (see their own doc comments) — the anchor opposite-seed is the ONLY event
+// that can ever create this specific discrepancy, so comparing against
+// `bottomMap` catches exactly (and only) that.
+//
+// NOTE (documented, not fixed this round — flagged in the task report): the
+// SYMMETRIC gap exists for `bottomMap` after a FORWARD anchor bootstrap
+// (`beginning`) whose opposite-side (bottom) row-seed also only covers
+// partitions with ≥1 row. Out of scope for this review round (which asked
+// for `topMap`/`edges().top` specifically); `edges().bottom` does not yet
+// get an equivalent completeness check.
+// ---------------------------------------------------------------------------
+describe('createSlidingWindowStore — edges().top completeness (C2, fix round 1)', () => {
+  it('a multi-partition anchor bootstrap where one partition contributes zero rows leaves edges().top null — not a partial cursor that would silently omit it', () => {
+    const s = createSlidingWindowStore(10)
+    // Anchor page: the response's cur_positions (rule 1, authoritative)
+    // covers BOTH partitions 0 and 1 — an anchor request always touches
+    // every partition of the topic — but only partition 0 returned a row
+    // this page; partition 1 genuinely had none in this window.
+    s.insertPage([mk(0, 9, 900)], 'back', null, encodeCursor({ 0: 8, 1: 5 }), { attach: false })
+    // bottomMap (rule 1) now knows about {0, 1}; topMap (opposite-seed) was
+    // only ever seeded for partition 0 — INCOMPLETE.
+    expect(decodeCursor(s.edges().bottom!)).toEqual({ 0: 8, 1: 5 })
+    expect(s.edges().top).toBeNull()
+  })
+
+  it('a single-partition (or every-partition-returned-a-row) anchor bootstrap is immediately complete — edges().top is a real cursor, not null', () => {
+    const s = createSlidingWindowStore(10)
+    s.insertPage([mk(0, 9, 900)], 'back', null, encodeCursor({ 0: 8 }), { attach: false })
+    // bottomMap and topMap both only ever know about partition 0 here —
+    // trivially complete (topMap keys ⊇ bottomMap keys).
+    expect(s.edges().top).not.toBeNull()
+    expect(decodeCursor(s.edges().top!)).toEqual({ 0: 10 })
+  })
+
+  it('completeness is restored once a real forward page (anchor or continuation) reports a partition topMap was missing', () => {
+    const s = createSlidingWindowStore(10)
+    s.insertPage([mk(0, 9, 900)], 'back', null, encodeCursor({ 0: 8, 1: 5 }), { attach: false })
+    expect(s.edges().top).toBeNull() // incomplete (partition 1 missing from topMap)
+
+    // A forward page's own rule-1 contCursor covers every partition ITS
+    // OWN request touched — here, both, closing the gap.
+    s.insertPage([mk(0, 9, 900), mk(1, 5, 500)], 'forward', { 0: 9, 1: 5 }, encodeCursor({ 0: 10, 1: 6 }))
+    expect(s.edges().top).not.toBeNull()
+    expect(decodeCursor(s.edges().top!)).toEqual({ 0: 10, 1: 6 })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Fix round 1 — C3: an in-flight page's response can no longer be trusted
+// to safely narrow its own same-direction edge map once a CONCURRENT event
+// (a live insert's trim, in the reviewer's own probe) has already advanced
+// that map PAST what the page assumed when it was issued. Naively merging
+// it anyway (the old `Math.min`/`Math.max` row-derived tightening, keyed
+// only off the page's OWN rows) silently regresses the map back to a
+// position that skips over the very range the concurrent trim just made
+// newly-recoverable — an interior hole at exactly the seam the trim was
+// supposed to keep whole.
+//
+// Fix: `insertPage` compares its own `startPositions` against the CURRENT
+// same-side map, per partition, before touching anything else. For a
+// `back` page, `startPositions[p]` must equal (or be numerically at-or-
+// below) the current `bottomMap[p]` — if the current value is strictly
+// GREATER (the map has advanced past what this page assumed, meaning a
+// trim recovered that range in the interim), the page is REJECTED
+// wholesale: no rows inserted, no map mutated, `{ rejectedStale: true }`
+// returned. The caller re-issues from the store's own fresh edge instead —
+// one wasted round trip in a rare race, correctness by construction.
+// Symmetric for `forward`/`topMap` (current value strictly LOWER than
+// assumed = stale).
+// ---------------------------------------------------------------------------
+describe('createSlidingWindowStore — stale in-flight page rejection (C3, fix round 1)', () => {
+  it("the reviewer's exact probe: a live trim recovers an evicted offset while an older back-page is in flight — landing that page must not regress the bottom map past the recovered range (no interior hole)", () => {
+    const s = createSlidingWindowStore(4)
+    // Window [12,11,10,9], bottom={0:9} (mount, Latest-style).
+    s.insertPage(
+      [mk(0, 12, 1200), mk(0, 11, 1100), mk(0, 10, 1000), mk(0, 9, 900)],
+      'back',
+      null,
+      encodeCursor({ 0: 9 }),
+      { attach: true },
+    )
+    expect(decodeCursor(s.edges().bottom!)).toEqual({ 0: 9 })
+
+    // An in-flight back-page is issued FROM bottom={0:9} (captured now, but
+    // its response won't land until later, below).
+    const inFlightStart = { 0: 9 }
+
+    // Meanwhile: live 13 arrives, growing the top past cap(4) and trimming
+    // the oldest (9) off the bottom — bottom map advances to {0:10},
+    // recovering exactly offset 9 on a future back-read.
+    const liveOutcome = s.insertLive([mk(0, 13, 1300)])
+    expect(liveOutcome.trimmedBottom).toBe(1)
+    expect(decodeCursor(s.edges().bottom!)).toEqual({ 0: 10 })
+
+    // NOW the stale in-flight page lands: rows [8,7], contCursor {0:7}.
+    // Its own startPositions (9) is BELOW the current bottom boundary (10)
+    // — a trim recovered [9,10) in the interim — so this page must be
+    // rejected wholesale, not merged.
+    const outcome = s.insertPage([mk(0, 8, 800), mk(0, 7, 700)], 'back', inFlightStart, encodeCursor({ 0: 7 }))
+    expect(outcome.rejectedStale).toBe(true)
+    expect(outcome.trimmedTop).toBe(0)
+    expect(outcome.trimmedBottom).toBe(0)
+    // Nothing from the rejected page was inserted.
+    expect(s.rows().some((r) => r.offset === 8)).toBe(false)
+    expect(s.rows().some((r) => r.offset === 7)).toBe(false)
+    // The bottom map is UNCHANGED by the rejected page — still exactly
+    // where the trim left it, so offset 9 remains reachable (no interior
+    // hole): a fresh back-read from {0:10} would recover it.
+    expect(decodeCursor(s.edges().bottom!)).toEqual({ 0: 10 })
+
+    // The caller re-issues from the FRESH edge and it works normally.
+    const retryOutcome = s.insertPage([mk(0, 9, 900)], 'back', { 0: 10 }, encodeCursor({ 0: 9 }))
+    expect(retryOutcome.rejectedStale).toBe(false)
+    expect(s.rows().some((r) => r.offset === 9)).toBe(true) // recovered, no gap
+  })
+
+  it('a page whose startPositions exactly matches the current map (nothing moved in between) is accepted normally', () => {
+    const s = createSlidingWindowStore(10)
+    s.insertPage([mk(0, 9, 900)], 'back', null, encodeCursor({ 0: 8 }), { attach: true })
+    const outcome = s.insertPage([mk(0, 7, 700)], 'back', { 0: 8 }, encodeCursor({ 0: 7 }))
+    expect(outcome.rejectedStale).toBe(false)
+    expect(s.rows().some((r) => r.offset === 7)).toBe(true)
+  })
+
+  it('symmetric: a forward page started from a topMap position a subsequent back trim has since moved past (recovering more below it) is rejected too', () => {
+    const s = createSlidingWindowStore(2)
+    // Mount at cap: [9,8], bottom={0:8}, top={0:10} (opposite-seed).
+    s.insertPage([mk(0, 9, 900), mk(0, 8, 800)], 'back', null, encodeCursor({ 0: 8 }), { attach: true })
+    // Overflow trims top(9) -> detach, top map recovers to exactly 9.
+    const detachOutcome = s.insertPage([mk(0, 7, 700)], 'back', { 0: 8 }, encodeCursor({ 0: 7 }))
+    expect(detachOutcome.trimmedTop).toBe(1)
+    expect(decodeCursor(s.edges().top!)).toEqual({ 0: 9 })
+
+    // An in-flight forward page is issued FROM top={0:9} (captured now).
+    const inFlightStart = { 0: 9 }
+
+    // Meanwhile another back-page overflow trims the top AGAIN (evicting
+    // 8) — top map advances FURTHER DOWN to 8, recovering MORE than the
+    // in-flight forward page (which only knows to read from 9 upward) was
+    // ever told about.
+    s.insertPage([mk(0, 6, 600)], 'back', { 0: 7 }, encodeCursor({ 0: 6 }))
+    expect(decodeCursor(s.edges().top!)).toEqual({ 0: 8 })
+
+    // The stale in-flight page lands: its own startPositions (9) sits
+    // ABOVE the current top boundary (8) — the interim trim recovered
+    // [8,9) that this page never asked about — so it must be rejected.
+    const outcome = s.insertPage([mk(0, 9, 900), mk(0, 10, 1000)], 'forward', inFlightStart, encodeCursor({ 0: 11 }))
+    expect(outcome.rejectedStale).toBe(true)
+    expect(s.rows().some((r) => r.offset === 10)).toBe(false)
+    // Top map unchanged by the rejected page — still exactly where the
+    // trim left it.
+    expect(decodeCursor(s.edges().top!)).toEqual({ 0: 8 })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Fix round 1 — M2: matches must stream during a scan (product charter),
+// not wait for the page's one atomic `insertPage` commit at page-end.
+// `previewWithOverlay` merges extra (not-yet-committed) rows in for DISPLAY
+// only — no mutation of `partitions`/`seen`/the edge maps/the cap.
+// ---------------------------------------------------------------------------
+describe('createSlidingWindowStore — previewWithOverlay (M2, fix round 1)', () => {
+  it('merges extra rows into the display view without mutating anything committed', () => {
+    const s = createSlidingWindowStore(10)
+    s.insertPage([mk(0, 5, 500)], 'back', null, encodeCursor({ 0: 5 }), { attach: true })
+    const preview = s.previewWithOverlay([mk(0, 6, 600)])
+    expect(preview.map((m) => m.offset)).toEqual([6, 5])
+    // Nothing committed: the real rows()/edges() are untouched.
+    expect(s.rows().map((m) => m.offset)).toEqual([5])
+    expect(decodeCursor(s.edges().bottom!)).toEqual({ 0: 5 })
+    expect(s.totalCount()).toBe(1)
+  })
+
+  it('excludes rows already committed (already `seen`) from the overlay — no visible duplicate', () => {
+    const s = createSlidingWindowStore(10)
+    s.insertPage([mk(0, 5, 500)], 'back', null, encodeCursor({ 0: 5 }), { attach: true })
+    const preview = s.previewWithOverlay([mk(0, 5, 500), mk(0, 6, 600)])
+    expect(preview.map((m) => m.offset)).toEqual([6, 5]) // offset 5 not duplicated
+  })
+
+  it('an empty overlay is just the current committed rows', () => {
+    const s = createSlidingWindowStore(10)
+    s.insertPage([mk(0, 5, 500)], 'back', null, encodeCursor({ 0: 5 }), { attach: true })
+    expect(s.previewWithOverlay([])).toEqual(s.rows())
+  })
+
+  it('two consecutive previews with disjoint extra rows are each computed fresh (no leakage between calls)', () => {
+    const s = createSlidingWindowStore(10)
+    s.insertPage([mk(0, 5, 500)], 'back', null, encodeCursor({ 0: 5 }), { attach: true })
+    const preview1 = s.previewWithOverlay([mk(0, 6, 600)])
+    expect(preview1.map((m) => m.offset)).toEqual([6, 5])
+    const preview2 = s.previewWithOverlay([mk(0, 7, 700)])
+    // preview2 does NOT include offset 6 (from the FIRST preview call,
+    // never committed) — each call is a fresh, independent overlay.
+    expect(preview2.map((m) => m.offset)).toEqual([7, 5])
   })
 })

@@ -198,6 +198,82 @@ describe('Timeline filter box', () => {
     expect(FakeEventSource.instances).toHaveLength(countAfterCancel)
   })
 
+  // Fix round 1 (review of 079f30f), M2: matches must STREAM during a scan
+  // (product charter: "stream results"), not wait for the page's single
+  // atomic store commit at page_end. Rendered via a DISPLAY-ONLY overlay
+  // (the in-flight page's own accumulated matches merged over the
+  // committed `rows()`, recomputed fresh each render) — the store's own
+  // edge maps still only ever advance once, atomically, at page_end (see
+  // `insertPage`'s own contract for why: an anchor bootstrap's opposite-
+  // side seed needs the FULL page's rows, not a per-batch trickle).
+  it('matches render progressively DURING a filtered scan, before page_end — not held back for the one atomic store commit', async () => {
+    mockTail()
+    await mountAndSettleInitial()
+
+    typeFilter('value:needle')
+    await settle()
+    const idx = FakeEventSource.instances.length - 1
+    // useTimelinePage batches matches in groups of 25 (BATCH_SIZE) — a
+    // flush fires mid-scan the instant that threshold is crossed,
+    // independent of page_end (see its own doc comment). 25 matches here
+    // flush automatically, well before page_end fires below.
+    for (let i = 0; i < 25; i++) {
+      await emit(idx, 'match', mk(100 + i))
+    }
+    // Still mid-scan — no page_end has fired yet — but the whole batch is
+    // already visible via the display overlay, not held back for one
+    // atomic store commit at the end. (Row count via the header, not
+    // individual row text: the virtualized list only renders rows near the
+    // top of a 25+-row window, so the newest (p0·124, always index 0) is a
+    // safe row-level check, but the OLDEST wouldn't be — see the message
+    // count instead for the full-batch claim.)
+    expect(screen.getByText('25 messages')).toBeInTheDocument()
+    expect(screen.getByText('p0·124')).toBeInTheDocument()
+
+    await emit(idx, 'match', mk(125))
+    await emit(idx, 'page_end', { cursor: null, exhausted: true })
+    expect(screen.getByText('26 messages')).toBeInTheDocument()
+    expect(screen.getByText('p0·125')).toBeInTheDocument()
+  })
+
+  // M2 (continued): cancelling drops the overlay (honest — nothing was
+  // ever committed) and leaves the store's own edge maps genuinely
+  // untouched, not just visually hidden — proven here by a SECOND,
+  // uncancelled scan afterward landing with exactly its own matches, no
+  // contamination from the first scan's dropped, never-committed rows.
+  it('cancelling a filtered scan mid-flight drops the overlay, and the store is left untouched by it (a later completed scan is not contaminated)', async () => {
+    mockTail()
+    await mountAndSettleInitial()
+
+    typeFilter('value:needle')
+    await settle()
+    const idx = FakeEventSource.instances.length - 1
+    // Cross the BATCH_SIZE threshold so the overlay is genuinely populated
+    // (mid-scan, pre-page_end) before cancelling.
+    for (let i = 0; i < 25; i++) {
+      await emit(idx, 'match', mk(100 + i))
+    }
+    expect(screen.getByText('25 messages')).toBeInTheDocument()
+
+    fireEvent.click(screen.getByTestId('cancel-scan'))
+    expect(screen.queryByText('25 messages')).not.toBeInTheDocument() // uncommitted, dropped with the overlay
+    expect(screen.getByText('0 messages')).toBeInTheDocument()
+
+    // A fresh scan (re-typing the filter re-triggers a settle) lands for
+    // real this time — its own match, and ONLY its own match, is what ends
+    // up committed. If the cancelled scan's p0·100 had somehow leaked into
+    // the store, it would still be here even though a different row
+    // (p0·7) is all this second scan ever delivered.
+    typeFilter('value:needle2')
+    await settle()
+    const idx2 = FakeEventSource.instances.length - 1
+    await emit(idx2, 'match', mk(7, { value: { encoding: 'utf8', text: 'needle2-7', schema_id: null, error: null } }))
+    await emit(idx2, 'page_end', { cursor: null, exhausted: true })
+    expect(screen.getByText('p0·7')).toBeInTheDocument()
+    expect(screen.queryByText('p0·100')).not.toBeInTheDocument()
+    expect(screen.getByText('1 messages')).toBeInTheDocument()
+  })
+
   it('editing the filter mid-scan cancels the in-flight page', async () => {
     mockTail()
     await mountAndSettleInitial()

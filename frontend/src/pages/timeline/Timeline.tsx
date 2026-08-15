@@ -167,18 +167,36 @@ export function Timeline({
   const scrollWasLoadingRef = useRef(false)
 
   // Scroll anchoring (design spec v1.3 "Scroll anchoring", owner feedback
-  // 2026-08-15): a forward page's matches rank newer, so they land near the
-  // top of the newest-first merge — i.e. they prepend above whatever the
-  // reader was looking at. Left alone, scrollTop stays numerically
-  // unchanged after the prepend, which silently relocates the reader to
-  // the top of the NEWLY loaded page instead of keeping them at the
-  // junction they were reading. runPage's onMatches captures pre-insert
-  // metrics here (see below) for EVERY forward insert — the top sentinel
-  // fires precisely at the top, so there is no "pinned means show me the
-  // new" case for forward pages (that logic belongs to 'live' inserts,
-  // which never pass through here). Not used for 'back' (appends below,
-  // doesn't move the viewport).
-  const pendingAnchorRef = useRef<{ top: number; height: number } | null>(null)
+  // 2026-08-15; ROW-IDENTITY rewrite, fix round 1, M1 — review of 079f30f):
+  // a forward page's matches rank newer, so they land near the top of the
+  // newest-first merge — i.e. they prepend above whatever the reader was
+  // looking at. Left alone, scrollTop stays numerically unchanged after the
+  // prepend, which silently relocates the reader to the top of the NEWLY
+  // loaded page instead of keeping them at the junction they were reading.
+  //
+  // The FIRST version of this fix (task 3) captured total scrollHeight
+  // before/after and adjusted by "added − removed". That's wrong the
+  // instant an insert ALSO trims rows BELOW the viewport in the same
+  // commit (routine at a small cap: recovering rows via a forward page can
+  // simultaneously overflow-trim the bottom) — the trim shrinks the total
+  // height without moving anything the reader can see above them, so
+  // "added − removed" can cancel toward ~0: exactly the forbidden
+  // relocation this mechanism exists to prevent.
+  //
+  // Fixed by anchoring to a SPECIFIC row's IDENTITY instead of a total
+  // delta: captured synchronously in runPage's `onPageEnd` callback (see
+  // below), right before `insertPage` commits — the "junction" row is
+  // whatever is CURRENTLY at the top of the merged list (`rows()[0]`),
+  // since a forward insert can only ever prepend ABOVE it, never move it
+  // out from under itself (a top trim is impossible on a forward-direction
+  // insert — see `enforceCap`: only `back`-direction overflow ever trims
+  // the top). Consumed by the layout effect below, which finds that SAME
+  // row's NEW index after the commit and adjusts scrollTop by the
+  // difference in `MessageList#rowOffsetAt` — robust to a simultaneous
+  // trim (which only ever happens BELOW this row) and to estimate-vs-
+  // measured drift (both reads go through the same virtualizer API). Not
+  // used for 'back' (appends below, doesn't move the viewport).
+  const pendingAnchorRef = useRef<{ partition: number; offset: number; priorTop: number } | null>(null)
 
   const [live, setLive] = useState(true)
   const [tailErrorText, setTailErrorText] = useState<string | null>(null)
@@ -281,6 +299,19 @@ export function Timeline({
     bufferOverflowRef.current = false
   }, [noteOutcome])
 
+  // Resends the currently active filter's server-side params (a no-op when
+  // unfiltered) onto any page request — see activeFilterApiRef. Moved above
+  // `runPage` (fix round 1, C3): `runPage`'s own `onPageEnd` callback now
+  // needs it directly, to re-issue a rejected-stale page with the filter
+  // still attached — and a `useCallback`'s dependency array is evaluated
+  // immediately, so it can only ever list something already declared by
+  // this point in the render.
+  const withFilter = useCallback((params: TimelinePageParams): TimelinePageParams => {
+    const api = activeFilterApiRef.current
+    if (!api) return params
+    return { ...params, filter: api.filter, q: api.q, ...(api.path !== undefined ? { path: api.path } : {}) }
+  }, [])
+
   const runPage = useCallback(
     (
       direction: Direction,
@@ -321,31 +352,21 @@ export function Timeline({
           matchedRef.current = true
           pageMatchesRef.current += msgs.length
           pageRowsRef.current.push(...msgs)
-          // Scroll anchoring: capture "before" metrics for a forward-origin
-          // prepend, but only when the reader isn't pinned to the very top
-          // right now — see pendingAnchorRef's comment. A page's matches can
-          // flush in several batches (useTimelinePage's BATCH_SIZE), so this
-          // runs per flush; the layout effect below consumes and clears it
-          // after each one.
-          // Capture unconditionally for forward inserts: the top sentinel
-          // fires precisely when the reader is at/near the top, so a
-          // "skip when pinned to top" exclusion (first attempt, owner-bounced)
-          // skipped the exact case anchoring exists for. Live inserts are
-          // direction 'live' and never pass here — the attached pinned-top
-          // prepend behavior is untouched.
-          if (direction === 'forward') {
-            const metrics = listRef.current?.scrollMetrics() ?? null
-            if (metrics) {
-              pendingAnchorRef.current = metrics
-            }
-          }
-          // No store insert here (task 3, unlike the old per-batch
+          // No store COMMIT here (task 3, unlike the old per-batch
           // `store.insert` calls): a page's rows are committed to the store
           // ATOMICALLY, once, by `onPageEnd` below via `insertPage` — the
           // store's own contract takes the full page's rows plus a single
           // start/continuation cursor pair, not a per-batch trickle (an
           // anchor bootstrap's opposite-side seed in particular needs every
           // row this page ever delivers, not just one batch's worth).
+          //
+          // Fix round 1, M2: matches must still STREAM to the reader as
+          // they arrive (product charter: "stream results"), even though
+          // the store commit itself waits for page-end — `bump()` here
+          // re-renders with `pageRowsRef.current` now longer, and the
+          // render-time `rows` below merges it over the committed store
+          // via `previewWithOverlay` (display-only, no store mutation).
+          bump()
         },
         // Fires SYNCHRONOUSLY with `page_end` (see useTimelinePage's own doc
         // comment on why: a render-later commit, via a `useEffect` keyed on
@@ -360,9 +381,46 @@ export function Timeline({
         (cursor) => {
           const rows = pageRowsRef.current
           pageRowsRef.current = []
+          // Scroll anchoring (see pendingAnchorRef's own comment): capture
+          // the CURRENT top-of-list row's identity + rendered offset right
+          // before this page's commit — a forward insert can only ever
+          // prepend above it (never trim it out from under itself; see
+          // enforceCap). Captured unconditionally for every forward page,
+          // not just while the reader is pinned to the top: the top
+          // sentinel fires precisely when pinned there, so there is no
+          // "pinned means show me the new" case for forward pages (that
+          // logic belongs to 'live' inserts, which never reach this
+          // callback at all).
+          const beforeRows = direction === 'forward' ? storeRef.current.rows() : null
+          const junction =
+            beforeRows && beforeRows.length > 0
+              ? { partition: beforeRows[0].partition, offset: beforeRows[0].offset, priorTop: listRef.current?.rowOffsetAt(0) ?? null }
+              : null
           const outcome = storeRef.current.insertPage(rows, direction, pendingStartPositionsRef.current, cursor, {
             attach: pendingAttachRef.current,
           })
+          // Fix round 1, C3: a CONCURRENT trim (typically a live insert)
+          // can advance the same-side edge map PAST what this now-landing
+          // page assumed when it was issued — the store detects this and
+          // rejects the page wholesale (see its own doc comment) rather
+          // than risk an interior hole. Nothing here landed: don't touch
+          // detach/reattach or the trimmed-since staleness tracking (an
+          // ACCEPTED page is what re-earns those, never a rejected one) —
+          // just re-issue the same logical request from the store's own
+          // fresh edge. One wasted round trip in a rare race; if the store
+          // has no fresh edge to offer either (a genuine, if unlikely,
+          // corner), this simply does nothing and a later user gesture
+          // (scroll) will retry on its own.
+          if (outcome.rejectedStale) {
+            const freshCursor = storeRef.current.edges()[direction === 'back' ? 'bottom' : 'top']
+            if (freshCursor !== null) {
+              runPage(direction, withFilter({ direction, limit: PAGE_LIMIT, cursor: freshCursor }), {
+                resetIteration: false,
+                attach: false,
+              })
+            }
+            return
+          }
           noteOutcome(outcome)
           // "Just became store-attached" catch-up: covers BOTH a detached
           // window's forward page catching the tail (v1.3's reattach) AND
@@ -370,10 +428,27 @@ export function Timeline({
           // landed — see `attached`'s own comment above for why UI-attached
           // is only ever flipped true here, in direct response to the
           // store's OWN confirmed attachment, never ahead of it.
-          if (!attachedRef.current && storeRef.current.edges().top === null) {
+          //
+          // Fix round 1, C1: gates on `outcome.attached` (the store's REAL
+          // attachment truth), never on `edges().top === null` — that reads
+          // null for a SECOND, unrelated reason too (an empty or otherwise
+          // incomplete top map, e.g. a zero-row anchor page under the
+          // empty-page contract), which would otherwise make the UI believe
+          // a genuinely-detached historical window was attached, and go on
+          // to call `insertLive` on it — throwing (see the store's own
+          // precondition doc comment).
+          if (!attachedRef.current && outcome.attached) {
             setAttached(true)
             flushBuffer()
             pauseReasonRef.current = pauseReasonRef.current === 'explicit' ? 'explicit' : 'none'
+          }
+          // The page committed for real (not rejected-stale, reached only
+          // via the early return above) — hand the captured junction to
+          // the consuming layout effect, but only if it actually found a
+          // rendered offset (null if the list wasn't mounted yet, e.g. mid-
+          // jump while Panel shows a loading skeleton).
+          if (junction && junction.priorTop !== null) {
+            pendingAnchorRef.current = { partition: junction.partition, offset: junction.offset, priorTop: junction.priorTop }
           }
           bump()
           // Direction-based staleness refresh (see bottomTrimmedSinceRef/
@@ -387,16 +462,8 @@ export function Timeline({
         },
       )
     },
-    [loadPage, noteOutcome, flushBuffer, setAttached],
+    [loadPage, noteOutcome, flushBuffer, setAttached, withFilter],
   )
-
-  // Resends the currently active filter's server-side params (a no-op when
-  // unfiltered) onto any page request — see activeFilterApiRef.
-  const withFilter = useCallback((params: TimelinePageParams): TimelinePageParams => {
-    const api = activeFilterApiRef.current
-    if (!api) return params
-    return { ...params, filter: api.filter, q: api.q, ...(api.path !== undefined ? { path: api.path } : {}) }
-  }, [])
 
   // The anchor a fresh (non-cursor) page request starts from, given the
   // current anchor context — see anchorContextRef. Deliberately simple:
@@ -498,7 +565,18 @@ export function Timeline({
     const direction = pendingDirectionRef.current
     if (direction === null) return
     pendingDirectionRef.current = null
-    if (state.error) return // Nothing landed: onPageEnd never ran, nothing to continue.
+    if (state.error) {
+      // Fix round 1, M2: the page errored — nothing landed, `onPageEnd`
+      // never ran, and whatever it had accumulated so far was never
+      // committed. Drop the display overlay too (honest: the store's own
+      // edges never advanced for this page, so leaving its uncommitted
+      // matches on screen would misrepresent what's actually loaded).
+      if (pageRowsRef.current.length > 0) {
+        pageRowsRef.current = []
+        bump()
+      }
+      return
+    }
 
     if (state.exhausted[direction]) return
     gestureScannedRef.current += state.progress?.scanned ?? 0
@@ -547,21 +625,25 @@ export function Timeline({
     listRef.current?.scrollToEdge(edge)
   }, [state.loading])
 
-  // Scroll anchoring: consumes whatever runPage's onMatches just captured
-  // (see pendingAnchorRef) after the corresponding rows have rendered, and
-  // nudges scrollTop by the height delta so the viewport stays at the
-  // junction instead of drifting with the newly prepended content. No
-  // dependency array — a forward page's matches can flush in several
-  // batches, each its own bump()/render/capture, and this must run after
-  // every one of them; the ref-guard (cleared immediately) makes every
-  // other render a no-op.
+  // Scroll anchoring (row-identity rewrite, fix round 1, M1): consumes
+  // whatever the synchronous `onPageEnd` callback just captured (see
+  // pendingAnchorRef's own comment) after the corresponding rows have
+  // rendered, finds the SAME junction row's NEW index in the just-
+  // committed `rows`, and nudges scrollTop by the difference between its
+  // rendered offset now and before — robust to a trim that ALSO happened
+  // below it in the same commit (unlike a total-height delta, which that
+  // trim would corrupt). No dependency array — deliberately runs after
+  // every render (the ref-guard, cleared immediately, makes any render
+  // without a pending anchor a no-op).
   useLayoutEffect(() => {
     const anchor = pendingAnchorRef.current
     if (!anchor) return
     pendingAnchorRef.current = null
-    const metrics = listRef.current?.scrollMetrics()
-    if (!metrics) return
-    listRef.current?.adjustScrollTop(metrics.height - anchor.height)
+    const newIndex = storeRef.current.rows().findIndex((r) => r.partition === anchor.partition && r.offset === anchor.offset)
+    if (newIndex === -1) return // the junction row itself is gone — nothing sane to anchor to (shouldn't happen; see the comment on why a forward insert can't trim its own top)
+    const newTop = listRef.current?.rowOffsetAt(newIndex) ?? null
+    if (newTop === null) return
+    listRef.current?.adjustScrollTop(newTop - anchor.priorTop)
   })
 
   // Live tail: on by default, ON for the lifetime of the component. An
@@ -611,7 +693,12 @@ export function Timeline({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [cluster, topic])
 
-  const rows = storeRef.current.rows()
+  // Fix round 1, M2: display the committed store rows merged with whatever
+  // the CURRENT in-flight page has accumulated so far (a display-only
+  // overlay — see `previewWithOverlay`'s own doc comment). The fast path
+  // (no accumulated rows: nothing in flight, or an in-flight page that
+  // just hasn't matched anything yet) skips the merge entirely.
+  const rows = pageRowsRef.current.length > 0 ? storeRef.current.previewWithOverlay(pageRowsRef.current) : storeRef.current.rows()
 
   // Clicking the "▲ n new" pill: while DETACHED, flushing in place would
   // recreate the false seam the historical window exists to avoid — so
@@ -825,13 +912,24 @@ export function Timeline({
     }
   }
 
-  // Cancels the in-flight filtered page (leaving already-loaded rows
-  // intact) without letting the empty-page auto-continue effect
-  // immediately relaunch another page: clearing pendingDirectionRef BEFORE
-  // cancel() makes that effect's "direction === null" guard bail out on the
-  // loading:true -> false edge cancel() itself triggers.
+  // Cancels the in-flight filtered page (leaving already-loaded — i.e.
+  // COMMITTED — rows intact) without letting the empty-page auto-continue
+  // effect immediately relaunch another page: clearing pendingDirectionRef
+  // BEFORE cancel() makes that effect's "direction === null" guard bail out
+  // on the loading:true -> false edge cancel() itself triggers.
+  //
+  // Fix round 1, M2: also drops this page's uncommitted display overlay —
+  // `onPageEnd` never got to run (the page never reached page_end), so
+  // nothing here was ever going to be committed; leaving its matches
+  // visible after an explicit cancel would be dishonest (the store's own
+  // edges never advanced past them, and a later re-scroll re-scans this
+  // same range from scratch).
   const handleCancelScan = () => {
     pendingDirectionRef.current = null
+    if (pageRowsRef.current.length > 0) {
+      pageRowsRef.current = []
+      bump()
+    }
     cancel()
   }
 

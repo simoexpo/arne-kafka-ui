@@ -46,6 +46,28 @@ function insertByOffsetAscending(arr: MessageOut[], msg: MessageOut): void {
 export interface InsertOutcome {
   trimmedTop: number
   trimmedBottom: number
+  /**
+   * The store's REAL attachment state as of this call (fix round 1, C1).
+   * NOT the same thing as `edges().top === null` — that also reads `null`
+   * whenever `topMap` is simply empty (e.g. a zero-row anchor page, legal
+   * per the empty-page contract), which has nothing to do with whether the
+   * window is genuinely attached to the tail. A caller deciding whether it
+   * may now call `insertLive` (or otherwise treat the window as attached)
+   * must read THIS field (or call `isAttached()`), never infer it from
+   * `edges().top`.
+   */
+  attached: boolean
+  /**
+   * `true` when this `insertPage` call was REJECTED wholesale as stale
+   * (fix round 1, C3) — see `insertPage`'s own doc comment. No rows were
+   * inserted and no map was mutated; `trimmedTop`/`trimmedBottom` are both
+   * `0` and `attached` reflects whatever it already was before this call.
+   * The caller should re-issue the same request from the store's OWN fresh
+   * `edges()` instead of trusting anything about this outcome. Always
+   * `false` for `insertLive` (which has no start-position/staleness concept
+   * at all).
+   */
+  rejectedStale: boolean
 }
 
 export interface SlidingWindowStore {
@@ -57,6 +79,26 @@ export interface SlidingWindowStore {
    * — none of those start from a request cursor). `contCursor` is the
    * response's own continuation cursor, or `null` when the backend reported
    * `exhausted: true` (nothing more in `direction` from these positions).
+   *
+   * STALENESS PRECONDITION (fix round 1, C3 — enforced, not left to caller
+   * discipline): before touching anything, compares `startPositions` (per
+   * partition) against the CURRENT same-side map (`bottomMap` for `back`,
+   * `topMap` for `forward`). If the current value has already moved PAST
+   * what this page assumed — `back`: current `bottomMap[p]` is strictly
+   * GREATER than `startPositions[p]`; `forward`: current `topMap[p]` is
+   * strictly LESS than `startPositions[p]` — a CONCURRENT trim (a live
+   * insert, or another page) recovered exactly the range this in-flight
+   * page never asked about, and blindly merging its own row-derived
+   * tightening would regress the map back past that just-recovered range:
+   * an interior hole at the exact seam the trim was supposed to keep
+   * whole. Such a page is REJECTED WHOLESALE — no rows inserted, no map
+   * touched, `{ rejectedStale: true }` returned — rather than trying to
+   * merge only the "safe" part of it (there isn't a locally-safe partial
+   * merge: the page's own row-derived tightening has no way to know which
+   * of its rows fall inside the newly-recovered range and which don't,
+   * since `insertRows`' dedup only tells it about OFFSETS, not this map's
+   * timeline). The caller should re-issue the same logical request from
+   * the store's own fresh `edges()` instead.
    */
   insertPage(
     rows: MessageOut[],
@@ -104,13 +146,42 @@ export interface SlidingWindowStore {
   /** Merged rows, newest-first (partition offset order within a partition, timestamp merge across partitions — same rule as the v1.4 store above). */
   rows(): readonly MessageOut[]
   /**
+   * Fix round 1, M2: a READ-ONLY preview of what `rows()` would look like
+   * with `extraRows` also merged in — WITHOUT mutating anything (no `seen`
+   * update, no edge-map update, no cap enforcement). Lets a caller display
+   * an in-flight page's own accumulated matches progressively (product
+   * charter: "stream results") while the store itself still only ever
+   * commits once, atomically, at page-end (`insertPage`'s own contract:
+   * an anchor bootstrap's opposite-side seed needs the FULL page's rows,
+   * not a per-batch trickle, so the store can't sanely accept a page in
+   * pieces). Rows already committed (already in `seen`) are silently
+   * excluded from the overlay — they're already in `rows()` itself, and
+   * double-counting them would be a visible duplicate. Cheap: bounded by
+   * `extraRows`' own size (a page's matches, capped at the page limit),
+   * not the whole window.
+   */
+  previewWithOverlay(extraRows: readonly MessageOut[]): readonly MessageOut[]
+  /**
    * Cursors minted from the current edge maps. `top` is `null` while the top
-   * edge is genuinely the live tail (nothing has ever been trimmed off the
-   * top since the last `clear()`, or a forward page has since caught back up
-   * — see `attached` below); `bottom` is `null` only before the store has
-   * ever learned a bottom position at all (an empty, freshly created store).
+   * edge is genuinely the live tail (`isAttached()`), OR while `topMap` is
+   * empty or INCOMPLETE — see the "one gap" section above and fix round 1's
+   * C2: an anchor bootstrap's opposite-side seed only ever covers
+   * partitions that returned ≥1 row this page, so a partition contributing
+   * zero rows would otherwise be silently omitted from a minted cursor,
+   * worse than null (nothing would ever trigger recovery for it). `bottom`
+   * is `null` only before the store has ever learned a bottom position at
+   * all (an empty, freshly created store) — no equivalent completeness
+   * check on this side yet (see the test suite's own note on the
+   * symmetric, currently-unaddressed gap).
    */
   edges(): { top: string | null; bottom: string | null }
+  /**
+   * The store's real, ungasked attachment state (fix round 1, C1) — use
+   * this (or `InsertOutcome.attached`) to decide whether the window is
+   * genuinely attached to the tail; `edges().top === null` is NOT a safe
+   * proxy for it (see `InsertOutcome.attached`'s own doc comment).
+   */
+  isAttached(): boolean
   clear(): void
   totalCount(): number
 }
@@ -312,17 +383,21 @@ export function createSlidingWindowStore(cap = 2000): SlidingWindowStore {
     return n
   }
 
-  function mergeRows(): MessageOut[] {
-    const parts = [...partitions.entries()].sort((a, b) => a[0] - b[0])
-    const ptrs = parts.map(([, arr]) => arr.length - 1)
+  // Parameterized over WHICH partitions map to merge (fix round 1, M2):
+  // `mergeRows()` below merges the real, committed `partitions`;
+  // `previewWithOverlay` merges a throwaway temporary map instead, so the
+  // two never duplicate this k-way merge logic (and can't drift apart).
+  function mergeRowsFrom(parts: ReadonlyMap<number, readonly MessageOut[]>): MessageOut[] {
+    const entries = [...parts.entries()].sort((a, b) => a[0] - b[0])
+    const ptrs = entries.map(([, arr]) => arr.length - 1)
     const result: MessageOut[] = []
     for (;;) {
       let bestIdx = -1
       let bestTs = -Infinity
-      for (let i = 0; i < parts.length; i++) {
+      for (let i = 0; i < entries.length; i++) {
         const ptr = ptrs[i]
         if (ptr < 0) continue
-        const ts = parts[i][1][ptr].timestamp_ms ?? -Infinity
+        const ts = entries[i][1][ptr].timestamp_ms ?? -Infinity
         if (bestIdx === -1 || ts > bestTs) {
           bestIdx = i
           bestTs = ts
@@ -330,10 +405,14 @@ export function createSlidingWindowStore(cap = 2000): SlidingWindowStore {
       }
       if (bestIdx === -1) break
       const ptr = ptrs[bestIdx]
-      result.push(parts[bestIdx][1][ptr])
+      result.push(entries[bestIdx][1][ptr])
       ptrs[bestIdx] = ptr - 1
     }
     return result
+  }
+
+  function mergeRows(): MessageOut[] {
+    return mergeRowsFrom(partitions)
   }
 
   function removeMessage(msg: MessageOut): void {
@@ -403,7 +482,7 @@ export function createSlidingWindowStore(cap = 2000): SlidingWindowStore {
    */
   function enforceCap(kind: 'bottom-insert' | 'top-insert'): InsertOutcome {
     const excess = totalCount() - cap
-    if (excess <= 0) return { trimmedTop: 0, trimmedBottom: 0 }
+    if (excess <= 0) return { trimmedTop: 0, trimmedBottom: 0, attached, rejectedStale: false }
     const merged = mergeRows() // newest-first
     const trimmedByPartition = new Map<number, number[]>()
     const recordTrim = (msg: MessageOut) => {
@@ -441,20 +520,44 @@ export function createSlidingWindowStore(cap = 2000): SlidingWindowStore {
         topMap.set(p, arr[arr.length - 1].offset + 1) // `arr` is offset-ascending: last entry is the max
       }
       attached = false
-      result = { trimmedTop: excess, trimmedBottom: 0 }
+      result = { trimmedTop: excess, trimmedBottom: 0, attached, rejectedStale: false }
     } else {
       // A forward-page or live insert grows the top; overflow trims the
       // BOTTOM (oldest) rows exactly.
       for (let i = 0; i < excess; i++) recordTrim(merged[merged.length - 1 - i])
       for (const [p, offsets] of trimmedByPartition) bottomMap.set(p, maxOf(offsets) + 1)
-      result = { trimmedTop: 0, trimmedBottom: excess }
+      result = { trimmedTop: 0, trimmedBottom: excess, attached, rejectedStale: false }
     }
     cachedRows = null
     return result
   }
 
+  /**
+   * Fix round 1, C3: is `startPositions` (this page's own request-time
+   * positions) still safe to merge, or has the current same-side map
+   * already moved PAST it (a concurrent trim recovered exactly the range
+   * this page never asked about)? `null` startPositions (an anchor page)
+   * is never stale — it has no prior request to be stale relative to.
+   */
+  function isStale(direction: 'back' | 'forward', startPositions: Record<number, number> | null): boolean {
+    if (startPositions === null) return false
+    const map = direction === 'back' ? bottomMap : topMap
+    for (const [pStr, startPos] of Object.entries(startPositions)) {
+      const current = map.get(Number(pStr))
+      if (current === undefined) continue // nothing to compare against yet — trust the page
+      if (direction === 'back' ? current > startPos : current < startPos) return true
+    }
+    return false
+  }
+
   return {
     insertPage(rows, direction, startPositions, contCursor, opts) {
+      // Staleness precondition (fix round 1, C3) — see this method's own
+      // doc comment. Checked BEFORE any mutation: a rejected page must
+      // leave the store byte-for-byte as it was.
+      if (isStale(direction, startPositions)) {
+        return { trimmedTop: 0, trimmedBottom: 0, attached, rejectedStale: true }
+      }
       const { insertedMin, insertedMax } = insertRows(rows)
 
       if (startPositions === null) {
@@ -545,10 +648,47 @@ export function createSlidingWindowStore(cap = 2000): SlidingWindowStore {
       if (cachedRows === null) cachedRows = Object.freeze(mergeRows())
       return cachedRows
     },
+    previewWithOverlay(extraRows) {
+      if (extraRows.length === 0) {
+        if (cachedRows === null) cachedRows = Object.freeze(mergeRows())
+        return cachedRows
+      }
+      // Shallow-clone the partitions map: untouched partitions share the
+      // SAME underlying array (safe — read-only from here), only the
+      // partitions `extraRows` actually touches get their own cloned copy
+      // before insertion, so `partitions` itself is never mutated.
+      const temp = new Map<number, MessageOut[]>(partitions)
+      const tempSeen = new Set<string>()
+      const cloned = new Set<number>()
+      for (const msg of extraRows) {
+        const k = partitionKey(msg.partition, msg.offset)
+        if (seen.has(k) || tempSeen.has(k)) continue // already committed, or already added to this overlay
+        tempSeen.add(k)
+        if (!cloned.has(msg.partition)) {
+          temp.set(msg.partition, [...(temp.get(msg.partition) ?? [])])
+          cloned.add(msg.partition)
+        }
+        insertByOffsetAscending(temp.get(msg.partition)!, msg)
+      }
+      return Object.freeze(mergeRowsFrom(temp))
+    },
     edges() {
       const bottom = bottomMap.size === 0 ? null : encodeCursor(mapToPositions(bottomMap))
-      const top = attached || topMap.size === 0 ? null : encodeCursor(mapToPositions(topMap))
+      // C2 completeness check (see this method's own doc comment above):
+      // `topMap` is trustworthy as a minted cursor only if it has an entry
+      // for every partition `bottomMap` knows about — `bottomMap`, right
+      // after any back-direction request, is authoritatively complete over
+      // every partition that request touched (rule 1), which for an ANCHOR
+      // request is every partition of the topic. `topMap`'s own anchor
+      // opposite-seed has no equivalent guarantee (only partitions with
+      // ≥1 row this page get seeded) — this is the ONLY event that can
+      // create the discrepancy this check catches.
+      const topComplete = [...bottomMap.keys()].every((p) => topMap.has(p))
+      const top = attached || topMap.size === 0 || !topComplete ? null : encodeCursor(mapToPositions(topMap))
       return { top, bottom }
+    },
+    isAttached() {
+      return attached
     },
     clear() {
       partitions.clear()

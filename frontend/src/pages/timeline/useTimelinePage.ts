@@ -169,6 +169,16 @@ export function useTimelinePage(cluster: string, topic: string): UseTimelinePage
             exhausted: { ...prev.exhausted, [params.direction]: exhausted },
           }))
           flush()
+          // Fix round 1, L1: re-check the generation ONE MORE TIME,
+          // immediately before this final call — `flush()` just invoked the
+          // caller's `onMatches` synchronously, and a caller that starts a
+          // NEW `loadPage` from inside it (e.g. auto-advancing to the next
+          // page) has already bumped `generationRef` by the time control
+          // returns here. Without this second check, a superseded
+          // generation's `onPageEnd` would still fire — handing a caller
+          // (e.g. Timeline.tsx's synchronous store commit) a cursor/
+          // direction pairing that's no longer the current request.
+          if (generationRef.current !== myGen) return
           // After the internal state updates + the final flush (so a
           // trailing partial batch has already reached the caller's
           // `onMatches`) — see this callback's own doc comment for why this

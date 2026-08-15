@@ -101,27 +101,6 @@ function stubScrollHeight(value: number) {
   }
 }
 
-// Scroll-anchoring's capture (before insert) and its compensating read
-// (after render) both happen inside the SAME synchronous flush — a real
-// browser's scrollHeight would genuinely differ between those two reads
-// (layout recomputes once the new rows actually land), but jsdom does no
-// layout at all, so a single static value can't tell the two reads apart.
-// This stub answers the FIRST read with `values[0]` and every read after
-// with the last entry — simulating "the DOM grew between capture and
-// render" without needing real layout.
-function stubScrollHeightSequence(values: number[]) {
-  const original = Object.getOwnPropertyDescriptor(Element.prototype, 'scrollHeight')
-  let i = 0
-  Object.defineProperty(Element.prototype, 'scrollHeight', {
-    configurable: true,
-    get: () => values[Math.min(i++, values.length - 1)],
-  })
-  return () => {
-    if (original) Object.defineProperty(Element.prototype, 'scrollHeight', original)
-    else delete (Element.prototype as unknown as Record<string, unknown>).scrollHeight
-  }
-}
-
 // Same idea for `clientHeight` (also always 0 in jsdom, no real layout) —
 // needed alongside `stubScrollHeight` to construct a "near the bottom"
 // scroll position for the bottom-sentinel (scroll-triggered pagination)
@@ -543,17 +522,17 @@ describe('Timeline', () => {
       expect(FakeEventSource.instances[2].url).toBe(url({ direction: 'forward', limit: '100', cursor: cur({ 0: 3 }) }))
     })
 
-    // Scroll anchoring (design spec v1.3, owner feedback 2026-08-15): a
-    // forward page's rows rank newer, so they land near the TOP of the
-    // newest-first merge — i.e. they prepend above whatever the reader was
-    // looking at. Without compensation, scrollTop stays numerically
-    // unchanged, which silently relocates the reader to the top of the
-    // newly loaded page instead of keeping them at the junction where they
-    // were reading. This only matters when the reader wasn't pinned to the
-    // very top by the time the page lands (pinned-top is today's correct
-    // behavior — they want to see the incoming content, same as the
-    // live-attached case).
-    it('a forward page that lands while the reader is mid-scroll anchors the viewport at the junction by height delta', async () => {
+    // Scroll anchoring (design spec v1.3, owner feedback 2026-08-15; row-
+    // identity rewrite, fix round 1 M1): a forward page's rows rank newer,
+    // so they land near the TOP of the newest-first merge — i.e. they
+    // prepend above whatever the reader was looking at. Without
+    // compensation, scrollTop stays numerically unchanged, which silently
+    // relocates the reader to the top of the newly loaded page instead of
+    // keeping them at the junction where they were reading. This only
+    // matters when the reader wasn't pinned to the very top by the time the
+    // page lands (pinned-top is today's correct behavior — they want to see
+    // the incoming content, same as the live-attached case).
+    it('a forward page that lands while the reader is mid-scroll anchors the viewport to the junction ROW, not a total-height delta', async () => {
       mockTail()
       const user = userEvent.setup()
       render(<Timeline cluster="prod" topic="orders" />)
@@ -575,22 +554,89 @@ describe('Timeline', () => {
       // away from the exact top edge by the time the page lands.
       fireEvent.scroll(screen.getByTestId('timeline-scroll'), { target: { scrollTop: 500 } })
 
-      // A (2000) is what the pre-insert capture reads; B (2400) is what the
-      // post-render layout effect reads once the new rows are in — see
-      // stubScrollHeightSequence.
-      const restoreHeight = stubScrollHeightSequence([2000, 2400])
       const scroll = spyOnScrollTop()
       try {
         await emit(2, 'match', mk(3))
         scroll.setter.mockClear()
         await emit(2, 'page_end', { cursor: cur({ 0: 4 }), exhausted: false })
-        // Anchored at the junction: scrollTop nudged by exactly B - A
-        // (2400 - 2000 = 400), landing on 500 + 400 = 900 — never left at
-        // the numerically-unchanged 500.
-        expect(scroll.setter).toHaveBeenCalledWith(900)
+        // Before this page lands, rows = [2] (only the beginning-jump's own
+        // row survived the earlier jump's clear()) — the junction row is
+        // p0·2, at index 0 (rendered offset 0, uniform 40px rows in jsdom —
+        // no ResizeObserver). Prepending p0·3 above it shifts p0·2 to index
+        // 1 (offset 40). Anchored to THAT row's identity: scrollTop nudged
+        // by 40 - 0 = 40, landing on 500 + 40 = 540 — never left at the
+        // numerically-unchanged 500, and NOT derived from any total-height
+        // reading (this page adds a row but trims nothing, so a total-delta
+        // approach would have coincidentally agreed here too — see the
+        // OTHER test below, which forces a trim into the SAME commit to
+        // prove the two approaches actually diverge).
+        expect(scroll.setter).toHaveBeenCalledWith(540)
       } finally {
         scroll.restore()
-        restoreHeight()
+      }
+    })
+
+    // Fix round 1 (review of 079f30f), M1: the test above never actually
+    // distinguishes row-identity anchoring from the OLD total-height-delta
+    // approach it replaced, because that page adds a row and trims
+    // nothing — "added − removed" and "this row's own offset delta" agree
+    // by coincidence. THIS test forces a trim into the SAME commit as the
+    // prepend (routine at a small cap): a total-height delta would net to
+    // ~0 (added 1, removed 1) and wrongly leave scrollTop at the
+    // numerically-unchanged 500 — exactly the forbidden relocation
+    // scroll-anchoring exists to prevent. Row-identity anchoring is
+    // unaffected: the trim only ever removes rows BELOW the junction (a
+    // forward insert can only trim the bottom — see enforceCap — never
+    // the top it's prepending above), so the junction row's own offset
+    // delta is still exactly right.
+    it('a forward page that BOTH prepends above the viewport AND trims below the cap in the same commit still anchors correctly (a total-height delta would not)', async () => {
+      mockTail()
+      render(<Timeline cluster="prod" topic="orders" windowCap={3} />)
+      await emit(0, 'match', mk(9))
+      await emit(0, 'match', mk(8))
+      await emit(0, 'page_end', { cursor: cur({ 0: 8 }), exhausted: false })
+
+      // Back page pushes 4 rows against cap(3): the newest (p0·9) trims off
+      // the top -> detach, top map recovers to exactly 9. jsdom's default
+      // 0/0/0 scroll dimensions make `scrollTop: 0` read as both pinned-
+      // to-top (fires the sentinel) and near-the-bottom (harmless here —
+      // the back cursor is what fires; see the earlier interior-hole test's
+      // own comment on this same jsdom quirk).
+      fireEvent.scroll(screen.getByTestId('timeline-scroll'), { target: { scrollTop: 0 } })
+      await emit(1, 'match', mk(7))
+      await emit(1, 'match', mk(6))
+      await emit(1, 'page_end', { cursor: cur({ 0: 6 }), exhausted: false })
+      expect(screen.queryByText('p0·9')).not.toBeInTheDocument() // trimmed
+      // Rows now [8,7,6]. Note: no scroll to 500 yet here — `state.loading`
+      // is false at this exact instant (the back page above just landed),
+      // so an unstubbed scroll (jsdom's 0/0/0 dimensions make `nearBottom`
+      // trivially true for almost any scrollTop) would fire an UNWANTED
+      // extra back request and leave `state.loading` true, which would then
+      // make the very next line's forward request get skipped entirely
+      // (guarded on `!state.loading`) — move to 500 only AFTER starting the
+      // forward request below, exactly like the test above does.
+
+      const scroll = spyOnScrollTop()
+      try {
+        scrollToTopFarFromBottom() // forward request, cursor = top = cur({0:9})
+        fireEvent.scroll(screen.getByTestId('timeline-scroll'), { target: { scrollTop: 500 } })
+        scroll.setter.mockClear()
+
+        const idx = FakeEventSource.instances.length - 1
+        await emit(idx, 'match', mk(9)) // recovers exactly the trimmed row
+        await emit(idx, 'page_end', { cursor: null, exhausted: true })
+        // Recovering p0·9 over cap(3) ALSO trims the oldest (p0·6) —
+        // simultaneous prepend-above + trim-below. Junction row (p0·8, at
+        // index 0 before this insert, offset 0) is now at index 1 (offset
+        // 40 — one row prepended above it; the trim below never touches
+        // it). scrollTop nudged by 40 - 0 = 40, landing on 500 + 40 = 540
+        // — NOT the numerically-unchanged 500 a total-height delta (net
+        // ~0: +1 row added, -1 row trimmed) would have wrongly produced.
+        expect(scroll.setter).toHaveBeenCalledWith(540)
+        expect(screen.queryByText('p0·6')).not.toBeInTheDocument() // trimmed
+        for (const o of [9, 8, 7]) expect(screen.getByText(`p0·${o}`)).toBeInTheDocument()
+      } finally {
+        scroll.restore()
       }
     })
   })
@@ -1045,6 +1091,85 @@ describe('Timeline', () => {
       const chip = container.querySelector('[data-staleness]')
       expect(chip).toHaveAttribute('data-staleness', 'stale')
     })
+
+    // Fix round 1 (review of 079f30f), C1: the "just became store-attached"
+    // catch-up used to gate on `storeRef.current.edges().top === null` —
+    // but that reads null for TWO different reasons (genuinely attached,
+    // OR an empty topMap that was never seeded at all), and an offset/
+    // timestamp jump's anchor page can legitimately return ZERO rows (the
+    // empty-page contract) without ever seeding topMap. The UI would then
+    // wrongly believe it was attached, and a live tail message right after
+    // would reach `insertLive` on a store that's still genuinely detached
+    // — throwing. The fix reads the store's OWN `attached` truth (via the
+    // synchronous `insertPage` outcome) instead.
+    it('an offset jump whose anchor page returns zero rows stays detached: a live message still buffers, never throws', async () => {
+      const tail = mockTail()
+      const user = userEvent.setup()
+      render(<Timeline cluster="prod" topic="orders" />)
+      await emit(0, 'match', mk(9))
+      await emit(0, 'page_end', { cursor: cur({ 0: 9 }), exhausted: false })
+
+      await user.click(screen.getByTestId('jump-offset'))
+      await user.type(screen.getByTestId('jump-offset-partition-input'), '1')
+      await user.type(screen.getByTestId('jump-offset-value-input'), '77')
+      await user.click(screen.getByTestId('jump-offset-apply'))
+      // Empty-page contract: zero matches, non-null cursor, not exhausted —
+      // nothing in this window passed, but the store's real `attached`
+      // must stay false (the anchor bootstrap explicitly passed
+      // attach:false) regardless of how `edges().top` happens to read.
+      await emit(1, 'page_end', { cursor: cur({ 0: 5 }), exhausted: false })
+
+      await act(async () => {
+        expect(() => tail.handlers().onMessage(mk(50))).not.toThrow()
+      })
+      expect(screen.queryByText('p0·50')).not.toBeInTheDocument()
+      expect(screen.getByText('▲ 1 new')).toBeInTheDocument()
+      // Header still reads detached — the toggle is lit paused with no
+      // live pulse, same as every other detached window.
+      expect(screen.queryByText('● live')).not.toBeInTheDocument()
+      const toggle = screen.getByTestId('play-pause-toggle')
+      expect(toggle).toHaveAttribute('aria-pressed', 'true')
+    })
+
+    // Fix round 1 (review of 079f30f), C2: an anchor bootstrap's opposite-
+    // side edge seed only ever covers partitions that returned ≥1 row THIS
+    // PAGE — a multi-partition anchor page where one partition genuinely
+    // contributes zero rows (not the all-empty case forwardAnchorFallback
+    // was originally built for, but a partial one) would otherwise mint a
+    // top cursor silently missing that partition's key entirely: worse
+    // than null, since nothing would ever trigger recovery for it. The
+    // store now reads `edges().top` as null whenever it's incomplete this
+    // way (not just empty), so Timeline's EXISTING forward-anchor fallback
+    // (re-issue the same anchor with direction=forward) handles the
+    // partial case identically to the all-empty one it already covered.
+    it("an offset jump whose anchor page returns rows for only ONE of several partitions re-issues the SAME anchor forward on the next top-scroll, never a partial cursor", async () => {
+      mockTail()
+      const user = userEvent.setup()
+      render(<Timeline cluster="prod" topic="orders" />)
+      await emit(0, 'match', mk(9))
+      await emit(0, 'page_end', { cursor: cur({ 0: 9 }), exhausted: false })
+
+      await user.click(screen.getByTestId('jump-offset'))
+      await user.type(screen.getByTestId('jump-offset-partition-input'), '1')
+      await user.type(screen.getByTestId('jump-offset-value-input'), '77')
+      await user.click(screen.getByTestId('jump-offset-apply'))
+      // The anchor page's own continuation (rule 1, authoritative) covers
+      // BOTH partitions the request touched — but only partition 0
+      // returned a row this page; partition 1 genuinely had none here.
+      await emit(1, 'match', mk(5))
+      await emit(1, 'page_end', { cursor: cur({ 0: 5, 1: 3 }), exhausted: false })
+
+      // Scrolling up: edges().top is incomplete (partition 1 never got a
+      // row to seed the top map from) — must NOT follow a partial cursor
+      // that would silently omit partition 1 forever. Re-issues the SAME
+      // offset anchor with direction=forward instead (the existing
+      // fallback, exercised here by the PARTIAL case, not just the
+      // all-empty one).
+      scrollToTopFarFromBottom()
+      expect(FakeEventSource.instances.at(-1)!.url).toBe(
+        url({ direction: 'forward', limit: '100', anchor: 'offset', partition: '1', offset: '77' }),
+      )
+    })
   })
 
   // Window cap honesty (design spec v1.4, owner ruling 2026-08-15): the
@@ -1219,6 +1344,78 @@ describe('Timeline', () => {
     // originated) have landed in between — see timelineSlidingStore.test.ts's
     // property walk, which interleaves live inserts into paging for exactly
     // this reason.
+  })
+
+  // Fix round 1 (review of 079f30f), C3: reproduces the reviewer's exact
+  // probe at the UI level — a live trim recovers an evicted offset WHILE an
+  // older back-page (issued before the trim) is still in flight. Landing
+  // that stale page must not regress the store's bottom map past the
+  // recovered range (an interior hole at the exact seam the reader is
+  // watching); Timeline must instead re-issue the request from the store's
+  // fresh edge, transparently to the reader (content never resets, the
+  // trimmed row is still recoverable).
+  describe('stale in-flight page rejection (C3, fix round 1)', () => {
+    it('a live trim mid-flight does not create an interior hole: the stale page is dropped and re-issued from the fresh edge', async () => {
+      const tail = mockTail()
+      render(<Timeline cluster="prod" topic="orders" windowCap={4} />)
+
+      // Mount: [12,11,10,9], bottom={0:9}.
+      await emit(0, 'match', mk(12))
+      await emit(0, 'match', mk(11))
+      await emit(0, 'match', mk(10))
+      await emit(0, 'match', mk(9))
+      await emit(0, 'page_end', { cursor: cur({ 0: 9 }), exhausted: false })
+
+      // An in-flight back page is issued FROM bottom={0:9} — instance[1] —
+      // and deliberately left unresolved for now. Fires the bottom
+      // sentinel (jsdom's default 0/0/0 scroll dimensions make `scrollTop:
+      // 0` read as BOTH pinned-to-top — keeping live merging active,
+      // unlike `scrollToBottom()`'s own scrollTop:200, which would
+      // auto-pause and make the live insert below just buffer instead of
+      // actually trimming — AND near-the-bottom, so the sentinel still
+      // fires loadOlder).
+      fireEvent.scroll(screen.getByTestId('timeline-scroll'), { target: { scrollTop: 0 } })
+      expect(FakeEventSource.instances.at(-1)!.url).toBe(url({ direction: 'back', limit: '100', cursor: cur({ 0: 9 }) }))
+      const inFlightIdx = FakeEventSource.instances.length - 1
+
+      // Meanwhile: live 13 arrives, growing the top past cap(4) and
+      // trimming the oldest (9) off the bottom — the store's bottom edge
+      // advances to {0:10}, recovering exactly offset 9 on a future
+      // back-read.
+      await act(async () => tail.handlers().onMessage(mk(13)))
+      expect(screen.queryByText('p0·9')).not.toBeInTheDocument() // trimmed off the bottom (for now)
+      for (const o of [13, 12, 11, 10]) expect(screen.getByText(`p0·${o}`)).toBeInTheDocument()
+
+      // The stale in-flight page NOW lands: rows [8,7], its own start (9)
+      // sits BELOW the current bottom boundary (10) — a trim recovered
+      // [9,10) in the interim that this page never asked about. It must be
+      // rejected, not merged (which would otherwise regress bottom to 7,
+      // stranding offset 9 forever between 7 and 10 — an interior hole).
+      await emit(inFlightIdx, 'match', mk(8))
+      await emit(inFlightIdx, 'match', mk(7))
+      await emit(inFlightIdx, 'page_end', { cursor: cur({ 0: 7 }), exhausted: false })
+
+      // Rejected: neither of the stale page's own rows ever appear...
+      expect(screen.queryByText('p0·8')).not.toBeInTheDocument()
+      expect(screen.queryByText('p0·7')).not.toBeInTheDocument()
+      // ...and content never reset — everything held before this page
+      // landed is still exactly there.
+      for (const o of [13, 12, 11, 10]) expect(screen.getByText(`p0·${o}`)).toBeInTheDocument()
+
+      // Timeline transparently re-issued from the store's OWN fresh bottom
+      // edge (10, unregressed by the rejected page) — never the stale
+      // page's own contCursor (7).
+      const retryIdx = FakeEventSource.instances.length - 1
+      expect(retryIdx).toBeGreaterThan(inFlightIdx)
+      expect(FakeEventSource.instances[retryIdx].url).toBe(
+        url({ direction: 'back', limit: '100', cursor: cur({ 0: 10 }) }),
+      )
+
+      // That retry recovers offset 9 exactly — no interior hole.
+      await emit(retryIdx, 'match', mk(9))
+      await emit(retryIdx, 'page_end', { cursor: null, exhausted: true })
+      expect(screen.getByText('p0·9')).toBeInTheDocument()
+    })
   })
 
   // Acceptance bar (design spec v1.6, task-3 plan): the jsdom PROPERTY WALK

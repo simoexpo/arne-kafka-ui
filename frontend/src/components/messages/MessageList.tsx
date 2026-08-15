@@ -11,17 +11,28 @@ export interface MessageListHandle {
   // scrollTop = scrollHeight is the standard clamp-to-bottom trick (a real
   // browser clamps any out-of-range value to the max scrollable offset).
   scrollToEdge(edge: 'top' | 'bottom'): void
-  // Scroll anchoring (design spec v1.3 "Scroll anchoring"): reads the raw
-  // scrollTop/scrollHeight off the real scroll element so a caller can
-  // capture "before" metrics ahead of a prepend and diff them against
-  // "after" metrics once the new rows have rendered. Returns null before
-  // the element exists (e.g. mid-jump, while Panel shows a loading
-  // skeleton and MessageList itself is unmounted).
-  scrollMetrics(): { top: number; height: number } | null
   // Nudges scrollTop by `delta` (added, not set) — compensates for a
   // height change that happened above the viewport (a prepend) so the
   // reader's visual position doesn't silently shift.
   adjustScrollTop(delta: number): void
+  // Scroll anchoring (design spec v1.3 "Scroll anchoring"; fix round 1, M1
+  // — review of 079f30f): the virtualizer's own rendered top-offset (its
+  // coordinate space, not the scroll element's) of the row currently at
+  // `index` in the `messages` array this component was last rendered with,
+  // or `null` if `index` is out of range. Row-IDENTITY anchoring (capture
+  // a specific row's offset before an insert, find that SAME row's new
+  // index and offset after, adjust by the difference) replaced an earlier
+  // total-scrollHeight-delta approach that silently broke the moment an
+  // insert ALSO trimmed rows below the viewport in the same commit (a
+  // trim there changes the total height without moving anything the
+  // reader can see above them, so "added − removed" could cancel toward
+  // the exact relocation scroll-anchoring exists to prevent — see
+  // Timeline.tsx's own comment on its capture/consume sites). Backed by
+  // the virtualizer's own `measurementsCache`, which is populated for
+  // every index up front (estimated-then-measured), not just the
+  // currently visible/overscanned range — so this works regardless of
+  // scroll position.
+  rowOffsetAt(index: number): number | null
 }
 
 export const MessageList = forwardRef<
@@ -54,18 +65,21 @@ export const MessageList = forwardRef<
         if (!el) return
         el.scrollTop = edge === 'top' ? 0 : el.scrollHeight
       },
-      scrollMetrics() {
-        const el = parentRef.current
-        if (!el) return null
-        return { top: el.scrollTop, height: el.scrollHeight }
-      },
       adjustScrollTop(delta) {
         const el = parentRef.current
         if (!el) return
         el.scrollTop = el.scrollTop + delta
       },
+      rowOffsetAt(index) {
+        return virtualizer.measurementsCache[index]?.start ?? null
+      },
     }),
-    [],
+    // `virtualizer` (unlike `parentRef`, whose STABLE ref object already
+    // always reads its latest `.current`) must be a real dependency here:
+    // `rowOffsetAt` needs THIS render's `measurementsCache`, reflecting the
+    // current `messages` count/content, not whatever virtualizer instance
+    // existed the first time this handle was created.
+    [virtualizer],
   )
   if (messages.length === 0) {
     return <p className="p-4 text-sm text-zinc-500">no messages</p>
