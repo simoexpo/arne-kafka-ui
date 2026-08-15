@@ -90,16 +90,17 @@ export function DateTimePicker({ valueMs, onChange, ariaLabel }: {
     }
   }, [open])
 
-  const goPrevMonth = () => {
-    const d = new Date(viewYear, viewMonth - 1, 1)
+  // Clamping here keeps the selection on a day the new grid actually renders;
+  // without it, Jan 31 → Feb would keep an invisible day-31 selection that
+  // Date() rolls into March on Apply.
+  const goToMonth = (monthOffset: number) => {
+    const d = new Date(viewYear, viewMonth + monthOffset, 1)
     setViewYear(d.getFullYear())
     setViewMonth(d.getMonth())
+    setSelectedDay((day) => Math.min(day, daysInMonth(d.getFullYear(), d.getMonth())))
   }
-  const goNextMonth = () => {
-    const d = new Date(viewYear, viewMonth + 1, 1)
-    setViewYear(d.getFullYear())
-    setViewMonth(d.getMonth())
-  }
+  const goPrevMonth = () => goToMonth(-1)
+  const goNextMonth = () => goToMonth(1)
 
   const hour = parseTimeField(hourText, 23)
   const minute = parseTimeField(minuteText, 59)

@@ -105,6 +105,24 @@ describe('DateTimePicker', () => {
       expect(onChange).not.toHaveBeenCalled()
     })
 
+    it('clamps the selected day when navigating to a shorter month, so Apply stays in the viewed month', async () => {
+      const user = userEvent.setup()
+      const onChange = vi.fn()
+      // 2026-01-31 10:00:00 America/New_York (EST, UTC-5) == 2026-01-31T15:00:00Z
+      const jan31 = Date.UTC(2026, 0, 31, 15, 0, 0)
+      render(<DateTimePicker valueMs={jan31} onChange={onChange} ariaLabel="pick timestamp (local time)" />)
+      await user.click(screen.getByLabelText('pick timestamp (local time)'))
+
+      await user.click(screen.getByLabelText('next month'))
+      expect(screen.getByTestId('datetime-picker-popover')).toHaveTextContent('February 2026')
+      // 2026 is not a leap year: the selection clamps to Feb 28.
+      expect(screen.getByTestId('datetime-picker-day-28')).toHaveAttribute('aria-pressed', 'true')
+
+      await user.click(screen.getByTestId('datetime-picker-apply'))
+      // 2026-02-28 10:00:00 America/New_York (EST, UTC-5) == 2026-02-28T15:00:00Z — NOT rolled into March.
+      expect(onChange).toHaveBeenCalledExactlyOnceWith(Date.UTC(2026, 1, 28, 15, 0, 0))
+    })
+
     it('closes on Escape without calling onChange, discarding in-popover edits', async () => {
       const user = userEvent.setup()
       const onChange = vi.fn()
