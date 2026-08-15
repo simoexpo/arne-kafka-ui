@@ -591,21 +591,36 @@ describe('Timeline', () => {
     // delta is still exactly right.
     it('a forward page that BOTH prepends above the viewport AND trims below the cap in the same commit still anchors correctly (a total-height delta would not)', async () => {
       mockTail()
+      const user = userEvent.setup()
       render(<Timeline cluster="prod" topic="orders" windowCap={3} />)
-      await emit(0, 'match', mk(9))
-      await emit(0, 'match', mk(8))
-      await emit(0, 'page_end', { cursor: cur({ 0: 8 }), exhausted: false })
+      // Settle the initial mount page trivially — this test's own scenario
+      // starts from an offset jump (round 3 root-cause fix: a 'default'
+      // (plain-mount) context no longer auto-recovers a top trim via
+      // scroll — see loadNewer's own comment — so this scroll-anchoring
+      // test, which only cares about the anchor MATH on a forward commit
+      // that also trims, now reaches it via a jump-offset context instead,
+      // exactly like the "offset jump detaches too" test does).
+      await emit(0, 'page_end', { cursor: null, exhausted: true })
+
+      await user.click(screen.getByTestId('jump-offset'))
+      await user.type(screen.getByTestId('jump-offset-partition-input'), '0')
+      await user.type(screen.getByTestId('jump-offset-value-input'), '9')
+      await user.click(screen.getByTestId('jump-offset-apply'))
+      await emit(1, 'match', mk(9))
+      await emit(1, 'match', mk(8))
+      await emit(1, 'page_end', { cursor: cur({ 0: 8 }), exhausted: false })
 
       // Back page pushes 4 rows against cap(3): the newest (p0·9) trims off
-      // the top -> detach, top map recovers to exactly 9. jsdom's default
-      // 0/0/0 scroll dimensions make `scrollTop: 0` read as both pinned-
-      // to-top (fires the sentinel) and near-the-bottom (harmless here —
-      // the back cursor is what fires; see the earlier interior-hole test's
-      // own comment on this same jsdom quirk).
-      fireEvent.scroll(screen.getByTestId('timeline-scroll'), { target: { scrollTop: 0 } })
-      await emit(1, 'match', mk(7))
-      await emit(1, 'match', mk(6))
-      await emit(1, 'page_end', { cursor: cur({ 0: 6 }), exhausted: false })
+      // the top -> detach, top map recovers to exactly 9. Unlike a plain
+      // mount, this offset-jump bootstrap already seeds a REAL top cursor
+      // (attach:false's opposite-side seed) before this page even lands —
+      // a top-pinned scroll here is no longer a harmless no-op (it would
+      // fire its own real loadNewer request, since the anchor context isn't
+      // 'default'), so use the bottom sentinel directly.
+      scrollToBottom()
+      await emit(2, 'match', mk(7))
+      await emit(2, 'match', mk(6))
+      await emit(2, 'page_end', { cursor: cur({ 0: 6 }), exhausted: false })
       expect(screen.queryByText('p0·9')).not.toBeInTheDocument() // trimmed
       // Rows now [8,7,6]. Note: no scroll to 500 yet here — `state.loading`
       // is false at this exact instant (the back page above just landed),
@@ -1334,10 +1349,18 @@ describe('Timeline', () => {
       expect(screen.getByText('p0·10')).toBeInTheDocument()
     })
 
-    // Symmetric mirror of the bottom-trim test above: a 'back'-origin top
-    // trim also leaves a real, exact top edge — a further top-scroll uses
-    // it directly, never a reposition.
-    it('a top trim leaves the store\'s own top edge exact — a further top-scroll re-fetches via that cursor, never a reposition', async () => {
+    // Round 3 root-cause fix (supersedes the old "top-scroll re-fetches via
+    // that cursor" expectation for this DEFAULT-context case): a 'default'
+    // (opened-at-'now') window's top trim also seeds a real `edges().top` —
+    // but that top edge chases the LIVE tail, not a bounded historical
+    // range. Firing a scroll-triggered forward fetch here would compete
+    // with the row cap against whatever the live topic has produced since,
+    // silently evicting back-paged progress the reader already made (see
+    // loadNewer's own comment). The only sanctioned way back to the tail
+    // for a 'default'-context detached window is the explicit "jump to
+    // now" pill/toggle (covered by the "top drops while attached detach
+    // the window" test above) — a top-scroll here must stay a no-op.
+    it('a top trim on a default-context window does NOT auto-recover via top-scroll — only "jump to now" does', async () => {
       mockTail()
       render(<Timeline cluster="prod" topic="orders" windowCap={3} />)
       await emit(0, 'match', mk(9))
@@ -1355,17 +1378,22 @@ describe('Timeline', () => {
       // The back cursor is still live and not exhausted here — use the
       // far-from-bottom top gesture so the bottom sentinel doesn't also
       // fire in the same scroll event (see the helper's own comment).
+      const requestsBefore = FakeEventSource.instances.length
       scrollToTopFarFromBottom()
-      // No reposition: the request carries the store's own minted top
-      // cursor directly — exactly the trimmed offset (9).
-      expect(FakeEventSource.instances.at(-1)!.url).toBe(url({ direction: 'forward', limit: '100', cursor: cur({ 0: 9 }) }))
+      // No forward fetch: a 'default'-context detached window never chases
+      // the top via scroll — see loadNewer's own guard.
+      expect(FakeEventSource.instances).toHaveLength(requestsBefore)
+      expect(screen.queryByText('p0·9')).not.toBeInTheDocument()
 
-      const idx = FakeEventSource.instances.length - 1
-      await emit(idx, 'match', mk(9))
-      await emit(idx, 'page_end', { cursor: null, exhausted: true })
-      // Content never resets: the trimmed row is recovered exactly.
-      expect(screen.getByText('p0·9')).toBeInTheDocument()
-      expect(screen.getByText('p0·8')).toBeInTheDocument()
+      // The actual reported symptom, closed end to end: a further
+      // bottom-scroll (the reader continuing to page backward, exactly as
+      // in the live-rollout drill) must fetch the NEXT older page via the
+      // store's own bottom cursor — never re-issue the cursor this page
+      // was itself fetched with. Before the fix, the top-scroll above would
+      // have fired a forward fetch whose cap-eviction regressed `bottomMap`
+      // back to 8 (this page's own request cursor); this proves it stays 6.
+      scrollToBottom()
+      expect(FakeEventSource.instances.at(-1)!.url).toBe(url({ direction: 'back', limit: '100', cursor: cur({ 0: 6 }) }))
     })
 
     // F2 (task-3 carry-over): the caption claims the window's oldest row IS
@@ -1577,16 +1605,22 @@ describe('Timeline', () => {
   // Acceptance bar (design spec v1.6, task-3 plan): the jsdom PROPERTY WALK
   // — scripted FakeEventSource pages with a small cap, scroll down past it
   // (content never resets — rows present before an insert remain except
-  // trimmed ones), then scroll up re-fetching trimmed regions via the
-  // store's minted top-edge cursors (exact request URLs asserted) until
-  // re-attach on exhausted-forward. Single partition, small integers —
-  // exhaustive multi-partition/hole/tie adversarial coverage of the
-  // underlying invariant already lives in timelineSlidingStore.test.ts's own
+  // trimmed ones). Round 3 root-cause fix: the walk no longer scrolls back
+  // UP to recover the trimmed range for this DEFAULT-context window — see
+  // loadNewer's own comment (a 'default' window's top edge, once seeded by
+  // a trim, chases the LIVE tail, and recovering it via scroll competes
+  // with the row cap against whatever the live topic produced meanwhile,
+  // silently undoing the reader's own backward progress). Getting back to
+  // the tail from here is only ever the explicit "jump to now" pill/toggle
+  // (a full anchor reset), asserted below instead of a scroll-driven
+  // re-fetch. Single partition, small integers — exhaustive multi-
+  // partition/hole/tie adversarial coverage of the underlying invariant
+  // already lives in timelineSlidingStore.test.ts's own
   // property walk; this one proves the UI WIRING (real request URLs built
   // from `edges()`, DOM content persisting, re-attachment) drives that
   // store correctly end to end.
   describe('sliding window property walk', () => {
-    it('slides down past the cap without ever resetting content, then back up via minted cursors to re-attach at the tail', async () => {
+    it('slides down past the cap without ever resetting content; a default-context detached window never auto-recovers via scroll, only via jump-to-now', async () => {
       mockTail()
       render(<Timeline cluster="prod" topic="orders" windowCap={4} />)
 
@@ -1619,45 +1653,43 @@ describe('Timeline', () => {
       expect(screen.queryByText('p0·9')).not.toBeInTheDocument()
       for (const o of [8, 7, 6, 5]) expect(screen.getByText(`p0·${o}`)).toBeInTheDocument()
 
-      // --- Up 1: minted top cursor (9) re-fetches the FIRST trimmed pair
-      // (9,10) forward — not exhausted yet (11,12 still owed). Recovering
-      // them over cap(4) now trims the OLDEST pair (6,5) off the bottom.
-      // Content that survives (8,7) stays — never a full reset. ---
+      // --- Up (fixed behavior): the window is detached with a real,
+      // non-null top edge (cursor 9) exactly as before the fix — but
+      // scrolling to the top of a 'default'-context window must NOT chase
+      // it: no new request, and the trimmed rows (10,9) stay unrecovered.
+      // This is the exact regression round 3's live-rollout drill caught:
+      // against a REAL, continuously-producing topic, this same scroll
+      // gesture used to fire a forward fetch whose cap-eviction silently
+      // undid the "Down 2" page's own backward progress. ---
+      const requestsBeforeTopScroll = FakeEventSource.instances.length
       scrollToTopFarFromBottom()
-      expect(FakeEventSource.instances.at(-1)!.url).toBe(
-        url({ direction: 'forward', limit: '100', cursor: cur({ 0: 9 }) }),
-      )
-      await emit(3, 'match', mk(9))
-      await emit(3, 'match', mk(10))
-      await emit(3, 'page_end', { cursor: cur({ 0: 11 }), exhausted: false })
-      expect(screen.queryByText('p0·6')).not.toBeInTheDocument()
-      expect(screen.queryByText('p0·5')).not.toBeInTheDocument()
-      for (const o of [10, 9, 8, 7]) expect(screen.getByText(`p0·${o}`)).toBeInTheDocument()
-      // Still detached — the tail (12) hasn't been reached yet.
+      expect(FakeEventSource.instances).toHaveLength(requestsBeforeTopScroll)
+      expect(screen.queryByText('p0·10')).not.toBeInTheDocument()
+      expect(screen.queryByText('p0·9')).not.toBeInTheDocument()
+      // Still detached — nothing recovered it.
       expect(screen.getByTestId('play-pause-toggle')).toHaveAttribute('aria-pressed', 'true')
 
-      // --- Up 2: minted top cursor (11) re-fetches the LAST trimmed pair
-      // (11,12) forward — this one reports exhausted (caught the true
-      // tail): re-attach. Recovering them over cap(4) trims the oldest pair
-      // (8,7), landing EXACTLY back on the original mount window (12..9) —
-      // the walk's own round trip, never a reset along the way. ---
-      scrollToTopFarFromBottom()
-      expect(FakeEventSource.instances.at(-1)!.url).toBe(
-        url({ direction: 'forward', limit: '100', cursor: cur({ 0: 11 }) }),
+      // --- Re-attach: the ONLY sanctioned way back is the explicit
+      // play/pause toggle (no buffered live message arrived in this test,
+      // so the pill itself never renders — see LivePill's own `count === 0`
+      // guard; the toggle offers the identical "jump to now" behavior
+      // while detached) — a full anchor reset, never an incremental
+      // scroll-triggered catch-up. ---
+      const user = userEvent.setup()
+      await user.click(screen.getByTestId('play-pause-toggle'))
+      const idx = FakeEventSource.instances.length - 1
+      expect(FakeEventSource.instances[idx].url).toBe(
+        '/api/clusters/prod/topics/orders/timeline?direction=back&limit=100&anchor=latest',
       )
-      await emit(4, 'match', mk(11))
-      await emit(4, 'match', mk(12))
-      await emit(4, 'page_end', { cursor: null, exhausted: true })
-      expect(screen.queryByText('p0·8')).not.toBeInTheDocument()
-      expect(screen.queryByText('p0·7')).not.toBeInTheDocument()
+      await emit(idx, 'match', mk(12))
+      await emit(idx, 'match', mk(11))
+      await emit(idx, 'match', mk(10))
+      await emit(idx, 'match', mk(9))
+      await emit(idx, 'page_end', { cursor: cur({ 0: 9 }), exhausted: false })
       for (const o of [12, 11, 10, 9]) expect(screen.getByText(`p0·${o}`)).toBeInTheDocument()
 
-      // Re-attached: scrolling to the top now resumes live (was auto-paused
-      // by the earlier scrollToBottom calls) — the pulse only ever shows
-      // while genuinely attached (v1.3), so seeing it here is conclusive
-      // proof the walk really re-attached, not just that the tail rows
-      // happen to match.
-      scrollToTopFarFromBottom()
+      // Re-attached: the live pulse only ever shows while genuinely
+      // attached (v1.3) — conclusive proof the jump really re-attached.
       expect(screen.getByText('● live')).toBeInTheDocument()
     })
   })

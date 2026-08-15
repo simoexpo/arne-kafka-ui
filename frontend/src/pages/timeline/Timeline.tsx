@@ -912,7 +912,32 @@ export function Timeline({
     if (cursor === null) return
     runPage('back', withFilter({ direction: 'back', limit: PAGE_LIMIT, cursor }), { resetIteration: true, attach: false })
   }
+  // Round 3 root-cause fix: forward-paging via scroll only ever makes sense
+  // once a DELIBERATE historical jump (beginning/offset/timestamp) opened a
+  // forward cursor — see this function's own caller (handleScroll) for the
+  // ORIGINAL author's own stated scope ("the symmetric top edge only ever
+  // matters once a beginning-jump...has opened a forward cursor"). That
+  // comment assumed `edges().top` could only ever become non-null after one
+  // of those jumps — but a 'default' (opened-at-'now') window ALSO gets a
+  // real, non-null top edge the instant an ordinary back-page crosses the
+  // row cap and trims the top (enforceCap's completeness backfill seeds
+  // `topMap` on every top trim, regardless of anchor context) — a case the
+  // comment never anticipated. Without this guard, scrolling to the top of
+  // such a window fires a real forward fetch chasing the LIVE tail; since
+  // the window is already at the row cap, every row that fetch recovers
+  // evicts one row back off the BOTTOM (enforceCap, entirely correct row-
+  // exact cap enforcement) — and because real time keeps passing while the
+  // reader pages backward through a live topic, that "recovery" can evict
+  // as much as an entire page's worth, silently undoing backward progress
+  // the reader had already made (the store's cursors stay byte-for-byte
+  // exact throughout — see createSlidingWindowStore's own invariants — this
+  // is a product-level decision about WHEN to fire the fetch at all, not a
+  // store correctness bug). A 'default'-context detached window's only
+  // sanctioned way back to the tail is the explicit "jump to now" pill/
+  // toggle (a full anchor reset), never an incremental scroll-triggered
+  // chase — matching that affordance's own existing, tested behavior.
   const loadNewer = () => {
+    if (!attachedRef.current && anchorContextRef.current.kind === 'default') return
     if (state.exhausted.forward && !topTrimmedSinceRef.current) return
     const cursor = storeRef.current.edges().top
     if (cursor !== null) {
