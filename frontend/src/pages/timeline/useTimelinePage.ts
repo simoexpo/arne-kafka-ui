@@ -33,7 +33,23 @@ interface TimelineCursors {
 }
 
 export interface UseTimelinePage {
-  loadPage(params: TimelinePageParams, onMatches: (m: MessageOut[]) => void): void
+  /**
+   * `onPageEnd`, if given, fires SYNCHRONOUSLY inside the very same event
+   * handler that processes the SSE `page_end` event — the same tick as the
+   * internal `cursors`/`state.loading` updates, not a render later (task 3:
+   * a caller that commits a page's rows to its own store needs that
+   * mutation to land in the SAME render as `state.loading` flipping false,
+   * or ref-based DOM handles reading the store — e.g. a scroll-position
+   * reposition — see stale, pre-commit content for exactly one render).
+   * Receives the raw `cursor`/`exhausted` straight off the wire — never
+   * called on a page error or transport error (there is no cursor to
+   * report; the caller's own error handling takes over instead).
+   */
+  loadPage(
+    params: TimelinePageParams,
+    onMatches: (m: MessageOut[]) => void,
+    onPageEnd?: (cursor: string | null, exhausted: boolean) => void,
+  ): void
   state: TimelineState
   cursors: TimelineCursors
   cancel(): void
@@ -89,7 +105,11 @@ export function useTimelinePage(cluster: string, topic: string): UseTimelinePage
   }, [cancel])
 
   const loadPage = useCallback(
-    (params: TimelinePageParams, onMatches: (m: MessageOut[]) => void) => {
+    (
+      params: TimelinePageParams,
+      onMatches: (m: MessageOut[]) => void,
+      onPageEnd?: (cursor: string | null, exhausted: boolean) => void,
+    ) => {
       // One in-flight page max: starting a new one always closes whatever
       // was running, terminal event or not.
       handleRef.current?.close()
@@ -149,6 +169,11 @@ export function useTimelinePage(cluster: string, topic: string): UseTimelinePage
             exhausted: { ...prev.exhausted, [params.direction]: exhausted },
           }))
           flush()
+          // After the internal state updates + the final flush (so a
+          // trailing partial batch has already reached the caller's
+          // `onMatches`) — see this callback's own doc comment for why this
+          // must be synchronous rather than observed via `state`/`cursors`.
+          onPageEnd?.(cursor, exhausted)
         },
         onError: (e) => {
           if (generationRef.current !== myGen) return

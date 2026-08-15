@@ -4,7 +4,20 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { FakeEventSource } from '../../test/fake-event-source'
 import * as sse from '../../api/sse'
 import type { MessageOut, SseErrorData } from '../../api/types'
+import { encodeCursor } from '../../lib/timelineCursor'
 import { Timeline } from './Timeline'
+
+// Task 3: the sliding-window store decodes every non-null cursor as a real
+// per-partition position map (see timelineCursor.ts) — unlike the old v1.4
+// store, an opaque placeholder string like 'c1' is no longer a valid
+// `page_end` cursor in these tests (`decodeCursor` throws on it). `cur`
+// mints a real one; `url` builds the exact expected request URL the same
+// way `sse.ts` does (URLSearchParams, so cursor bytes are percent-encoded
+// consistently) rather than hand-encoding base64 in assertions.
+const cur = (positions: Record<number, number>) => encodeCursor(positions)
+function url(params: Record<string, string>) {
+  return `/api/clusters/prod/topics/orders/timeline?${new URLSearchParams(params).toString()}`
+}
 
 vi.mock('../../api/sse', async (importOriginal) => ({
   ...(await importOriginal<typeof sse>()),
@@ -138,18 +151,16 @@ function scrollToBottom() {
     restoreClientHeight()
   }
 }
-function scrollToTop() {
-  fireEvent.scroll(screen.getByTestId('timeline-scroll'), { target: { scrollTop: 0 } })
-}
-
-// Same "top" gesture as scrollToTop, but with scrollHeight/clientHeight
-// stubbed far apart so the BOTTOM sentinel's own arithmetic reads a real,
-// non-zero gap (jsdom's default 0/0 would otherwise make `nearBottom` true
-// too — see BOTTOM_PIN_THRESHOLD — firing an unrelated bottom-sentinel
-// request in the same scroll event). Needed whenever a test's back cursor
-// is still live and not exhausted at the moment of the top gesture (the
-// plain `scrollToTop` above only works in scenarios where the back cursor
-// is already null/exhausted, so the bottom sentinel is a guaranteed no-op).
+// A "scroll to top" gesture with scrollHeight/clientHeight stubbed far
+// apart so the BOTTOM sentinel's own arithmetic reads a real, non-zero gap
+// (jsdom's default 0/0 would otherwise make `nearBottom` true too — see
+// BOTTOM_PIN_THRESHOLD — firing an unrelated bottom-sentinel request in the
+// same scroll event). Needed whenever the back edge is non-null and not
+// exhausted at the moment of the top gesture — task 3: this is now the
+// COMMON case (any anchor bootstrap seeds a real opposite-side edge — see
+// createSlidingWindowStore's own doc comment), so a bare `scrollTop: 0`
+// scroll event is used directly ONLY in the handful of places where the
+// back edge is genuinely null/exhausted at that point.
 function scrollToTopFarFromBottom() {
   const restoreScrollHeight = stubScrollHeight(2000)
   const restoreClientHeight = stubClientHeight(600)
@@ -170,7 +181,7 @@ describe('Timeline', () => {
     )
     await emit(0, 'match', mk(2))
     await emit(0, 'match', mk(1))
-    await emit(0, 'page_end', { cursor: 'c1', exhausted: false })
+    await emit(0, 'page_end', { cursor: cur({ 0: 1 }), exhausted: false })
 
     const rows = screen.getAllByTestId('message-row')
     expect(rows[0]).toHaveTextContent('p0·2') // newest (highest ts) first
@@ -194,18 +205,16 @@ describe('Timeline', () => {
     mockTail()
     render(<Timeline cluster="prod" topic="orders" />)
     await emit(0, 'match', mk(9))
-    await emit(0, 'page_end', { cursor: 'c1', exhausted: false })
+    await emit(0, 'page_end', { cursor: cur({ 0: 9 }), exhausted: false })
     expect(screen.getByText('p0·9')).toBeInTheDocument()
     // Scroll is the only pagination affordance — no button, even though a
     // back cursor exists and the direction isn't exhausted.
     expect(screen.queryByTestId('load-older')).not.toBeInTheDocument()
 
     scrollToBottom()
-    expect(FakeEventSource.instances[1].url).toBe(
-      '/api/clusters/prod/topics/orders/timeline?direction=back&limit=100&cursor=c1',
-    )
+    expect(FakeEventSource.instances[1].url).toBe(url({ direction: 'back', limit: '100', cursor: cur({ 0: 9 }) }))
     await emit(1, 'match', mk(3))
-    await emit(1, 'page_end', { cursor: 'c2', exhausted: false })
+    await emit(1, 'page_end', { cursor: cur({ 0: 3 }), exhausted: false })
 
     expect(screen.getByText('p0·9')).toBeInTheDocument()
     expect(screen.getByText('p0·3')).toBeInTheDocument()
@@ -215,9 +224,9 @@ describe('Timeline', () => {
     mockTail()
     render(<Timeline cluster="prod" topic="orders" />)
     // No matches, but a cursor + not-exhausted: the empty-page contract.
-    await emit(0, 'page_end', { cursor: 'c1', exhausted: false })
+    await emit(0, 'page_end', { cursor: cur({ 0: 5 }), exhausted: false })
     expect(FakeEventSource.instances).toHaveLength(2)
-    expect(FakeEventSource.instances[1].url).toContain('cursor=c1')
+    expect(FakeEventSource.instances[1].url).toBe(url({ direction: 'back', limit: '100', cursor: cur({ 0: 5 }) }))
   })
 
   it('stops auto-continuing at the iteration cap and shows the continue affordance', async () => {
@@ -229,7 +238,7 @@ describe('Timeline', () => {
     // forever.
     for (let i = 0; i < 25; i++) {
       const idx = FakeEventSource.instances.length - 1
-      await emit(idx, 'page_end', { cursor: `c${i + 1}`, exhausted: false })
+      await emit(idx, 'page_end', { cursor: cur({ 0: i + 1 }), exhausted: false })
       if (screen.queryByTestId('continue-scan')) break
     }
     expect(screen.getByTestId('continue-scan')).toBeInTheDocument()
@@ -272,7 +281,7 @@ describe('Timeline', () => {
     mockTail()
     render(<Timeline cluster="prod" topic="orders" />)
     await emit(0, 'match', mk(1))
-    await emit(0, 'page_end', { cursor: 'c1', exhausted: false })
+    await emit(0, 'page_end', { cursor: cur({ 0: 9 }), exhausted: false })
     expect(screen.getByText('p0·1')).toBeInTheDocument()
 
     scrollToBottom()
@@ -286,7 +295,7 @@ describe('Timeline', () => {
     mockTail()
     render(<Timeline cluster="prod" topic="orders" />)
     await emit(0, 'match', mk(1))
-    await emit(0, 'page_end', { cursor: 'c1', exhausted: false })
+    await emit(0, 'page_end', { cursor: cur({ 0: 9 }), exhausted: false })
 
     scrollToBottom()
     await emit(1, 'error', {
@@ -304,7 +313,7 @@ describe('Timeline', () => {
     mockTail()
     render(<Timeline cluster="prod" topic="orders" />)
     await emit(0, 'match', mk(1))
-    await emit(0, 'page_end', { cursor: 'c1', exhausted: false })
+    await emit(0, 'page_end', { cursor: cur({ 0: 9 }), exhausted: false })
 
     scrollToBottom()
     await act(async () => {
@@ -320,7 +329,7 @@ describe('Timeline', () => {
     await emit(0, 'match', mk(1, {
       value: { encoding: 'decode_error', text: 'AAECAw==', schema_id: 9, error: 'schema registry returned 404 for schema id 9' },
     }))
-    await emit(0, 'page_end', { cursor: 'c1', exhausted: false })
+    await emit(0, 'page_end', { cursor: cur({ 0: 9 }), exhausted: false })
     expect(screen.getByText('schema registry returned 404 for schema id 9')).toBeInTheDocument()
     expect(screen.getByText('decode_error')).toBeInTheDocument()
   })
@@ -473,15 +482,13 @@ describe('Timeline', () => {
       mockTail()
       render(<Timeline cluster="prod" topic="orders" />)
       await emit(0, 'match', mk(9))
-      await emit(0, 'page_end', { cursor: 'c1', exhausted: false })
+      await emit(0, 'page_end', { cursor: cur({ 0: 9 }), exhausted: false })
       expect(FakeEventSource.instances).toHaveLength(1)
 
       scrollToBottom()
 
       expect(FakeEventSource.instances).toHaveLength(2)
-      expect(FakeEventSource.instances[1].url).toBe(
-        '/api/clusters/prod/topics/orders/timeline?direction=back&limit=100&cursor=c1',
-      )
+      expect(FakeEventSource.instances[1].url).toBe(url({ direction: 'back', limit: '100', cursor: cur({ 0: 9 }) }))
     })
 
     it('scrolling near the bottom does nothing once exhausted (no cursor to chase)', async () => {
@@ -500,7 +507,7 @@ describe('Timeline', () => {
       mockTail()
       render(<Timeline cluster="prod" topic="orders" />)
       await emit(0, 'match', mk(9))
-      await emit(0, 'page_end', { cursor: 'c1', exhausted: false })
+      await emit(0, 'page_end', { cursor: cur({ 0: 9 }), exhausted: false })
 
       scrollToBottom() // instance[1] now in flight, loading:true
       expect(FakeEventSource.instances).toHaveLength(2)
@@ -518,19 +525,22 @@ describe('Timeline', () => {
       const user = userEvent.setup()
       render(<Timeline cluster="prod" topic="orders" />)
       await emit(0, 'match', mk(9))
-      await emit(0, 'page_end', { cursor: 'c1', exhausted: false })
+      await emit(0, 'page_end', { cursor: cur({ 0: 9 }), exhausted: false })
 
       await user.click(screen.getByTestId('jump-beginning'))
       await emit(1, 'match', mk(2))
-      await emit(1, 'page_end', { cursor: 'c9', exhausted: false })
+      await emit(1, 'page_end', { cursor: cur({ 0: 3 }), exhausted: false })
       expect(FakeEventSource.instances).toHaveLength(2)
 
-      scrollToTop()
+      // Task 3: the beginning anchor bootstrap also seeded a real (non-
+      // exhausted) BOTTOM edge from its own rows (the store's documented
+      // opposite-side anchor seed), so a plain scrollToTop() here would
+      // ALSO fire the bottom sentinel — scrollToTopFarFromBottom isolates
+      // the top sentinel under test, same as its own doc comment describes.
+      scrollToTopFarFromBottom()
 
       expect(FakeEventSource.instances).toHaveLength(3)
-      expect(FakeEventSource.instances[2].url).toBe(
-        '/api/clusters/prod/topics/orders/timeline?direction=forward&limit=100&cursor=c9',
-      )
+      expect(FakeEventSource.instances[2].url).toBe(url({ direction: 'forward', limit: '100', cursor: cur({ 0: 3 }) }))
     })
 
     // Scroll anchoring (design spec v1.3, owner feedback 2026-08-15): a
@@ -548,13 +558,17 @@ describe('Timeline', () => {
       const user = userEvent.setup()
       render(<Timeline cluster="prod" topic="orders" />)
       await emit(0, 'match', mk(9))
-      await emit(0, 'page_end', { cursor: 'c1', exhausted: false })
+      await emit(0, 'page_end', { cursor: cur({ 0: 9 }), exhausted: false })
 
       await user.click(screen.getByTestId('jump-beginning'))
       await emit(1, 'match', mk(2))
-      await emit(1, 'page_end', { cursor: 'c9', exhausted: false })
+      await emit(1, 'page_end', { cursor: cur({ 0: 3 }), exhausted: false })
 
-      scrollToTop() // fires the forward page request (instance[2])
+      // Task 3: isolates the top sentinel (see scrollToTopFarFromBottom's
+      // own doc comment) — the beginning bootstrap also seeded a real,
+      // non-exhausted bottom edge, so a plain scrollToTop() would also fire
+      // an unrelated bottom-sentinel request in the same scroll event.
+      scrollToTopFarFromBottom() // fires the forward page request (instance[2])
       expect(FakeEventSource.instances).toHaveLength(3)
 
       // While that page is in flight, the reader keeps reading — scrolled
@@ -569,7 +583,7 @@ describe('Timeline', () => {
       try {
         await emit(2, 'match', mk(3))
         scroll.setter.mockClear()
-        await emit(2, 'page_end', { cursor: 'c-fwd', exhausted: false })
+        await emit(2, 'page_end', { cursor: cur({ 0: 4 }), exhausted: false })
         // Anchored at the junction: scrollTop nudged by exactly B - A
         // (2400 - 2000 = 400), landing on 500 + 400 = 900 — never left at
         // the numerically-unchanged 500.
@@ -587,7 +601,7 @@ describe('Timeline', () => {
       const user = userEvent.setup()
       render(<Timeline cluster="prod" topic="orders" />)
       await emit(0, 'match', mk(9))
-      await emit(0, 'page_end', { cursor: 'c1', exhausted: false })
+      await emit(0, 'page_end', { cursor: cur({ 0: 9 }), exhausted: false })
       expect(screen.getByText('p0·9')).toBeInTheDocument()
 
       await user.click(screen.getByTestId('jump-beginning'))
@@ -596,7 +610,7 @@ describe('Timeline', () => {
         '/api/clusters/prod/topics/orders/timeline?direction=forward&limit=100&anchor=beginning',
       )
       await emit(1, 'match', mk(2))
-      await emit(1, 'page_end', { cursor: 'c9', exhausted: false })
+      await emit(1, 'page_end', { cursor: cur({ 0: 3 }), exhausted: false })
       expect(screen.getByText('p0·2')).toBeInTheDocument()
 
       // Paused-auto: a live message buffers instead of prepending.
@@ -610,7 +624,7 @@ describe('Timeline', () => {
       const user = userEvent.setup()
       render(<Timeline cluster="prod" topic="orders" />)
       await emit(0, 'match', mk(9))
-      await emit(0, 'page_end', { cursor: 'c1', exhausted: false })
+      await emit(0, 'page_end', { cursor: cur({ 0: 9 }), exhausted: false })
 
       // Get into a paused (detached) state first via a beginning jump — the
       // forward cursor must stay open (not exhausted) here, since a forward
@@ -618,7 +632,7 @@ describe('Timeline', () => {
       // (caught the tail already) rather than staying paused.
       await user.click(screen.getByTestId('jump-beginning'))
       await emit(1, 'match', mk(2))
-      await emit(1, 'page_end', { cursor: 'c-fwd', exhausted: false })
+      await emit(1, 'page_end', { cursor: cur({ 0: 3 }), exhausted: false })
       await act(async () => tail.handlers().onMessage(mk(3)))
       expect(screen.getByText('▲ 1 new')).toBeInTheDocument()
 
@@ -642,7 +656,7 @@ describe('Timeline', () => {
       const user = userEvent.setup()
       render(<Timeline cluster="prod" topic="orders" />)
       await emit(0, 'match', mk(9))
-      await emit(0, 'page_end', { cursor: 'c1', exhausted: false })
+      await emit(0, 'page_end', { cursor: cur({ 0: 9 }), exhausted: false })
 
       await user.click(screen.getByTestId('jump-offset'))
       await user.type(screen.getByTestId('jump-offset-partition-input'), '1')
@@ -660,7 +674,7 @@ describe('Timeline', () => {
       const user = userEvent.setup()
       render(<Timeline cluster="prod" topic="orders" />)
       await emit(0, 'match', mk(9))
-      await emit(0, 'page_end', { cursor: 'c1', exhausted: false })
+      await emit(0, 'page_end', { cursor: cur({ 0: 9 }), exhausted: false })
 
       await user.click(screen.getByTestId('jump-timestamp'))
       await user.type(screen.getByTestId('jump-timestamp-input'), '1700000000000')
@@ -678,7 +692,7 @@ describe('Timeline', () => {
       render(<Timeline cluster="prod" topic="orders" />)
       // latest page lands with a back cursor -> bottom-scroll pagination is live.
       await emit(0, 'match', mk(9))
-      await emit(0, 'page_end', { cursor: 'c1', exhausted: false })
+      await emit(0, 'page_end', { cursor: cur({ 0: 9 }), exhausted: false })
       expect(screen.queryByTestId('load-older')).not.toBeInTheDocument() // no button — scroll only
 
       // Page further back once, so the back cursor is now 'c2' (not just
@@ -688,7 +702,7 @@ describe('Timeline', () => {
       scrollToBottom()
       expect(FakeEventSource.instances).toHaveLength(2)
       await emit(1, 'match', mk(4))
-      await emit(1, 'page_end', { cursor: 'c2', exhausted: false })
+      await emit(1, 'page_end', { cursor: cur({ 0: 4 }), exhausted: false })
 
       // Jump to beginning: the old back cursor ('c2') must NOT survive. Note:
       // a bottom-scroll can't even be attempted in this exact window — the
@@ -704,22 +718,25 @@ describe('Timeline', () => {
 
       // The beginning page lands and sets a fresh forward cursor.
       await emit(2, 'match', mk(1))
-      await emit(2, 'page_end', { cursor: 'c-fwd-new', exhausted: false })
+      await emit(2, 'page_end', { cursor: cur({ 0: 2 }), exhausted: false })
       expect(screen.queryByTestId('load-newer')).not.toBeInTheDocument() // no button — scroll only
 
-      // Back cursor is still gone (exhausted.back/cursors.back were reset,
-      // not silently repopulated by the forward page's own update) —
-      // another bottom-scroll still fires no request.
+      // Task 3: the beginning bootstrap ALSO seeded a real bottom edge from
+      // its own rows (the store's documented opposite-side anchor seed —
+      // it has no way to know "beginning" has nothing below). A
+      // bottom-scroll here legitimately fires now; what this test proves is
+      // that it carries the FRESH seed, never anything surviving from
+      // before the jump (the stale 'c2'-shaped cursor).
       scrollToBottom()
-      expect(FakeEventSource.instances).toHaveLength(3)
-
-      // A top-scroll's request must carry the FRESH post-jump cursor, never
-      // the stale pre-jump back cursor ('c2').
-      scrollToTop()
       expect(FakeEventSource.instances).toHaveLength(4)
-      expect(FakeEventSource.instances[3].url).toBe(
-        '/api/clusters/prod/topics/orders/timeline?direction=forward&limit=100&cursor=c-fwd-new',
-      )
+      expect(FakeEventSource.instances[3].url).toBe(url({ direction: 'back', limit: '100', cursor: cur({ 0: 1 }) }))
+      await emit(3, 'page_end', { cursor: null, exhausted: true })
+
+      // A top-scroll's request must carry the FRESH post-jump forward
+      // cursor, never anything from before the jump.
+      scrollToTopFarFromBottom()
+      expect(FakeEventSource.instances).toHaveLength(5)
+      expect(FakeEventSource.instances[4].url).toBe(url({ direction: 'forward', limit: '100', cursor: cur({ 0: 2 }) }))
     })
 
     // Note on these tests: clearing the store synchronously on every jump
@@ -738,7 +755,7 @@ describe('Timeline', () => {
       const user = userEvent.setup()
       render(<Timeline cluster="prod" topic="orders" />)
       await emit(0, 'match', mk(9))
-      await emit(0, 'page_end', { cursor: 'c1', exhausted: false })
+      await emit(0, 'page_end', { cursor: cur({ 0: 9 }), exhausted: false })
 
       const scroll = spyOnScrollTop()
       try {
@@ -757,7 +774,7 @@ describe('Timeline', () => {
       const user = userEvent.setup()
       render(<Timeline cluster="prod" topic="orders" />)
       await emit(0, 'match', mk(9))
-      await emit(0, 'page_end', { cursor: 'c1', exhausted: false })
+      await emit(0, 'page_end', { cursor: cur({ 0: 9 }), exhausted: false })
 
       const restoreHeight = stubScrollHeight(4000)
       const scroll = spyOnScrollTop()
@@ -765,7 +782,7 @@ describe('Timeline', () => {
         await user.click(screen.getByTestId('jump-beginning'))
         await emit(1, 'match', mk(1))
         scroll.setter.mockClear()
-        await emit(1, 'page_end', { cursor: 'c-fwd', exhausted: false })
+        await emit(1, 'page_end', { cursor: cur({ 0: 2 }), exhausted: false })
         // scrollTop = scrollHeight (the clamp-to-bottom trick) — asserting
         // the stubbed 4000 (not a hardcoded 0) proves it read scrollHeight
         // rather than coincidentally landing on the same value as "top".
@@ -781,7 +798,7 @@ describe('Timeline', () => {
       const user = userEvent.setup()
       render(<Timeline cluster="prod" topic="orders" />)
       await emit(0, 'match', mk(9))
-      await emit(0, 'page_end', { cursor: 'c1', exhausted: false })
+      await emit(0, 'page_end', { cursor: cur({ 0: 9 }), exhausted: false })
 
       const scroll = spyOnScrollTop()
       try {
@@ -805,14 +822,18 @@ describe('Timeline', () => {
       const user = userEvent.setup()
       render(<Timeline cluster="prod" topic="orders" />)
       await emit(0, 'match', mk(9))
-      await emit(0, 'page_end', { cursor: 'c1', exhausted: false })
+      await emit(0, 'page_end', { cursor: cur({ 0: 9 }), exhausted: false })
 
       await user.click(screen.getByTestId('jump-beginning'))
       await emit(1, 'match', mk(2))
-      await emit(1, 'page_end', { cursor: 'c9', exhausted: false })
+      await emit(1, 'page_end', { cursor: cur({ 0: 3 }), exhausted: false })
       expect(screen.getByText('p0·2')).toBeInTheDocument()
 
-      scrollToTop() // pinned to top of the DETACHED window — must not resume live
+      // scrollToTopFarFromBottom (not plain scrollToTop): the beginning
+      // bootstrap also seeded a real, non-exhausted bottom edge (the
+      // store's opposite-side anchor seed) — isolates the top sentinel
+      // under test from an unrelated bottom-sentinel fire.
+      scrollToTopFarFromBottom() // pinned to top of the DETACHED window — must not resume live
       await act(async () => tail.handlers().onMessage(mk(50)))
       expect(screen.queryByText('p0·50')).not.toBeInTheDocument()
       expect(screen.getByText('▲ 1 new')).toBeInTheDocument()
@@ -823,11 +844,11 @@ describe('Timeline', () => {
       const user = userEvent.setup()
       render(<Timeline cluster="prod" topic="orders" />)
       await emit(0, 'match', mk(9))
-      await emit(0, 'page_end', { cursor: 'c1', exhausted: false })
+      await emit(0, 'page_end', { cursor: cur({ 0: 9 }), exhausted: false })
 
       await user.click(screen.getByTestId('jump-beginning'))
       await emit(1, 'match', mk(2))
-      await emit(1, 'page_end', { cursor: 'c9', exhausted: false })
+      await emit(1, 'page_end', { cursor: cur({ 0: 3 }), exhausted: false })
 
       await act(async () => tail.handlers().onMessage(mk(50)))
       expect(screen.getByText('▲ 1 new')).toBeInTheDocument()
@@ -849,8 +870,14 @@ describe('Timeline', () => {
         await emit(idx, 'page_end', { cursor: null, exhausted: true })
         expect(scroll.setter).toHaveBeenCalledWith(0)
 
-        await act(async () => tail.handlers().onMessage(mk(11)))
-        expect(screen.getByText('p0·11')).toBeInTheDocument()
+        // Offset above what the fresh 'now' page itself just fetched (20) —
+        // a real live tail message can never legitimately arrive BELOW a
+        // 'latest' anchor's own snapshot (offsets only increase); mk(11)
+        // would be. That's not this test's concern (the store's own N2
+        // defensive-drop unit tests cover the below-bound case) — this one
+        // proves ordinary live merging resumed after re-attaching.
+        await act(async () => tail.handlers().onMessage(mk(21)))
+        expect(screen.getByText('p0·21')).toBeInTheDocument()
       } finally {
         scroll.restore()
       }
@@ -861,18 +888,19 @@ describe('Timeline', () => {
       const user = userEvent.setup()
       render(<Timeline cluster="prod" topic="orders" />)
       await emit(0, 'match', mk(9))
-      await emit(0, 'page_end', { cursor: 'c1', exhausted: false })
+      await emit(0, 'page_end', { cursor: cur({ 0: 9 }), exhausted: false })
 
       await user.click(screen.getByTestId('jump-beginning'))
       await emit(1, 'match', mk(2))
-      await emit(1, 'page_end', { cursor: 'c9', exhausted: false }) // forward cursor open, not exhausted yet
+      await emit(1, 'page_end', { cursor: cur({ 0: 3 }), exhausted: false }) // forward cursor open, not exhausted yet
 
       await act(async () => tail.handlers().onMessage(mk(50)))
       expect(screen.getByText('▲ 1 new')).toBeInTheDocument()
 
       // Forward-paginate toward the tail (top-scroll sentinel, independent of
-      // the live-resume gate).
-      scrollToTop()
+      // the live-resume gate). scrollToTopFarFromBottom isolates it from the
+      // beginning bootstrap's own (real, non-exhausted) seeded bottom edge.
+      scrollToTopFarFromBottom()
       expect(FakeEventSource.instances).toHaveLength(3)
       await emit(2, 'match', mk(3))
       await emit(2, 'page_end', { cursor: null, exhausted: true }) // caught the tail
@@ -892,16 +920,23 @@ describe('Timeline', () => {
       const user = userEvent.setup()
       const { container } = render(<Timeline cluster="prod" topic="orders" />)
       await emit(0, 'match', mk(9))
-      await emit(0, 'page_end', { cursor: 'c1', exhausted: false })
+      await emit(0, 'page_end', { cursor: cur({ 0: 9 }), exhausted: false })
 
       await user.click(screen.getByTestId('jump-offset'))
       await user.type(screen.getByTestId('jump-offset-partition-input'), '1')
       await user.type(screen.getByTestId('jump-offset-value-input'), '77')
       await user.click(screen.getByTestId('jump-offset-apply'))
       await emit(1, 'match', mk(5))
-      await emit(1, 'page_end', { cursor: 'c2', exhausted: false })
+      await emit(1, 'page_end', { cursor: cur({ 0: 5 }), exhausted: false })
 
-      await act(async () => tail.handlers().onMessage(mk(50)))
+      // Task 3 (hard requirement): an offset jump's own store-level anchor
+      // bootstrap is deliberately NOT attached (M-new) — a live message
+      // here must buffer, never reach `insertLive` at all, so the store's
+      // throw-on-detached precondition can't fire. Asserted explicitly
+      // (not just implicitly via "doesn't crash the test run").
+      await act(async () => {
+        expect(() => tail.handlers().onMessage(mk(50))).not.toThrow()
+      })
       expect(screen.queryByText('p0·50')).not.toBeInTheDocument()
       expect(screen.getByText('▲ 1 new')).toBeInTheDocument()
       const toggle = screen.getByTestId('play-pause-toggle')
@@ -909,16 +944,51 @@ describe('Timeline', () => {
       expect(container.querySelector('[data-staleness]')).toBeNull()
     })
 
+    // Task 3 (hard requirement, store review carry-over): `insertLive`
+    // throws if ever called while the store is detached — the earlier
+    // "offset jump detaches too" test proves the OFFSET-jump case never
+    // reaches it (buffers instead). This test proves the more insidious
+    // race: 'now' clears the store immediately (genuinely detached for a
+    // moment) but the UI's own `attached` state also flips false at the
+    // very same click — deferred until the fresh anchor page's own
+    // `insertPage` call CONFIRMS the store is attached again (see
+    // Timeline.tsx's `attached` state doc comment) — so a live message
+    // arriving in the gap between the click and that page landing must
+    // buffer, never throw.
+    it('a live message arriving between a jump-to-now click and its page landing buffers instead of throwing', async () => {
+      const tail = mockTail()
+      const user = userEvent.setup()
+      render(<Timeline cluster="prod" topic="orders" />)
+      await emit(0, 'match', mk(9))
+      await emit(0, 'page_end', { cursor: cur({ 0: 9 }), exhausted: false })
+
+      await user.click(screen.getByTestId('jump-now'))
+      // The fresh 'now' page is in flight but hasn't landed yet.
+      await act(async () => {
+        expect(() => tail.handlers().onMessage(mk(50))).not.toThrow()
+      })
+      expect(screen.queryByText('p0·50')).not.toBeInTheDocument()
+
+      const idx = FakeEventSource.instances.length - 1
+      await emit(idx, 'match', mk(20))
+      await emit(idx, 'page_end', { cursor: null, exhausted: true })
+      // Landed + confirmed attached: the buffered message flushes in, and
+      // live resumes for anything arriving after.
+      expect(screen.getByText('p0·50')).toBeInTheDocument()
+      await act(async () => tail.handlers().onMessage(mk(60)))
+      expect(screen.getByText('p0·60')).toBeInTheDocument()
+    })
+
     it('detached header: toggle shows paused, no chip, no live pulse', async () => {
       mockTail()
       const user = userEvent.setup()
       const { container } = render(<Timeline cluster="prod" topic="orders" />)
       await emit(0, 'match', mk(9))
-      await emit(0, 'page_end', { cursor: 'c1', exhausted: false })
+      await emit(0, 'page_end', { cursor: cur({ 0: 9 }), exhausted: false })
 
       await user.click(screen.getByTestId('jump-beginning'))
       await emit(1, 'match', mk(2))
-      await emit(1, 'page_end', { cursor: 'c9', exhausted: false })
+      await emit(1, 'page_end', { cursor: cur({ 0: 3 }), exhausted: false })
 
       const toggle = screen.getByTestId('play-pause-toggle')
       expect(toggle).toHaveAttribute('aria-pressed', 'true')
@@ -932,11 +1002,11 @@ describe('Timeline', () => {
       const user = userEvent.setup()
       render(<Timeline cluster="prod" topic="orders" />)
       await emit(0, 'match', mk(9))
-      await emit(0, 'page_end', { cursor: 'c1', exhausted: false })
+      await emit(0, 'page_end', { cursor: cur({ 0: 9 }), exhausted: false })
 
       await user.click(screen.getByTestId('jump-beginning'))
       await emit(1, 'match', mk(2))
-      await emit(1, 'page_end', { cursor: 'c9', exhausted: false })
+      await emit(1, 'page_end', { cursor: cur({ 0: 3 }), exhausted: false })
 
       await user.click(screen.getByTestId('play-pause-toggle'))
       // Abandons the historical window in place, same as the pill click.
@@ -950,9 +1020,11 @@ describe('Timeline', () => {
       await emit(idx, 'page_end', { cursor: null, exhausted: true })
 
       // Re-attached: a subsequent tail message inserts straight into the
-      // store — proving live merging actually resumed.
-      await act(async () => tail.handlers().onMessage(mk(11)))
-      expect(screen.getByText('p0·11')).toBeInTheDocument()
+      // store — proving live merging actually resumed. Offset above what
+      // the fresh 'now' page itself fetched (20) — a real live message can
+      // never legitimately arrive below a 'latest' anchor's own snapshot.
+      await act(async () => tail.handlers().onMessage(mk(21)))
+      expect(screen.getByText('p0·21')).toBeInTheDocument()
     })
 
     // Contrast case: the live stream dying while still ATTACHED is a
@@ -986,7 +1058,7 @@ describe('Timeline', () => {
       render(<Timeline cluster="prod" topic="orders" windowCap={3} />)
       await emit(0, 'match', mk(9))
       await emit(0, 'match', mk(8))
-      await emit(0, 'page_end', { cursor: 'c1', exhausted: false })
+      await emit(0, 'page_end', { cursor: cur({ 0: 9 }), exhausted: false })
       expect(screen.getByText('p0·9')).toBeInTheDocument()
       expect(screen.getByText('p0·8')).toBeInTheDocument()
 
@@ -1001,7 +1073,7 @@ describe('Timeline', () => {
       scrollToBottom()
       await emit(1, 'match', mk(7))
       await emit(1, 'match', mk(6))
-      await emit(1, 'page_end', { cursor: 'c2', exhausted: false })
+      await emit(1, 'page_end', { cursor: cur({ 0: 6 }), exhausted: false })
 
       expect(screen.queryByText('p0·9')).not.toBeInTheDocument() // dropped off the top
       expect(screen.getByText('p0·8')).toBeInTheDocument()
@@ -1029,106 +1101,86 @@ describe('Timeline', () => {
       )
     })
 
-    it('bottom drops invalidate the back cursor: next bottom scroll repositions by timestamp', async () => {
+    // Task 3 (supersedes the v1.4 "bottom drops invalidate the back cursor
+    // ... repositions by timestamp" test): the sliding-window store's own
+    // bottom map ALWAYS advances to a real, exact, followable cursor when a
+    // trim happens — the whole point of the redesign is that there is
+    // nothing left to reposition. A further bottom-scroll just uses that
+    // cursor directly, and content never resets (previously-held rows stay,
+    // only the trimmed range gets re-fetched).
+    it('a bottom trim leaves the store\'s own bottom edge exact — a further bottom-scroll re-fetches via that cursor, never a reposition', async () => {
       const tail = mockTail()
       render(<Timeline cluster="prod" topic="orders" windowCap={3} />)
       await emit(0, 'match', mk(11))
       await emit(0, 'match', mk(10))
-      await emit(0, 'page_end', { cursor: 'c1', exhausted: false })
+      await emit(0, 'page_end', { cursor: cur({ 0: 10 }), exhausted: false })
       expect(screen.getByText('p0·11')).toBeInTheDocument()
       expect(screen.getByText('p0·10')).toBeInTheDocument()
 
       // Two live inserts push the store past cap(3): the oldest row
-      // (p0·10) drops off the bottom, invalidating the back cursor ('c1')
-      // that still points at (now past) it.
+      // (p0·10) trims off the bottom, advancing the store's own bottom edge
+      // past it — to exactly the trimmed offset, per the store's rule 3.
       await act(async () => tail.handlers().onMessage(mk(12)))
       await act(async () => tail.handlers().onMessage(mk(13)))
-      expect(screen.queryByText('p0·10')).not.toBeInTheDocument() // dropped off the bottom
+      expect(screen.queryByText('p0·10')).not.toBeInTheDocument() // trimmed off the bottom
       expect(screen.getByText('p0·11')).toBeInTheDocument() // now the bottom row
 
       scrollToBottom()
-      // Must NOT follow the stale cursor — reposition via a fresh
-      // timestamp-anchored back page at the (new) bottom row's timestamp.
-      const req = FakeEventSource.instances.at(-1)!.url
-      expect(req).toBe(
-        '/api/clusters/prod/topics/orders/timeline?direction=back&limit=100&anchor=timestamp&ts_ms=1011',
-      )
-      expect(req).not.toContain('cursor=')
+      // No reposition: the request carries the store's own minted bottom
+      // cursor directly.
+      expect(FakeEventSource.instances.at(-1)!.url).toBe(url({ direction: 'back', limit: '100', cursor: cur({ 0: 11 }) }))
 
       const idx = FakeEventSource.instances.length - 1
-      await emit(idx, 'match', mk(20))
-      await emit(idx, 'page_end', { cursor: 'c9', exhausted: false })
-      // Store cleared: the old (pre-reposition) rows are gone, only the
-      // fresh page's rows remain.
-      expect(screen.queryByText('p0·11')).not.toBeInTheDocument()
-      expect(screen.queryByText('p0·13')).not.toBeInTheDocument()
-      expect(screen.getByText('p0·20')).toBeInTheDocument()
+      await emit(idx, 'match', mk(10))
+      await emit(idx, 'page_end', { cursor: null, exhausted: true })
+      // Content never resets: the trimmed row is recovered exactly, on top
+      // of what was already held — never by discarding and starting over.
+      expect(screen.getByText('p0·12')).toBeInTheDocument()
+      expect(screen.getByText('p0·11')).toBeInTheDocument()
+      expect(screen.getByText('p0·10')).toBeInTheDocument()
     })
 
-    it('reposition resets drop flags: subsequent pagination uses cursors again', async () => {
-      const tail = mockTail()
-      render(<Timeline cluster="prod" topic="orders" windowCap={3} />)
-      await emit(0, 'match', mk(11))
-      await emit(0, 'match', mk(10))
-      await emit(0, 'page_end', { cursor: 'c1', exhausted: false })
-
-      await act(async () => tail.handlers().onMessage(mk(12)))
-      await act(async () => tail.handlers().onMessage(mk(13))) // bottom drop
-
-      scrollToBottom() // repositions via timestamp instead of the stale cursor
-      const repositionIdx = FakeEventSource.instances.length - 1
-      expect(FakeEventSource.instances[repositionIdx].url).toContain('anchor=timestamp')
-
-      await emit(repositionIdx, 'match', mk(20))
-      await emit(repositionIdx, 'page_end', { cursor: 'c9', exhausted: false })
-
-      // Fresh window landed with a real cursor and no further drops: the
-      // next bottom-scroll goes back to normal cursor-based pagination.
-      scrollToBottom()
-      const nextIdx = FakeEventSource.instances.length - 1
-      expect(FakeEventSource.instances[nextIdx].url).toBe(
-        '/api/clusters/prod/topics/orders/timeline?direction=back&limit=100&cursor=c9',
-      )
-    })
-
-    // Coverage gap: the bottom-drop reposition test above only exercises
-    // 'back' direction. The forward mirror ('back'-origin top drop, then a
-    // top gesture) must anchor forward from the top row's own timestamp —
-    // not follow the (in this exact scenario, never-yet-opened) forward
-    // cursor.
-    it('top drops reposition forward from the top row timestamp on a top gesture', async () => {
+    // Symmetric mirror of the bottom-trim test above: a 'back'-origin top
+    // trim also leaves a real, exact top edge — a further top-scroll uses
+    // it directly, never a reposition.
+    it('a top trim leaves the store\'s own top edge exact — a further top-scroll re-fetches via that cursor, never a reposition', async () => {
       mockTail()
       render(<Timeline cluster="prod" topic="orders" windowCap={3} />)
       await emit(0, 'match', mk(9))
       await emit(0, 'match', mk(8))
-      await emit(0, 'page_end', { cursor: 'c1', exhausted: false })
+      await emit(0, 'page_end', { cursor: cur({ 0: 8 }), exhausted: false })
 
-      // Same top-drop setup as above: back page pushes 4 rows against
-      // cap(3), the newest (p0·9) drops off the top -> detach.
+      // Same top-trim setup as the detach test above: a back page pushes 4
+      // rows against cap(3), the newest (p0·9) trims off the top -> detach.
       scrollToBottom()
       await emit(1, 'match', mk(7))
       await emit(1, 'match', mk(6))
-      await emit(1, 'page_end', { cursor: 'c2', exhausted: false })
+      await emit(1, 'page_end', { cursor: cur({ 0: 6 }), exhausted: false })
       expect(screen.queryByText('p0·9')).not.toBeInTheDocument()
 
-      // The back cursor ('c2') is still live and not exhausted here — use
-      // the far-from-bottom top gesture so the bottom sentinel doesn't also
+      // The back cursor is still live and not exhausted here — use the
+      // far-from-bottom top gesture so the bottom sentinel doesn't also
       // fire in the same scroll event (see the helper's own comment).
       scrollToTopFarFromBottom()
-      const req = FakeEventSource.instances.at(-1)!.url
-      // Current top row after the drop is p0·8 (ts 1008) — anchors forward
-      // from there, never the (null) forward cursor.
-      expect(req).toBe(
-        '/api/clusters/prod/topics/orders/timeline?direction=forward&limit=100&anchor=timestamp&ts_ms=1008',
-      )
-      expect(req).not.toContain('cursor=')
+      // No reposition: the request carries the store's own minted top
+      // cursor directly — exactly the trimmed offset (9).
+      expect(FakeEventSource.instances.at(-1)!.url).toBe(url({ direction: 'forward', limit: '100', cursor: cur({ 0: 9 }) }))
+
+      const idx = FakeEventSource.instances.length - 1
+      await emit(idx, 'match', mk(9))
+      await emit(idx, 'page_end', { cursor: null, exhausted: true })
+      // Content never resets: the trimmed row is recovered exactly.
+      expect(screen.getByText('p0·9')).toBeInTheDocument()
+      expect(screen.getByText('p0·8')).toBeInTheDocument()
     })
 
-    // F2: the caption claims the window's oldest row IS the topic's first
-    // message — a bottom drop makes that false even while state.exhausted
-    // .back is still (stale) true, so it must disappear until a fresh
-    // reposition genuinely re-earns exhaustion.
-    it('a bottom drop hides the beginning-of-topic caption until a reposition re-earns it', async () => {
+    // F2 (task-3 carry-over): the caption claims the window's oldest row IS
+    // the topic's first message — a bottom trim makes that false even
+    // while `state.exhausted.back` is still (stale) true from before the
+    // trim, so it must disappear until a FRESH back page genuinely re-earns
+    // exhaustion (bottomTrimmedSinceRef — see Timeline.tsx's own comment —
+    // overrides the stale flag for both the caption and loadOlder's gate).
+    it('a bottom trim hides the beginning-of-topic caption until a fresh back page genuinely re-earns exhaustion', async () => {
       const tail = mockTail()
       render(<Timeline cluster="prod" topic="orders" windowCap={3} />)
       await emit(0, 'match', mk(11))
@@ -1136,63 +1188,124 @@ describe('Timeline', () => {
       await emit(0, 'page_end', { cursor: null, exhausted: true }) // genuinely exhausted
       expect(screen.getByText('— beginning of topic —')).toBeInTheDocument()
 
-      // Live traffic pushes the store past cap(3): the oldest row drops off
+      // Live traffic pushes the store past cap(3): the oldest row trims off
       // the bottom. The caption's claim is now false, even though
       // state.exhausted.back is still (stale) true.
       await act(async () => tail.handlers().onMessage(mk(12)))
       await act(async () => tail.handlers().onMessage(mk(13)))
       expect(screen.queryByText('— beginning of topic —')).not.toBeInTheDocument()
 
-      // Bottom-scroll repositions (proving the drop flag gates ahead of the
-      // stale "exhausted, null cursor -> no-op" path too).
+      // Bottom-scroll fires for real (the same override also un-gates
+      // loadOlder itself, not just the caption) using the store's own real
+      // bottom edge — ordinary cursor-based pagination, no reposition.
       scrollToBottom()
       const idx = FakeEventSource.instances.length - 1
-      expect(FakeEventSource.instances[idx].url).toContain('anchor=timestamp')
+      expect(FakeEventSource.instances[idx].url).toBe(url({ direction: 'back', limit: '100', cursor: cur({ 0: 11 }) }))
 
-      await emit(idx, 'match', mk(20))
+      await emit(idx, 'match', mk(10))
       await emit(idx, 'page_end', { cursor: null, exhausted: true }) // re-reaches the true edge
       expect(screen.getByText('— beginning of topic —')).toBeInTheDocument()
     })
 
-    // F1 regression (trace c from review round 1): a bottom drop can land
-    // WHILE a page is already in flight (e.g. a pill-flush mid-scroll-load),
-    // not just from the sentinel's own perspective — the empty-page
-    // auto-continue effect follows cursors.back/forward directly and must
-    // check the drop flag itself, not rely on the sentinel having done so.
-    it('auto-continue does not follow a cursor invalidated by a mid-flight pill-flush drop', async () => {
-      const tail = mockTail()
-      const user = userEvent.setup()
-      render(<Timeline cluster="prod" topic="orders" windowCap={3} />)
-      await emit(0, 'match', mk(2))
-      await emit(0, 'match', mk(1))
-      await emit(0, 'page_end', { cursor: 'c1', exhausted: false })
+    // Note (task 3): the v1.4-era "auto-continue does not follow a cursor
+    // invalidated by a mid-flight pill-flush drop" regression test is
+    // deliberately not carried forward — the failure mode it guarded
+    // against (a cursor-follower reading a value invalidated by a
+    // concurrent trim) can't happen anymore BY CONSTRUCTION: every
+    // cursor-follower (loadOlder/loadNewer/continueScan/auto-continue) now
+    // reads `storeRef.current.edges()` at the moment it acts, never a
+    // value captured earlier, and the store's own edge maps are always
+    // exactly correct regardless of how many trims (page- or live-
+    // originated) have landed in between — see timelineSlidingStore.test.ts's
+    // property walk, which interleaves live inserts into paging for exactly
+    // this reason.
+  })
 
-      // Explicit pause: subsequent live messages buffer instead of merging.
-      await user.click(screen.getByTestId('play-pause-toggle'))
+  // Acceptance bar (design spec v1.6, task-3 plan): the jsdom PROPERTY WALK
+  // — scripted FakeEventSource pages with a small cap, scroll down past it
+  // (content never resets — rows present before an insert remain except
+  // trimmed ones), then scroll up re-fetching trimmed regions via the
+  // store's minted top-edge cursors (exact request URLs asserted) until
+  // re-attach on exhausted-forward. Single partition, small integers —
+  // exhaustive multi-partition/hole/tie adversarial coverage of the
+  // underlying invariant already lives in timelineSlidingStore.test.ts's own
+  // property walk; this one proves the UI WIRING (real request URLs built
+  // from `edges()`, DOM content persisting, re-attachment) drives that
+  // store correctly end to end.
+  describe('sliding window property walk', () => {
+    it('slides down past the cap without ever resetting content, then back up via minted cursors to re-attach at the tail', async () => {
+      mockTail()
+      render(<Timeline cluster="prod" topic="orders" windowCap={4} />)
 
-      // Start a load-older page and leave it in flight.
+      // --- Mount: latest 4 (offsets 12..9), exactly at the cap. ---
+      await emit(0, 'match', mk(12))
+      await emit(0, 'match', mk(11))
+      await emit(0, 'match', mk(10))
+      await emit(0, 'match', mk(9))
+      await emit(0, 'page_end', { cursor: cur({ 0: 9 }), exhausted: false })
+      for (const o of [12, 11, 10, 9]) expect(screen.getByText(`p0·${o}`)).toBeInTheDocument()
+
+      // --- Down 1: +2 older (8,7) over cap(4) -> trims the newest 2 off the
+      // top (12,11) and detaches. Content that survives (10,9) stays. ---
       scrollToBottom()
-      const inFlightIdx = FakeEventSource.instances.length - 1
-      expect(FakeEventSource.instances[inFlightIdx].url).toContain('cursor=c1')
+      expect(FakeEventSource.instances.at(-1)!.url).toBe(url({ direction: 'back', limit: '100', cursor: cur({ 0: 9 }) }))
+      await emit(1, 'match', mk(8))
+      await emit(1, 'match', mk(7))
+      await emit(1, 'page_end', { cursor: cur({ 0: 7 }), exhausted: false })
+      expect(screen.queryByText('p0·12')).not.toBeInTheDocument()
+      expect(screen.queryByText('p0·11')).not.toBeInTheDocument()
+      for (const o of [10, 9, 8, 7]) expect(screen.getByText(`p0·${o}`)).toBeInTheDocument()
 
-      // While that page is still loading, live messages buffer...
-      await act(async () => tail.handlers().onMessage(mk(3)))
-      await act(async () => tail.handlers().onMessage(mk(4)))
-      expect(screen.getByText('▲ 2 new')).toBeInTheDocument()
+      // --- Down 2: +2 older (6,5) over cap(4) -> trims the newest 2 (10,9). ---
+      scrollToBottom()
+      expect(FakeEventSource.instances.at(-1)!.url).toBe(url({ direction: 'back', limit: '100', cursor: cur({ 0: 7 }) }))
+      await emit(2, 'match', mk(6))
+      await emit(2, 'match', mk(5))
+      await emit(2, 'page_end', { cursor: cur({ 0: 5 }), exhausted: false })
+      expect(screen.queryByText('p0·10')).not.toBeInTheDocument()
+      expect(screen.queryByText('p0·9')).not.toBeInTheDocument()
+      for (const o of [8, 7, 6, 5]) expect(screen.getByText(`p0·${o}`)).toBeInTheDocument()
 
-      // ...and a pill click mid-flight flushes them into the store, pushing
-      // it past cap(3): the oldest row (p0·1) drops off the bottom.
-      await user.click(screen.getByTestId('live-pill'))
-      expect(screen.queryByText('p0·1')).not.toBeInTheDocument()
+      // --- Up 1: minted top cursor (9) re-fetches the FIRST trimmed pair
+      // (9,10) forward — not exhausted yet (11,12 still owed). Recovering
+      // them over cap(4) now trims the OLDEST pair (6,5) off the bottom.
+      // Content that survives (8,7) stays — never a full reset. ---
+      scrollToTopFarFromBottom()
+      expect(FakeEventSource.instances.at(-1)!.url).toBe(
+        url({ direction: 'forward', limit: '100', cursor: cur({ 0: 9 }) }),
+      )
+      await emit(3, 'match', mk(9))
+      await emit(3, 'match', mk(10))
+      await emit(3, 'page_end', { cursor: cur({ 0: 11 }), exhausted: false })
+      expect(screen.queryByText('p0·6')).not.toBeInTheDocument()
+      expect(screen.queryByText('p0·5')).not.toBeInTheDocument()
+      for (const o of [10, 9, 8, 7]) expect(screen.getByText(`p0·${o}`)).toBeInTheDocument()
+      // Still detached — the tail (12) hasn't been reached yet.
+      expect(screen.getByTestId('play-pause-toggle')).toHaveAttribute('aria-pressed', 'true')
 
-      // The in-flight page now ends with zero matches, a non-null cursor,
-      // and not exhausted — the empty-page auto-continue contract. It must
-      // NOT silently follow that cursor (it points past the just-dropped
-      // range); it must reposition instead.
-      await emit(inFlightIdx, 'page_end', { cursor: 'c2', exhausted: false })
-      const req = FakeEventSource.instances.at(-1)!.url
-      expect(req).toContain('anchor=timestamp')
-      expect(req).not.toContain('cursor=')
+      // --- Up 2: minted top cursor (11) re-fetches the LAST trimmed pair
+      // (11,12) forward — this one reports exhausted (caught the true
+      // tail): re-attach. Recovering them over cap(4) trims the oldest pair
+      // (8,7), landing EXACTLY back on the original mount window (12..9) —
+      // the walk's own round trip, never a reset along the way. ---
+      scrollToTopFarFromBottom()
+      expect(FakeEventSource.instances.at(-1)!.url).toBe(
+        url({ direction: 'forward', limit: '100', cursor: cur({ 0: 11 }) }),
+      )
+      await emit(4, 'match', mk(11))
+      await emit(4, 'match', mk(12))
+      await emit(4, 'page_end', { cursor: null, exhausted: true })
+      expect(screen.queryByText('p0·8')).not.toBeInTheDocument()
+      expect(screen.queryByText('p0·7')).not.toBeInTheDocument()
+      for (const o of [12, 11, 10, 9]) expect(screen.getByText(`p0·${o}`)).toBeInTheDocument()
+
+      // Re-attached: scrolling to the top now resumes live (was auto-paused
+      // by the earlier scrollToBottom calls) — the pulse only ever shows
+      // while genuinely attached (v1.3), so seeing it here is conclusive
+      // proof the walk really re-attached, not just that the tail rows
+      // happen to match.
+      scrollToTopFarFromBottom()
+      expect(screen.getByText('● live')).toBeInTheDocument()
     })
   })
 })

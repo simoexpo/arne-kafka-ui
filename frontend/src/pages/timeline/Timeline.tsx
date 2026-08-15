@@ -8,7 +8,8 @@ import type { MessageListHandle } from '../../components/messages/MessageList'
 import { Panel } from '../../components/Panel'
 import { StalenessChip } from '../../components/StalenessChip'
 import { parseFilterQuery, type FilterQueryApi } from '../../lib/filterQuery'
-import { createTimelineStore } from '../../lib/timelineStore'
+import { decodeCursor } from '../../lib/timelineCursor'
+import { createSlidingWindowStore, type InsertOutcome } from '../../lib/timelineStore'
 import { JumpControl, type JumpTarget } from './JumpControl'
 import { LivePill, PlayPauseToggle } from './LivePill'
 import { useTimelinePage } from './useTimelinePage'
@@ -46,28 +47,21 @@ type Direction = 'back' | 'forward'
 // itself resumes it.
 type PauseReason = 'none' | 'auto' | 'explicit'
 
-// Window cap honesty (design spec v1.4): the timestamp a reposition anchors
-// on, read from whichever edge row (top or bottom) the sentinel just found
-// invalidated. Most rows carry a real timestamp, but it's nullable in
-// principle (see MessageOut) — falling back to the nearest neighbor toward
-// the OTHER edge keeps the anchor close to the true edge instead of
-// guessing from an arbitrary row. Returns null only in the pathological
-// case where every row in the window lacks a timestamp, telling the caller
-// to leave the sentinel inert rather than fabricate an anchor.
-function findAnchorTs(rows: readonly MessageOut[], edge: 'top' | 'bottom'): number | null {
-  if (edge === 'bottom') {
-    for (let i = rows.length - 1; i >= 0; i--) {
-      const ts = rows[i].timestamp_ms
-      if (ts !== null) return ts
-    }
-  } else {
-    for (let i = 0; i < rows.length; i++) {
-      const ts = rows[i].timestamp_ms
-      if (ts !== null) return ts
-    }
-  }
-  return null
-}
+// Which anchor the currently loaded window was bootstrapped from (task 3;
+// supersedes the v1.3-era 'default' | 'beginning' pair). Carries the FULL
+// anchor params, not just a kind tag, for two reasons: (1) a settled filter
+// change re-reads from this same context (unchanged from v1.3 — only
+// 'beginning' gets its own re-anchor, everything else falls back to
+// back/latest); (2) NEW in task 3 — loadNewer's forward-anchor fallback
+// (see its own comment below) needs to re-issue the EXACT same anchor with
+// direction=forward when the store's top edge was never seeded at all (a
+// zero-row anchor bootstrap page never seeds the opposite-side map — see
+// createSlidingWindowStore's own doc comment on that one gap).
+type AnchorContext =
+  | { kind: 'default' }
+  | { kind: 'beginning' }
+  | { kind: 'offset'; partition: number; offset: number }
+  | { kind: 'timestamp'; ts_ms: number }
 
 export function Timeline({
   cluster,
@@ -77,20 +71,30 @@ export function Timeline({
   cluster: string
   topic: string
   // Test-only override of the store's default 2000-row cap: production
-  // code never passes this. It exists purely so the window-cap-honesty
-  // tests (design spec v1.4) can force top/bottom drops with a handful of
-  // messages instead of needing to insert thousands of rows.
+  // code never passes this. It exists purely so the sliding-window property
+  // walk and the window-cap-honesty tests can force top/bottom trims with a
+  // handful of messages instead of needing to insert thousands of rows.
   windowCap?: number
 }) {
-  // The store is mutable (merge-native insert/rows), so it lives in a ref;
-  // `bump` forces a re-render whenever an insert changes what rows() would
-  // return. `Timeline` is remounted (via a key) whenever cluster/topic
-  // changes, so a fresh store per mount is correct — no reset-on-prop-change
-  // logic needed here.
-  const storeRef = useRef(createTimelineStore(windowCap))
+  // The store is mutable (edge-map-tracking insert/rows), so it lives in a
+  // ref; `bump` forces a re-render whenever a store mutation changes what
+  // rows()/edges() would return. `Timeline` is remounted (via a key)
+  // whenever cluster/topic changes, so a fresh store per mount is correct —
+  // no reset-on-prop-change logic needed here.
+  const storeRef = useRef(createSlidingWindowStore(windowCap))
   const [, bump] = useReducer((c: number) => c + 1, 0)
 
-  const { loadPage, state, cursors, reset, cancel } = useTimelinePage(cluster, topic)
+  // `cursors` (per-direction raw page_end cursors) is deliberately NOT
+  // destructured here: task 3 moved the store commit into runPage's own
+  // synchronous `onPageEnd` callback (see its comment), which receives the
+  // just-landed page's cursor directly as an argument — reading it via
+  // `cursors[direction]` a render later would reintroduce the exact
+  // staleness problem that synchronous callback exists to avoid.
+  // `state.exhausted`/`state.loading`/`state.progress`/`state.error` remain
+  // the source of truth for the auto-continue effect below; pagination
+  // itself (loadOlder/loadNewer/continueScan) now reads the store's own
+  // `edges()` exclusively.
+  const { loadPage, state, reset, cancel } = useTimelinePage(cluster, topic)
 
   // The live-tail predicate: starts as match-all, replaced immediately (no
   // debounce) whenever the debounced filter box settles — see applyFilter.
@@ -102,15 +106,31 @@ export function Timeline({
   // auto-continued page — must resend it via withFilter for the filter to
   // stay in effect until the user changes or clears it.
   const activeFilterApiRef = useRef<FilterQueryApi | null>(null)
-  // Which anchor a settled filter change re-reads from. Kept deliberately
-  // simple per the brief: 'default' (back/latest) covers every case except
-  // right after a jump-to-beginning, which re-anchors forward/beginning so
-  // refiltering while viewing the start of the topic doesn't silently snap
-  // the user back to the live tail. offset/timestamp jumps fall back to
-  // 'default', same as no jump at all.
-  const anchorContextRef = useRef<'default' | 'beginning'>('default')
+  const anchorContextRef = useRef<AnchorContext>({ kind: 'default' })
 
   const pendingDirectionRef = useRef<Direction | null>(null)
+  // Task 3: each in-flight page's own rows, accumulated per-generation
+  // (cleared at the start of every runPage call, appended to as batches
+  // flush from useTimelinePage) so the page-end effect below can commit the
+  // WHOLE page to the store in one `insertPage` call — the store's own
+  // contract (see its interface doc comment) takes one page's rows plus
+  // that SAME page's own start/continuation cursor pair; it isn't designed
+  // to be fed a page's rows piecemeal across several calls (an anchor
+  // bootstrap's opposite-side seed, in particular, needs the FULL page's
+  // row offsets, not just whatever happened to be in one batch).
+  const pageRowsRef = useRef<MessageOut[]>([])
+  // The cursor's decoded positions the in-flight page was ISSUED with (null
+  // for an anchor page — no request cursor exists at all). Set by runPage
+  // at issue time; consumed once, by the page-end effect, as `insertPage`'s
+  // `startPositions` argument.
+  const pendingStartPositionsRef = useRef<Record<number, number> | null>(null)
+  // Only meaningful for a back-direction anchor bootstrap (the store's
+  // M-new anchor-awareness fix — see createSlidingWindowStore's `insertPage`
+  // doc comment): whether THIS bootstrap, if it turns out to be one, should
+  // claim the window is attached to the tail. Every anchor call site below
+  // passes this explicitly (never relies on the store's own default, which
+  // exists only for that module's unit-test ergonomics).
+  const pendingAttachRef = useRef(false)
   const matchedRef = useRef(false)
   // Count of matches delivered by the CURRENT page only (reset at the start
   // of every runPage call, incremented as batches flush) — used to detect a
@@ -130,8 +150,8 @@ export function Timeline({
   // shrink back to a tiny number every time an empty page silently
   // auto-continues, instead of showing a true running total. Only ever
   // incremented with a PRIOR (already-ended) page's final numbers — see the
-  // auto-continue effect and the render-time formula below, which together
-  // keep this from double-counting the page currently in flight.
+  // page-end effect and the render-time formula below, which together keep
+  // this from double-counting the page currently in flight.
   const gestureScannedRef = useRef(0)
   const gestureMatchesRef = useRef(0)
 
@@ -175,8 +195,24 @@ export function Timeline({
   // it); `attachedRef` mirrors it for the tail SSE callback closure (that
   // effect only runs once, on [cluster, topic], same reason pauseReasonRef
   // is a ref rather than state).
-  const [attached, setAttachedState] = useState(true)
-  const attachedRef = useRef(true)
+  //
+  // Task 3: starts FALSE (not true) and is ONLY ever flipped true by the
+  // page-end effect below, once that page's own `insertPage` call has
+  // CONFIRMED the store itself is attached (`edges().top === null`) — never
+  // optimistically ahead of it. This is what makes the sliding store's
+  // `insertLive` throw-on-detached precondition provably unreachable from
+  // this component's own call pattern (see the tail effect's onMessage
+  // handler below, and the "insertLive never throws" test in
+  // Timeline.test.tsx): a live message can only ever reach `insertLive`
+  // while `attachedRef.current` is true, and `attachedRef.current` can only
+  // ever become true in the same synchronous update where the store's own
+  // attachment was just verified. Every jump (including 'now') therefore
+  // sets `attached` false immediately (matching the store's own immediate
+  // `clear()`) and lets this same confirmed-catch-up path bring it back to
+  // true once the fresh anchor page actually lands — a live message arriving
+  // in that gap simply buffers (safe), never throws.
+  const [attached, setAttachedState] = useState(false)
+  const attachedRef = useRef(false)
   const setAttached = useCallback((value: boolean) => {
     attachedRef.current = value
     setAttachedState(value)
@@ -199,53 +235,51 @@ export function Timeline({
   const bufferReceivedRef = useRef(0)
   const bufferOverflowRef = useRef(false)
 
-  // Window cap honesty (design spec v1.4, owner ruling 2026-08-15): the
-  // store's cap (see timelineStore's enforceCap) silently drops rows at the
-  // end opposite the insert origin once the window is full. These two refs
-  // track whether THIS window has ever had a drop at that edge since it was
-  // last (re)loaded — reset alongside pendingAnchorRef everywhere the window
-  // is cleared (handleJump, applyFilter, reposition below). A top drop means
-  // the window no longer includes the tail (see topDroppedRef's use at the
-  // insert call sites below, which also detaches immediately); a bottom
-  // drop means the back cursor now points at a range the window slid past —
-  // both make their respective cursor unsafe to follow — checked by
-  // repositionIfDropped below, which every cursor-follower (loadOlder,
-  // loadNewer, continueScan, the auto-continue effect) calls before
-  // touching cursors.back/cursors.forward (review round 1, F1: the check
-  // must live on the followers themselves, not just the scroll sentinels
-  // that usually trigger them — a drop can land while a page is already in
-  // flight, after the sentinel that started it has already run).
-  const topDroppedRef = useRef(false)
-  const bottomDroppedRef = useRef(false)
+  // Task 3 (replaces the v1.4 windowCap-honesty drop flags + repositionIf
+  // Dropped/reposition/findAnchorTs machinery entirely — the sliding store's
+  // own edge maps make every trim followable by a REAL minted cursor, so
+  // there is nothing left to "reposition": loadOlder/loadNewer simply read
+  // `edges()` directly, trim or no trim). What's left is a narrower,
+  // caption/gate-only concern: `state.exhausted.back`/`.forward` (React
+  // state from useTimelinePage) is only ever refreshed by a NEW page
+  // actually landing in that direction — so if a trim happens on a side
+  // whose exhausted flag is currently (stale) true, that flag would
+  // otherwise wrongly veto both the "beginning of topic" caption and further
+  // pagination on that side, even though the store's own edge for that side
+  // is now a real, followable, non-exhausted cursor again. These two refs
+  // track "has a trim happened on this side since the last time a page for
+  // that direction actually landed" — cleared the instant a fresh page for
+  // that direction lands (that page's own exhausted flag is authoritative
+  // again), set the instant a trim touches that side (from a page OR a live
+  // insert). See noteOutcome below and its two call sites.
+  const bottomTrimmedSinceRef = useRef(false)
+  const topTrimmedSinceRef = useRef(false)
 
-  // Called after every store insert (live, buffer flush, page match) with
-  // that insert's OWN drop delta (never the cumulative total — see
-  // InsertResult). A top drop detaches the window right away: "attached"
-  // means the window includes the tail, and a top drop just made that
-  // false. A bottom drop only marks the back cursor unsafe; it doesn't
-  // change attachment on its own (the reposition, when the reader actually
-  // pushes past it, is what detaches — see `reposition` below).
-  const noteDrops = useCallback(
-    (result: { droppedTop: number; droppedBottom: number }) => {
-      if (result.droppedTop > 0) {
-        topDroppedRef.current = true
+  // Called after every store mutation (a page commit or a live insert) with
+  // that mutation's OWN outcome (never a cumulative total — see
+  // InsertOutcome). A top trim detaches the UI right away: "attached" means
+  // the window includes the tail, and a top trim just made that false. Both
+  // trim kinds also update the "since a fresh page landed" tracking used to
+  // override a stale exhausted flag (see the refs' own comment above).
+  const noteOutcome = useCallback(
+    (outcome: InsertOutcome) => {
+      if (outcome.trimmedTop > 0) {
+        topTrimmedSinceRef.current = true
         if (attachedRef.current) setAttached(false)
       }
-      if (result.droppedBottom > 0) {
-        bottomDroppedRef.current = true
-      }
+      if (outcome.trimmedBottom > 0) bottomTrimmedSinceRef.current = true
     },
     [setAttached],
   )
 
   const flushBuffer = useCallback(() => {
     if (bufferRef.current.length > 0) {
-      noteDrops(storeRef.current.insert(bufferRef.current, 'live'))
+      noteOutcome(storeRef.current.insertLive(bufferRef.current))
     }
     bufferRef.current = []
     bufferReceivedRef.current = 0
     bufferOverflowRef.current = false
-  }, [noteDrops])
+  }, [noteOutcome])
 
   const runPage = useCallback(
     (
@@ -260,8 +294,10 @@ export function Timeline({
       // interrupted, so the totals the user already saw must keep growing,
       // never snap back to 0. Every other resetIteration:true call site
       // (mount, applyFilter, loadOlder/loadNewer, jumps) is a genuinely NEW
-      // gesture and resets both together.
-      opts: { resetIteration: boolean; resetGesture?: boolean },
+      // gesture and resets both together. `attach`: see pendingAttachRef's
+      // own comment — required (not optional) so every call site states its
+      // intent explicitly.
+      opts: { resetIteration: boolean; resetGesture?: boolean; attach: boolean },
     ) => {
       if (opts.resetIteration) iterationRef.current = 0
       if (opts.resetGesture ?? opts.resetIteration) {
@@ -271,33 +307,87 @@ export function Timeline({
       matchedRef.current = false
       pageMatchesRef.current = 0
       pendingDirectionRef.current = direction
+      // Each page request records its own start (task 3): a cursor page
+      // decodes the positions it was issued with; an anchor page (no
+      // request cursor at all) has none — exactly `insertPage`'s own
+      // `startPositions` contract.
+      pendingStartPositionsRef.current = params.cursor !== undefined ? decodeCursor(params.cursor) : null
+      pendingAttachRef.current = opts.attach
+      pageRowsRef.current = []
       setContinueDirection(null)
-      loadPage(params, (msgs: MessageOut[]) => {
-        matchedRef.current = true
-        pageMatchesRef.current += msgs.length
-        // Scroll anchoring: capture "before" metrics for a forward-origin
-        // prepend, but only when the reader isn't pinned to the very top
-        // right now — see pendingAnchorRef's comment. A page's matches can
-        // flush in several batches (useTimelinePage's BATCH_SIZE), so this
-        // runs per flush; the effect below consumes and clears it after
-        // each one.
-        // Capture unconditionally for forward inserts: the top sentinel
-        // fires precisely when the reader is at/near the top, so a
-        // "skip when pinned to top" exclusion (first attempt, owner-bounced)
-        // skipped the exact case anchoring exists for. Live inserts are
-        // direction 'live' and never pass here — the attached pinned-top
-        // prepend behavior is untouched.
-        if (direction === 'forward') {
-          const metrics = listRef.current?.scrollMetrics() ?? null
-          if (metrics) {
-            pendingAnchorRef.current = metrics
+      loadPage(
+        params,
+        (msgs: MessageOut[]) => {
+          matchedRef.current = true
+          pageMatchesRef.current += msgs.length
+          pageRowsRef.current.push(...msgs)
+          // Scroll anchoring: capture "before" metrics for a forward-origin
+          // prepend, but only when the reader isn't pinned to the very top
+          // right now — see pendingAnchorRef's comment. A page's matches can
+          // flush in several batches (useTimelinePage's BATCH_SIZE), so this
+          // runs per flush; the layout effect below consumes and clears it
+          // after each one.
+          // Capture unconditionally for forward inserts: the top sentinel
+          // fires precisely when the reader is at/near the top, so a
+          // "skip when pinned to top" exclusion (first attempt, owner-bounced)
+          // skipped the exact case anchoring exists for. Live inserts are
+          // direction 'live' and never pass here — the attached pinned-top
+          // prepend behavior is untouched.
+          if (direction === 'forward') {
+            const metrics = listRef.current?.scrollMetrics() ?? null
+            if (metrics) {
+              pendingAnchorRef.current = metrics
+            }
           }
-        }
-        noteDrops(storeRef.current.insert(msgs, direction))
-        bump()
-      })
+          // No store insert here (task 3, unlike the old per-batch
+          // `store.insert` calls): a page's rows are committed to the store
+          // ATOMICALLY, once, by `onPageEnd` below via `insertPage` — the
+          // store's own contract takes the full page's rows plus a single
+          // start/continuation cursor pair, not a per-batch trickle (an
+          // anchor bootstrap's opposite-side seed in particular needs every
+          // row this page ever delivers, not just one batch's worth).
+        },
+        // Fires SYNCHRONOUSLY with `page_end` (see useTimelinePage's own doc
+        // comment on why: a render-later commit, via a `useEffect` keyed on
+        // `state.loading`, leaves ref-based DOM handles — e.g. the scroll
+        // viewport reposition below — reading the store from BEFORE this
+        // page's rows landed, for exactly one render. Committing here
+        // instead means `storeRef.current.rows()` already reflects this
+        // page by the time ANY effect for this commit runs.) `exhausted`
+        // itself isn't needed here — per the empty-page contract `cursor`
+        // is null exactly when `exhausted` is true, and `insertPage` only
+        // ever wants the cursor.
+        (cursor) => {
+          const rows = pageRowsRef.current
+          pageRowsRef.current = []
+          const outcome = storeRef.current.insertPage(rows, direction, pendingStartPositionsRef.current, cursor, {
+            attach: pendingAttachRef.current,
+          })
+          noteOutcome(outcome)
+          // "Just became store-attached" catch-up: covers BOTH a detached
+          // window's forward page catching the tail (v1.3's reattach) AND
+          // an anchor bootstrap ('now', or mount) whose own attach:true just
+          // landed — see `attached`'s own comment above for why UI-attached
+          // is only ever flipped true here, in direct response to the
+          // store's OWN confirmed attachment, never ahead of it.
+          if (!attachedRef.current && storeRef.current.edges().top === null) {
+            setAttached(true)
+            flushBuffer()
+            pauseReasonRef.current = pauseReasonRef.current === 'explicit' ? 'explicit' : 'none'
+          }
+          bump()
+          // Direction-based staleness refresh (see bottomTrimmedSinceRef/
+          // topTrimmedSinceRef's own comment): a fresh page landing for this
+          // direction re-earns that side's exhausted truth. Placed after
+          // `noteOutcome` so a same-page trim on the OPPOSITE side (the only
+          // side a 'back'/'forward' page can ever trim — see enforceCap) is
+          // never immediately un-set by this line.
+          if (direction === 'back') bottomTrimmedSinceRef.current = false
+          else topTrimmedSinceRef.current = false
+        },
+      )
     },
-    [loadPage, noteDrops],
+    [loadPage, noteOutcome, flushBuffer, setAttached],
   )
 
   // Resends the currently active filter's server-side params (a no-op when
@@ -308,74 +398,14 @@ export function Timeline({
     return { ...params, filter: api.filter, q: api.q, ...(api.path !== undefined ? { path: api.path } : {}) }
   }, [])
 
-  // Window cap honesty (design spec v1.4, owner ruling 2026-08-15): pushing
-  // past a dropped edge repositions instead of accreting against a stale
-  // cursor — a reposition IS a jump (same clear/reset/detach machinery as
-  // handleJump below), just anchored at the edge row's own timestamp
-  // instead of a user-picked target. `direction` is the SAME direction the
-  // caller was already pursuing ('back' for the bottom edge, 'forward' for
-  // the top one) — landing edge mirrors handleJump's own rule (forward
-  // lands looking from the bottom, i.e. the 'beginning' jump's edge; every
-  // other direction lands from the top).
-  const reposition = useCallback(
-    (direction: Direction, tsMs: number) => {
-      storeRef.current.clear()
-      pendingAnchorRef.current = null
-      bufferRef.current = []
-      bufferReceivedRef.current = 0
-      bufferOverflowRef.current = false
-      // A fresh window can't have a stale drop anymore — a seam is
-      // unconstructible in a window that was just cleared and reloaded.
-      topDroppedRef.current = false
-      bottomDroppedRef.current = false
-      reset()
-      pendingScrollEdgeRef.current = direction === 'forward' ? 'bottom' : 'top'
-      anchorContextRef.current = 'default'
-      pauseReasonRef.current = 'auto'
-      setAttached(false)
-      runPage(direction, withFilter({ direction, limit: PAGE_LIMIT, anchor: 'timestamp', ts_ms: tsMs }), {
-        resetIteration: true,
-      })
-      bump()
-    },
-    [reset, runPage, withFilter, setAttached],
-  )
-
-  // Review round 1 (F1, High): the drop-flag gate belongs on every
-  // CURSOR-FOLLOWER, not just the scroll sentinels — loadOlder/loadNewer,
-  // continueScan (both the sentinel-driven and the button-driven call), and
-  // the empty-page auto-continue effect all follow cursors.back/
-  // cursors.forward directly, and each one is an independent path that can
-  // reach a drop-invalidated cursor (e.g. a live drop landing mid-scan,
-  // or a pill-flush drop landing while a page is already in flight — the
-  // sentinel that kicked off that in-flight page has no way to gate a
-  // decision that hasn't happened yet). Centralizing the check+reposition
-  // here means every follower gets it by construction rather than by
-  // remembering to duplicate it. Returns true when it took the reposition
-  // branch (caller must treat this as "handled, do not also follow the
-  // cursor"); false means the edge is clean and the caller should proceed
-  // normally. Reads the store directly (not the render-time `rows` const)
-  // so it's safe to call from the auto-continue effect too, whose closure
-  // may be older than the current render.
-  const repositionIfDropped = useCallback(
-    (direction: Direction): boolean => {
-      const dropped = direction === 'back' ? bottomDroppedRef.current : topDroppedRef.current
-      if (!dropped) return false
-      const ts = findAnchorTs(storeRef.current.rows(), direction === 'back' ? 'bottom' : 'top')
-      if (ts !== null) reposition(direction, ts)
-      // Pathological (no row in the window carries a timestamp): stay
-      // inert rather than guess an anchor OR fall back to the stale
-      // cursor — either would be dishonest, unlike doing nothing.
-      return true
-    },
-    [reposition],
-  )
-
   // The anchor a fresh (non-cursor) page request starts from, given the
-  // current anchor context — see anchorContextRef.
+  // current anchor context — see anchorContextRef. Deliberately simple:
+  // 'beginning' is the only context that re-reads forward/beginning; every
+  // other context (default, or a settled-past offset/timestamp jump)
+  // re-reads back/latest, same as no jump at all — unchanged from v1.3.
   const baseAnchorParams = useCallback(
     (): TimelinePageParams =>
-      anchorContextRef.current === 'beginning'
+      anchorContextRef.current.kind === 'beginning'
         ? { direction: 'forward', limit: PAGE_LIMIT, anchor: 'beginning' }
         : { direction: 'back', limit: PAGE_LIMIT, anchor: 'latest' },
     [],
@@ -399,17 +429,23 @@ export function Timeline({
       bufferRef.current = []
       bufferReceivedRef.current = 0
       bufferOverflowRef.current = false
-      // Same reasoning: a drop recorded against the window being replaced
-      // says nothing about the freshly re-read one.
-      topDroppedRef.current = false
-      bottomDroppedRef.current = false
+      bottomTrimmedSinceRef.current = false
+      topTrimmedSinceRef.current = false
       reset()
       const base = baseAnchorParams()
+      // A re-read from anything other than 'beginning' collapses to the
+      // 'default' context (matches v1.3: refiltering after an offset/
+      // timestamp jump reads from latest, not from the old jump target) —
+      // clears any stale offset/timestamp memory a later loadNewer
+      // fallback (see its own comment) might otherwise wrongly reuse.
+      if (anchorContextRef.current.kind !== 'beginning') anchorContextRef.current = { kind: 'default' }
       // The settled window's anchor decides attached/detached exactly like a
       // jump would: re-reading from 'beginning' is a historical window
-      // (detached); re-reading from 'default' (back/latest) is attached.
-      setAttached(anchorContextRef.current !== 'beginning')
-      runPage(base.direction, withFilter(base), { resetIteration: true })
+      // (detached, and the store's own bootstrap opt below matches); every
+      // other context is attached (back/latest).
+      const attach = anchorContextRef.current.kind !== 'beginning'
+      setAttached(false)
+      runPage(base.direction, withFilter(base), { resetIteration: true, attach })
       bump()
     },
     [reset, runPage, baseAnchorParams, withFilter, setAttached],
@@ -433,15 +469,28 @@ export function Timeline({
 
   // Initial page: latest 100, on mount only.
   useEffect(() => {
-    runPage('back', withFilter({ direction: 'back', limit: PAGE_LIMIT, anchor: 'latest' }), { resetIteration: true })
+    runPage('back', withFilter({ direction: 'back', limit: PAGE_LIMIT, anchor: 'latest' }), {
+      resetIteration: true,
+      attach: true,
+    })
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  // Empty-page auto-continue: fires on the loading:true -> false edge of a
-  // page we ourselves issued (tracked via pendingDirectionRef). If that page
-  // delivered no matches, isn't an error, and the direction isn't exhausted,
-  // keep pulling pages in the same direction until something lands, the
-  // topic edge is hit, or the iteration cap is reached.
+  // Auto-continue / iteration-cap / partial-match-affordance decision (task
+  // 3): fires on the loading:true -> false edge of a page we ourselves
+  // issued (tracked via pendingDirectionRef). Unlike v1.3/v1.4, this effect
+  // no longer commits anything to the store itself — that already happened
+  // SYNCHRONOUSLY, in `runPage`'s `onPageEnd` callback (see its own comment
+  // for why: this effect runs a render later, which is fine for a decision
+  // that only ever starts ANOTHER async request, but was NOT fine for the
+  // store commit itself — a ref-based DOM handle, e.g. the scroll-viewport
+  // reposition effect below, would otherwise read stale content for exactly
+  // one render). This effect purely decides whether an empty (or partial,
+  // filtered) page should auto-continue, hit the iteration cap, or land
+  // normally — reading `state.exhausted`/`state.progress` fresh (unlike the
+  // synchronous callback, which must avoid stale-closure reads of `state`)
+  // and `storeRef.current.edges()` for the next cursor (already up to date,
+  // since the synchronous commit ran before this effect ever could).
   useEffect(() => {
     const wasLoading = wasLoadingRef.current
     wasLoadingRef.current = state.loading
@@ -449,59 +498,38 @@ export function Timeline({
     const direction = pendingDirectionRef.current
     if (direction === null) return
     pendingDirectionRef.current = null
-    if (state.error) return
+    if (state.error) return // Nothing landed: onPageEnd never ran, nothing to continue.
+
     if (state.exhausted[direction]) return
-    const cursor = cursors[direction]
-    if (cursor === null) return
-    // Fold this just-ended page's final progress into the gesture-wide
-    // running total BEFORE deciding whether to loop or cap — a filtered
-    // scan's progress resets per page, so without this the cap
-    // affordance/progress row would understate how much was actually
-    // scanned across every auto-continued page in this gesture. Folded
-    // unconditionally (not just on a zero-match page): a page that found
-    // *some* matches but stopped short of a full page (budget spent) must
-    // not have its scanned/matches total silently dropped either — see the
-    // matchedRef branch below. This is the ONLY place gestureScannedRef/
-    // MatchesRef are incremented, and only ever with a page that has already
-    // ended — see the render-time formula, which adds the CURRENT in-flight
-    // page's progress separately (and only while still loading) to avoid
-    // double-counting.
     gestureScannedRef.current += state.progress?.scanned ?? 0
     gestureMatchesRef.current += state.progress?.matches ?? 0
     if (matchedRef.current) {
       // A page that filled all the way to PAGE_LIMIT is a normal, complete
       // page — the scroll sentinels already cover continuing from there.
-      // One that matched *something* but stopped
-      // short of a full page (the scan budget ran out before finding
-      // PAGE_LIMIT matches, cursor non-null, not exhausted) must say so and
-      // offer to continue rather than end quietly (spec: no silent stops) —
-      // but must NOT auto-continue on its own, since the user already has
-      // real matches to look at.
+      // One that matched *something* but stopped short of a full page (the
+      // scan budget ran out before finding PAGE_LIMIT matches, cursor
+      // non-null, not exhausted) must say so and offer to continue rather
+      // than end quietly (spec: no silent stops) — but must NOT
+      // auto-continue on its own, since the user already has real matches
+      // to look at.
       if (activeFilterApiRef.current !== null && pageMatchesRef.current < PAGE_LIMIT) {
         setContinueDirection(direction)
       }
       return
     }
-    // F1 (review round 1): this loop follows cursors[direction] directly,
-    // same hazard as loadOlder/loadNewer/continueScan — a drop can land
-    // WHILE this page was in flight (e.g. a pill flush mid-scroll-load; see
-    // the auto-continue drop test), invalidating the very cursor this page
-    // just returned. Chosen variant: trigger the reposition directly rather
-    // than merely stopping and waiting for a later user gesture — it fixes
-    // the seam proactively, and gesture totals stay honest for free: a
-    // reposition's own runPage call always passes resetIteration:true with
-    // no resetGesture override, so gestureScanned/MatchesRef reset to 0
-    // (same as every other genuinely-new-gesture call site) instead of
-    // carrying a stale total into a window that didn't earn it.
-    if (repositionIfDropped(direction)) return
+    const nextCursor = storeRef.current.edges()[direction === 'back' ? 'bottom' : 'top']
+    if (nextCursor === null) return
     if (iterationRef.current >= ITERATION_CAP) {
       setContinueDirection(direction)
       return
     }
     iterationRef.current += 1
-    runPage(direction, withFilter({ direction, limit: PAGE_LIMIT, cursor }), { resetIteration: false })
+    runPage(direction, withFilter({ direction, limit: PAGE_LIMIT, cursor: nextCursor }), {
+      resetIteration: false,
+      attach: false,
+    })
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [state.loading, state.error, state.exhausted.back, state.exhausted.forward, cursors.back, cursors.forward])
+  }, [state.loading, state.error, state.exhausted.back, state.exhausted.forward])
 
   // Jump viewport repositioning: fires on the very first loading:true ->
   // false edge after a jump set pendingScrollEdgeRef (handleJump), whether
@@ -536,42 +564,22 @@ export function Timeline({
     listRef.current?.adjustScrollTop(metrics.height - anchor.height)
   })
 
-  // Re-attach: fires on the false -> true edge of `state.exhausted.forward`
-  // while detached — the reader forward-paginated a historical window all
-  // the way to the topic's current edge, i.e. caught the tail. Buffered live
-  // messages flush in (store dedup makes the overlap with anything already
-  // loaded safe) and live merging resumes, unless the pause was explicit.
-  // Guarded to only fire on that specific edge (not on every render where
-  // forward happens to already be exhausted) and only while detached (an
-  // attached window reaching forward-exhausted, e.g. mount, is a no-op).
-  // `reset()` (called by every jump and by applyFilter) clears exhausted
-  // back to false first, so a subsequent jump re-arms this edge naturally.
-  const prevExhaustedForwardRef = useRef(false)
-  useEffect(() => {
-    const wasExhausted = prevExhaustedForwardRef.current
-    prevExhaustedForwardRef.current = state.exhausted.forward
-    if (wasExhausted || !state.exhausted.forward) return
-    if (attachedRef.current) return
-    setAttached(true)
-    flushBuffer()
-    pauseReasonRef.current = pauseReasonRef.current === 'explicit' ? 'explicit' : 'none'
-    bump()
-  }, [state.exhausted.forward, flushBuffer, setAttached])
-
   // Live tail: on by default, ON for the lifetime of the component. An
-  // error (server-emitted or transport) stops it for good — Task 8 adds the
-  // pause/resume affordance; Task 7 only needs the freeze-in-place pattern.
+  // error (server-emitted or transport) stops it for good.
   useEffect(() => {
     const handle = tailTopic(cluster, topic, {
       onMessage: (m) => {
         if (!predicateRef.current(m)) return
         // While detached, live messages ALWAYS buffer — merging them would
         // recreate the false seam a historical window exists to avoid.
-        // pauseReasonRef CAN legitimately read 'none' while detached (e.g.
-        // re-attach set it, then a filter settle from the 'beginning'
-        // context detached again): attached is the authoritative gate.
+        // `attachedRef.current` is the gate (never `pauseReasonRef` alone):
+        // it can only be true once the store's own attachment has been
+        // confirmed (see its own comment above), so this branch can never
+        // reach a detached store — `insertLive`'s throw precondition is
+        // structurally unreachable from this call site (see
+        // "insertLive never throws" in Timeline.test.tsx).
         if (attachedRef.current && pauseReasonRef.current === 'none') {
-          noteDrops(storeRef.current.insert([m], 'live'))
+          noteOutcome(storeRef.current.insertLive([m]))
         } else {
           bufferRef.current.push(m)
           bufferReceivedRef.current += 1
@@ -650,14 +658,13 @@ export function Timeline({
 
   // A jump repositions the viewport: the current window is no longer
   // meaningful, so the store and any buffered live messages are dropped
-  // outright (not flushed — they belong to the OLD viewport). 'now' attaches
-  // (live tail merges straight in again); every other jump — beginning,
-  // offset, timestamp — DETACHES: it lands mid-topic or at the tail end,
-  // where merging live rows in would create a false seam with the unloaded
-  // pages between the historical window and now. Detached windows enter
-  // paused-auto (the pill counts; while detached, top-pinning does NOT
-  // resume live — only re-attaching, via catching the tail or jumping to
-  // now, does).
+  // outright (not flushed — they belong to the OLD viewport). Every jump
+  // sets `attached` false immediately here (matching the store's own
+  // immediate `clear()` — see `attached`'s own comment for why even 'now'
+  // does this, deferring the actual re-attach to the page-end effect once
+  // its fresh anchor page confirms the store itself is attached). Detached
+  // windows enter paused-auto (the pill counts; while detached, top-pinning
+  // does NOT resume live — only re-attaching does).
   const handleJump = (target: JumpTarget) => {
     storeRef.current.clear()
     // A pending scroll-anchor capture belongs to the window being left —
@@ -667,68 +674,106 @@ export function Timeline({
     bufferRef.current = []
     bufferReceivedRef.current = 0
     bufferOverflowRef.current = false
-    // Same reasoning as pendingAnchorRef: a drop recorded against the OLD
-    // window says nothing about the fresh one a jump is about to load.
-    topDroppedRef.current = false
-    bottomDroppedRef.current = false
+    bottomTrimmedSinceRef.current = false
+    topTrimmedSinceRef.current = false
     // A jump invalidates BOTH pagination directions, not just the one being
     // (re)loaded: the old cursors describe a window the user is leaving
     // entirely. reset() clears both cursors/exhausted flags (and kills any
-    // in-flight page) synchronously, BEFORE runPage starts the new one —
-    // without this, a stale opposite-direction cursor from before the jump
-    // could let a scroll sentinel fire a request pointed at the wrong
-    // window.
+    // in-flight page) synchronously, BEFORE runPage starts the new one.
     reset()
+    setAttached(false)
     // 'beginning' lands at the start of history looking forward — the
     // bottom (oldest-visible) edge is the meaningful anchor there. Every
     // other jump lands looking at the top of its new window.
     pendingScrollEdgeRef.current = target.kind === 'beginning' ? 'bottom' : 'top'
-    // A jump re-anchors where a subsequent filter settle will re-read from
-    // (see anchorContextRef/applyFilter): only 'beginning' is tracked as
-    // its own anchor context, every other jump falls back to 'default'.
-    anchorContextRef.current = target.kind === 'beginning' ? 'beginning' : 'default'
     switch (target.kind) {
       case 'now':
+        anchorContextRef.current = { kind: 'default' }
+        // Forced to 'none' regardless of any prior explicit pause — jumping
+        // to now is an intentional resume-live action (v1.3). The store
+        // isn't confirmed attached yet (fresh clear()), so this alone can't
+        // cause a live insert — see `attached`'s own comment.
         pauseReasonRef.current = 'none'
-        setAttached(true)
-        runPage('back', withFilter({ direction: 'back', limit: PAGE_LIMIT, anchor: 'latest' }), { resetIteration: true })
+        runPage('back', withFilter({ direction: 'back', limit: PAGE_LIMIT, anchor: 'latest' }), {
+          resetIteration: true,
+          attach: true,
+        })
         break
       case 'beginning':
+        anchorContextRef.current = { kind: 'beginning' }
         pauseReasonRef.current = 'auto'
-        setAttached(false)
-        runPage('forward', withFilter({ direction: 'forward', limit: PAGE_LIMIT, anchor: 'beginning' }), { resetIteration: true })
+        runPage('forward', withFilter({ direction: 'forward', limit: PAGE_LIMIT, anchor: 'beginning' }), {
+          resetIteration: true,
+          attach: false,
+        })
         break
       case 'offset':
+        anchorContextRef.current = { kind: 'offset', partition: target.partition, offset: target.offset }
         pauseReasonRef.current = 'auto'
-        setAttached(false)
         runPage(
           'back',
           withFilter({ direction: 'back', limit: PAGE_LIMIT, anchor: 'offset', partition: target.partition, offset: target.offset }),
-          { resetIteration: true },
+          { resetIteration: true, attach: false },
         )
         break
       case 'timestamp':
+        anchorContextRef.current = { kind: 'timestamp', ts_ms: target.ts_ms }
         pauseReasonRef.current = 'auto'
-        setAttached(false)
-        runPage('back', withFilter({ direction: 'back', limit: PAGE_LIMIT, anchor: 'timestamp', ts_ms: target.ts_ms }), { resetIteration: true })
+        runPage('back', withFilter({ direction: 'back', limit: PAGE_LIMIT, anchor: 'timestamp', ts_ms: target.ts_ms }), {
+          resetIteration: true,
+          attach: false,
+        })
         break
     }
     bump()
   }
 
+  // loadNewer's forward-anchor fallback (task 3): the store's top edge is
+  // only ever seeded from a page's OWN rows (same-direction continuation
+  // cursor, or — for an anchor bootstrap — the opposite-side row-offset
+  // seed; see createSlidingWindowStore's doc comment). A historical
+  // (offset/timestamp) anchor bootstrap that happens to return ZERO rows for
+  // every partition (a heavily filtered jump landing on a gap, say) never
+  // seeds the top map at all, so `edges().top` reads null — not because the
+  // window is attached, but because nothing above it has ever been
+  // recorded. The only way to read "above" such a jump is to re-issue the
+  // EXACT SAME anchor with direction=forward (anchors are caller
+  // parameters, not part of the cursor — the anchor partition property
+  // guarantees back(anchor) and forward(anchor) split the topic disjointly
+  // and completely, so this is exact, not a guess). 'beginning' never needs
+  // this (it's already forward-anchored — its own same-direction
+  // continuation cursor always advances via rule 1 regardless of row
+  // count) and neither does 'default' (always attached, edges().top is
+  // masked null for a different, correct reason).
+  const forwardAnchorFallback = (): TimelinePageParams | null => {
+    const ctx = anchorContextRef.current
+    if (ctx.kind === 'offset') return { direction: 'forward', limit: PAGE_LIMIT, anchor: 'offset', partition: ctx.partition, offset: ctx.offset }
+    if (ctx.kind === 'timestamp') return { direction: 'forward', limit: PAGE_LIMIT, anchor: 'timestamp', ts_ms: ctx.ts_ms }
+    return null
+  }
+
   // Scroll is the only pagination affordance (no load-older/load-newer
-  // buttons): each checks repositionIfDropped FIRST (F1, review round 1) —
-  // a drop at this edge means the cursor below is stale, and following it
-  // would recreate exactly the false seam the drop-detach exists to avoid.
+  // buttons). Task 3: both read the store's OWN minted edge cursor directly
+  // — no drop-flag/reposition machinery needed anymore, since every trim
+  // leaves behind a real, followable cursor by construction (the whole
+  // point of the sliding-window redesign). `bottomTrimmedSinceRef`/
+  // `topTrimmedSinceRef` only override a STALE exhausted flag (see their own
+  // comment) — the underlying edge cursor itself is always current.
   const loadOlder = () => {
-    if (repositionIfDropped('back')) return
-    if (cursors.back === null || state.exhausted.back) return
-    runPage('back', withFilter({ direction: 'back', limit: PAGE_LIMIT, cursor: cursors.back }), { resetIteration: true })
+    if (state.exhausted.back && !bottomTrimmedSinceRef.current) return
+    const cursor = storeRef.current.edges().bottom
+    if (cursor === null) return
+    runPage('back', withFilter({ direction: 'back', limit: PAGE_LIMIT, cursor }), { resetIteration: true, attach: false })
   }
   const loadNewer = () => {
-    if (repositionIfDropped('forward')) return
-    if (cursors.forward === null || state.exhausted.forward) return
-    runPage('forward', withFilter({ direction: 'forward', limit: PAGE_LIMIT, cursor: cursors.forward }), { resetIteration: true })
+    if (state.exhausted.forward && !topTrimmedSinceRef.current) return
+    const cursor = storeRef.current.edges().top
+    if (cursor !== null) {
+      runPage('forward', withFilter({ direction: 'forward', limit: PAGE_LIMIT, cursor }), { resetIteration: true, attach: false })
+      return
+    }
+    const fallback = forwardAnchorFallback()
+    if (fallback) runPage('forward', withFilter(fallback), { resetIteration: true, attach: false })
   }
 
   // Wired directly onto MessageList's real scroll element (scroll events
@@ -738,19 +783,18 @@ export function Timeline({
   // automatic (an explicit pause overrides top-pinning entirely) AND the
   // window is attached — while detached, top-of-window ≠ now, so being
   // pinned to the top of a historical window does nothing; re-attaching only
-  // happens via catching the tail (forward-exhausted effect) or jumping to
-  // now (jump / pill click).
+  // happens via catching the tail (forward-exhausted, in the page-end
+  // effect) or jumping to now (jump / pill click).
   //
   // Also the scroll-triggered pagination sentinels (spec: "scroll down ->
   // next 100 older") — scroll is the ONLY pagination affordance, there is no
   // load-older/load-newer button: a bottom-sentinel reaching the last row
   // loads the next older page automatically, guarded by not already loading
-  // (`loadOlder`/`loadNewer` themselves no-op on a null cursor, an exhausted
-  // direction, or — window cap honesty, F1 — a dropped edge, reposition-ing
-  // instead; the loading guard is the only one that needs restating here).
-  // The symmetric top edge only ever matters once a beginning-jump has
-  // opened a forward cursor — reusing the same top-pin check that already
-  // drives live-pause auto-resume.
+  // (`loadOlder`/`loadNewer` themselves no-op on a null cursor or an
+  // exhausted, never-trimmed direction). The symmetric top edge only ever
+  // matters once a beginning-jump (or an offset/timestamp jump — see the
+  // forward-anchor fallback) has opened a forward cursor — reusing the same
+  // top-pin check that already drives live-pause auto-resume.
   //
   // When the continue affordance (I2's partial-match budget stop, or the
   // iteration-cap stop) is showing for a direction, the sentinel must drive
@@ -766,9 +810,6 @@ export function Timeline({
         pauseReasonRef.current = 'none'
         bump()
       }
-      // Window cap honesty: the drop-flag gate lives in loadNewer/
-      // continueScan themselves now (see repositionIfDropped) — the
-      // sentinel just decides WHICH follower to call, same as before.
       if (!state.loading) {
         if (continueDirection === 'forward') continueScan()
         else loadNewer()
@@ -796,19 +837,14 @@ export function Timeline({
 
   const continueScan = () => {
     if (continueDirection === null) return
-    // F1 (review round 1): reachable from BOTH the scroll sentinel above
-    // and the standalone continue-scan button in the JSX below — a drop can
-    // land while the button is showing (the reviewer's exact repro: a
-    // filtered scan stops, live traffic drops the edge, THEN the button is
-    // clicked), so the gate has to live here, not just on the sentinel path.
-    if (repositionIfDropped(continueDirection)) return
-    const cursor = cursors[continueDirection]
+    const cursor = storeRef.current.edges()[continueDirection === 'back' ? 'bottom' : 'top']
     if (cursor === null) return
     // resetGesture: false — continuing past the cap is the SAME gesture,
     // not a new one; only the cap counter itself restarts.
     runPage(continueDirection, withFilter({ direction: continueDirection, limit: PAGE_LIMIT, cursor }), {
       resetIteration: true,
       resetGesture: false,
+      attach: false,
     })
   }
 
@@ -894,12 +930,14 @@ export function Timeline({
           {continueScanLabel}
         </button>
       ) : (
-        // F2 (review round 1): the caption claims the window's oldest row
-        // IS the topic's first message — a bottom drop makes that false
-        // even while state.exhausted.back is still (stale) true from
-        // before the drop, so it must not render until a reposition
-        // (which resets bottomDroppedRef) genuinely re-earns exhaustion.
-        state.exhausted.back && !bottomDroppedRef.current && (
+        // Captions (design spec v1.6): "beginning of topic" only when the
+        // bottom edge is genuinely the topic start — exhausted AND not
+        // stale (see bottomTrimmedSinceRef's own comment: a live/forward
+        // trim after a genuine exhausted:true response can slide the
+        // window's actual bottom edge past the true start again, even
+        // though `state.exhausted.back` itself hasn't been refreshed by a
+        // new page yet).
+        state.exhausted.back && !bottomTrimmedSinceRef.current && (
           <p className="py-2 text-center text-xs text-zinc-400">— beginning of topic —</p>
         )
       )}

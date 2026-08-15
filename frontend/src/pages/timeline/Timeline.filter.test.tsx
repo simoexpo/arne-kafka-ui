@@ -3,7 +3,16 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { FakeEventSource } from '../../test/fake-event-source'
 import * as sse from '../../api/sse'
 import type { MessageOut, SseErrorData } from '../../api/types'
+import { encodeCursor } from '../../lib/timelineCursor'
 import { Timeline } from './Timeline'
+
+// Task 3: see the identical helper in Timeline.test.tsx — the sliding-window
+// store decodes every non-null cursor as a real per-partition position map,
+// so an opaque placeholder string like 'c1' is no longer valid here.
+const cur = (positions: Record<number, number>) => encodeCursor(positions)
+function url(params: Record<string, string>) {
+  return `/api/clusters/prod/topics/orders/timeline?${new URLSearchParams(params).toString()}`
+}
 
 vi.mock('../../api/sse', async (importOriginal) => ({
   ...(await importOriginal<typeof sse>()),
@@ -217,7 +226,7 @@ describe('Timeline filter box', () => {
       const idx = FakeEventSource.instances.length - 1
       totalScanned += 50
       await emit(idx, 'progress', { scanned: 50, matches: 0, budget: 250000 })
-      await emit(idx, 'page_end', { cursor: `c${i + 1}`, exhausted: false })
+      await emit(idx, 'page_end', { cursor: cur({ 0: i + 1 }), exhausted: false })
       if (screen.queryByTestId('continue-scan')) break
     }
 
@@ -238,7 +247,7 @@ describe('Timeline filter box', () => {
     // Budget spent partway through, not the true topic edge: non-null
     // cursor, exhausted:false — same contract as the zero-match case, just
     // with 1..99 matches this time.
-    await emit(idx, 'page_end', { cursor: 'c1', exhausted: false })
+    await emit(idx, 'page_end', { cursor: cur({ 0: 1 }), exhausted: false })
 
     // The real matches must still render — the affordance is additive, not
     // a replacement for the page's own results.
@@ -248,13 +257,16 @@ describe('Timeline filter box', () => {
     expect(btn).toHaveTextContent('scanned 5000 records · 2 matches — continue')
   })
 
-  // F1 regression (window-cap-honesty review round 1, trace a): a filtered
-  // scan can stop with the continue-scan button showing, then live traffic
-  // (which still passes the filter predicate) drops the store's oldest row
-  // off the bottom before the button is ever clicked — the button's cursor
-  // now points at a range the window slid past. Clicking it must reposition
-  // by timestamp, never follow that stale cursor into an invisible gap.
-  it('a bottom drop while the continue-scan button is showing repositions on click instead of following the stale cursor', async () => {
+  // Task 3 (supersedes the v1.4-era "reposition by timestamp" regression
+  // test): the sliding-window store's own bottom map always advances to a
+  // real, exact, followable cursor when a trim happens — there is no
+  // reposition anymore. A filtered scan can stop with the continue-scan
+  // button showing, then live traffic (which still passes the filter
+  // predicate) trims the store's oldest row off the bottom before the
+  // button is ever clicked — clicking it must use the store's fresh bottom
+  // edge directly (which the trim already advanced past the evicted row),
+  // never anything captured earlier.
+  it('a bottom trim while the continue-scan button is showing uses the store\'s fresh edge on click, never a stale value', async () => {
     const tail = mockTail()
     render(<Timeline cluster="prod" topic="orders" windowCap={3} />)
     await emit(0, 'page_end', { cursor: null, exhausted: true })
@@ -265,12 +277,12 @@ describe('Timeline filter box', () => {
     await emit(idx, 'match', mk(1))
     await emit(idx, 'match', mk(2))
     await emit(idx, 'progress', { scanned: 5000, matches: 2, budget: 5000 })
-    await emit(idx, 'page_end', { cursor: 'c1', exhausted: false })
+    await emit(idx, 'page_end', { cursor: cur({ 0: 1 }), exhausted: false })
     expect(screen.getByTestId('continue-scan')).toBeInTheDocument()
 
     // Live traffic (must pass the "value:needle" predicate to merge at all)
-    // pushes the store past cap(3): the oldest matched row (p0·1) drops off
-    // the bottom — the continue button's cursor ('c1') now points past it.
+    // pushes the store past cap(3): the oldest matched row (p0·1) trims off
+    // the bottom, advancing the store's own bottom edge past it.
     await act(async () => {
       tail.handlers().onMessage(mk(3, { value: { encoding: 'utf8', text: 'needle-3', schema_id: null, error: null } }))
     })
@@ -281,8 +293,12 @@ describe('Timeline filter box', () => {
 
     fireEvent.click(screen.getByTestId('continue-scan'))
     const req = FakeEventSource.instances.at(-1)!.url
-    expect(req).toContain('anchor=timestamp')
-    expect(req).not.toContain('cursor=')
+    // No reposition: the store's own bottom edge (advanced to recover
+    // exactly the trimmed row, offset 1) is used directly, with the filter
+    // still merged onto it via withFilter.
+    expect(req).toBe(
+      url({ direction: 'back', limit: '100', cursor: cur({ 0: 2 }), filter: 'value_contains', q: 'needle' }),
+    )
   })
 
   it('clearing the filter (×) reloads unfiltered', async () => {
@@ -313,7 +329,7 @@ describe('Timeline filter box', () => {
       const idx = FakeEventSource.instances.length - 1
       totalScanned += 50
       await emit(idx, 'progress', { scanned: 50, matches: 0, budget: 250000 })
-      await emit(idx, 'page_end', { cursor: `c${i + 1}`, exhausted: false })
+      await emit(idx, 'page_end', { cursor: cur({ 0: i + 1 }), exhausted: false })
       if (screen.queryByTestId('continue-scan')) break
     }
     const btn = screen.getByTestId('continue-scan')
@@ -341,7 +357,7 @@ describe('Timeline filter box', () => {
     await emit(idx, 'progress', { scanned: 5000, matches: 1, budget: 5000 })
     // I2's partial-match budget stop: 1 match, cursor non-null, not
     // exhausted -> continue-scan shows instead of load-older.
-    await emit(idx, 'page_end', { cursor: 'c1', exhausted: false })
+    await emit(idx, 'page_end', { cursor: cur({ 0: 9 }), exhausted: false })
     expect(screen.getByTestId('continue-scan')).toHaveTextContent('scanned 5000 records · 1 matches — continue')
 
     const restoreScrollHeight = stubScrollHeight(810)
@@ -369,7 +385,7 @@ describe('Timeline filter box', () => {
     await settle()
     const filteredIdx = FakeEventSource.instances.length - 1
     await emit(filteredIdx, 'match', mk(9))
-    await emit(filteredIdx, 'page_end', { cursor: 'c1', exhausted: false })
+    await emit(filteredIdx, 'page_end', { cursor: cur({ 0: 9 }), exhausted: false })
 
     // A filtered page with 1 match (fewer than a full page) and a non-null,
     // non-exhausted cursor is the I2 partial-match budget-stop case: the
@@ -377,29 +393,29 @@ describe('Timeline filter box', () => {
     // but clicking it drives the exact same withFilter-merged request.
     fireEvent.click(screen.getByTestId('continue-scan'))
     expect(FakeEventSource.instances.at(-1)!.url).toBe(
-      '/api/clusters/prod/topics/orders/timeline?direction=back&limit=100&cursor=c1&filter=json_eq&q=42&path=user.id',
+      url({ direction: 'back', limit: '100', cursor: cur({ 0: 9 }), filter: 'json_eq', q: '42', path: 'user.id' }),
     )
     const olderIdx = FakeEventSource.instances.length - 1
-    await emit(olderIdx, 'page_end', { cursor: 'c2', exhausted: false })
+    // Zero matches this time — the empty-page contract auto-continues on
+    // its own (unaffected by the assertions below, which all use `.at(-1)`).
+    await emit(olderIdx, 'page_end', { cursor: cur({ 0: 5 }), exhausted: false })
 
     fireEvent.click(screen.getByTestId('jump-now'))
     expect(FakeEventSource.instances.at(-1)!.url).toBe(
       '/api/clusters/prod/topics/orders/timeline?direction=back&limit=100&anchor=latest&filter=json_eq&q=42&path=user.id',
     )
     const jumpIdx = FakeEventSource.instances.length - 1
-    await emit(jumpIdx, 'page_end', { cursor: 'c3', exhausted: false })
+    await emit(jumpIdx, 'page_end', { cursor: cur({ 0: 3 }), exhausted: false })
 
     // Clearing the filter drops it from every subsequent request too.
     typeFilter('')
     await settle()
     const clearedIdx = FakeEventSource.instances.length - 1
     await emit(clearedIdx, 'match', mk(1))
-    await emit(clearedIdx, 'page_end', { cursor: 'c4', exhausted: false })
+    await emit(clearedIdx, 'page_end', { cursor: cur({ 0: 1 }), exhausted: false })
 
     scrollToBottom()
-    expect(FakeEventSource.instances.at(-1)!.url).toBe(
-      '/api/clusters/prod/topics/orders/timeline?direction=back&limit=100&cursor=c4',
-    )
+    expect(FakeEventSource.instances.at(-1)!.url).toBe(url({ direction: 'back', limit: '100', cursor: cur({ 0: 1 }) }))
   })
 
   it('after jumping to beginning, a settled filter change re-anchors forward/beginning', async () => {
@@ -408,7 +424,7 @@ describe('Timeline filter box', () => {
 
     fireEvent.click(screen.getByTestId('jump-beginning'))
     const beginIdx = FakeEventSource.instances.length - 1
-    await emit(beginIdx, 'page_end', { cursor: 'c-fwd', exhausted: false })
+    await emit(beginIdx, 'page_end', { cursor: cur({ 0: 5 }), exhausted: false })
 
     typeFilter('value:zzz')
     await settle()

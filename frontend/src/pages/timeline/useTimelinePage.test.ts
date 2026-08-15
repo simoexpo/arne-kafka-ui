@@ -125,6 +125,52 @@ describe('useTimelinePage', () => {
     expect(result.current.state.exhausted.forward).toBe(true)
   })
 
+  // Task 3: `loadPage`'s optional 3rd argument fires SYNCHRONOUSLY, in the
+  // very same event-handler tick as `page_end` itself — not one render
+  // later via `state`/`cursors`. This is what lets a caller (Timeline.tsx)
+  // commit a page's rows to its own store and have that mutation show up in
+  // the SAME render where `state.loading` flips to `false`, instead of a
+  // render behind it (which left ref-based DOM handles, e.g. a scroll
+  // reposition, reading stale pre-commit content — see Timeline.test.tsx's
+  // jump-viewport-repositioning tests).
+  it('loadPage\'s onPageEnd callback fires synchronously with the raw cursor/exhausted, before the caller can observe it via state/cursors', () => {
+    const { result } = renderHook(() => useTimelinePage('prod', 'orders'))
+    const seenDuringCallback: { cursor: string | null; exhausted: boolean; stateLoading: boolean }[] = []
+    act(() => {
+      result.current.loadPage({ direction: 'back', limit: 100, anchor: 'latest' }, vi.fn(), (cursor, exhausted) => {
+        seenDuringCallback.push({ cursor, exhausted, stateLoading: result.current.state.loading })
+      })
+    })
+    act(() => {
+      FakeEventSource.instances[0].emit('page_end', { cursor: 'c-raw', exhausted: false })
+    })
+    expect(seenDuringCallback).toEqual([{ cursor: 'c-raw', exhausted: false, stateLoading: true }])
+    // By the NEXT render (after the callback returns), state/cursors do
+    // reflect it — proving the callback ran strictly before, not after.
+    expect(result.current.state.loading).toBe(false)
+    expect(result.current.cursors.back).toBe('c-raw')
+  })
+
+  it('onPageEnd does not fire on a page error or a transport error', () => {
+    const { result } = renderHook(() => useTimelinePage('prod', 'orders'))
+    const onPageEnd = vi.fn()
+    act(() => {
+      result.current.loadPage({ direction: 'back', limit: 100, anchor: 'latest' }, vi.fn(), onPageEnd)
+    })
+    act(() => {
+      FakeEventSource.instances[0].emit('error', { code: 'kafka_error', message: 'boom', cluster: 'prod', retriable: true })
+    })
+    expect(onPageEnd).not.toHaveBeenCalled()
+
+    act(() => {
+      result.current.loadPage({ direction: 'back', limit: 100, anchor: 'latest' }, vi.fn(), onPageEnd)
+    })
+    act(() => {
+      FakeEventSource.instances[1].fireTransportError()
+    })
+    expect(onPageEnd).not.toHaveBeenCalled()
+  })
+
   it('a new loadPage closes the previous in-flight stream', () => {
     const { result } = renderHook(() => useTimelinePage('prod', 'orders'))
     act(() => {

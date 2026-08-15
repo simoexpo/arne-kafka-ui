@@ -1,29 +1,6 @@
 import type { MessageOut } from '../api/types'
 import { decodeCursor, encodeCursor } from './timelineCursor'
 
-export type InsertOrigin = 'live' | 'back' | 'forward'
-
-export interface Dropped {
-  top: number
-  bottom: number
-}
-
-// What THIS insert call dropped (a delta), as opposed to `dropped()`'s
-// running cumulative total — the Timeline needs the delta to know whether
-// *this* insert invalidated an edge (see the v1.4 window-cap-honesty
-// ruling), which a cumulative counter can't answer on its own.
-export interface InsertResult {
-  droppedTop: number
-  droppedBottom: number
-}
-
-export interface TimelineStore {
-  insert(msgs: MessageOut[], origin: InsertOrigin): InsertResult
-  rows(): readonly MessageOut[]
-  dropped(): Dropped
-  clear(): void
-}
-
 function partitionKey(partition: number, offset: number): string {
   return `${partition}:${offset}`
 }
@@ -44,144 +21,16 @@ function insertByOffsetAscending(arr: MessageOut[], msg: MessageOut): void {
   arr.splice(lo, 0, msg)
 }
 
-/**
- * Merge-native read path: rows() is a k-way merge over per-partition,
- * offset-ordered streams. Within a partition, order is ALWAYS offset order
- * (never timestamp — producer clocks lie, offsets don't). Across partitions,
- * we interleave by timestamp, repeatedly taking whichever partition's current
- * head has the greatest timestamp; ties go to the smaller partition id.
- *
- * // TODO(task-3): delete — superseded by `createSlidingWindowStore` below
- * (spec v1.6). Kept only because `Timeline.tsx` still drives this v1.4-era
- * API (`insert`/`origin`/`InsertResult`); task 3 rewires `Timeline.tsx` onto
- * the new store and removes this one.
- */
-export function createTimelineStore(cap = 2000): TimelineStore {
-  const partitions = new Map<number, MessageOut[]>()
-  const seen = new Set<string>()
-  const dropCounts: Dropped = { top: 0, bottom: 0 }
-  let cachedRows: readonly MessageOut[] | null = null
-
-  function totalCount(): number {
-    let n = 0
-    for (const arr of partitions.values()) n += arr.length
-    return n
-  }
-
-  function mergeRows(): MessageOut[] {
-    const parts = [...partitions.entries()].sort((a, b) => a[0] - b[0])
-    // Each partition array is offset-ascending; walk it from the end so the
-    // "head" of each stream is its highest (newest-by-offset) remaining entry.
-    const ptrs = parts.map(([, arr]) => arr.length - 1)
-    const result: MessageOut[] = []
-    for (;;) {
-      let bestIdx = -1
-      let bestTs = -Infinity
-      for (let i = 0; i < parts.length; i++) {
-        const ptr = ptrs[i]
-        if (ptr < 0) continue
-        const ts = parts[i][1][ptr].timestamp_ms ?? -Infinity
-        // Strict `>` only: on a tie the first candidate found wins, and we
-        // iterate partitions in ascending id order, so smaller partition id
-        // wins ties as required.
-        if (bestIdx === -1 || ts > bestTs) {
-          bestIdx = i
-          bestTs = ts
-        }
-      }
-      if (bestIdx === -1) break
-      const ptr = ptrs[bestIdx]
-      result.push(parts[bestIdx][1][ptr])
-      ptrs[bestIdx] = ptr - 1
-    }
-    return result
-  }
-
-  function removeMessage(msg: MessageOut): void {
-    const arr = partitions.get(msg.partition)
-    if (!arr) return
-    const idx = arr.findIndex((m) => m.offset === msg.offset)
-    if (idx >= 0) arr.splice(idx, 1)
-    if (arr.length === 0) partitions.delete(msg.partition)
-    seen.delete(partitionKey(msg.partition, msg.offset))
-  }
-
-  function enforceCap(origin: InsertOrigin): InsertResult {
-    const excess = totalCount() - cap
-    if (excess <= 0) return { droppedTop: 0, droppedBottom: 0 }
-    const merged = mergeRows() // newest-first
-    let result: InsertResult
-    if (origin === 'back') {
-      // Backward-fill overflow drops from the top (newest end) — the
-      // opposite end from where 'back' inserts (older messages).
-      for (let i = 0; i < excess; i++) removeMessage(merged[i])
-      dropCounts.top += excess
-      result = { droppedTop: excess, droppedBottom: 0 }
-    } else {
-      // live/forward overflow drops from the bottom (oldest end).
-      for (let i = 0; i < excess; i++) removeMessage(merged[merged.length - 1 - i])
-      dropCounts.bottom += excess
-      result = { droppedTop: 0, droppedBottom: excess }
-    }
-    cachedRows = null
-    return result
-  }
-
-  return {
-    insert(msgs, origin) {
-      let changed = false
-      for (const msg of msgs) {
-        const k = partitionKey(msg.partition, msg.offset)
-        // Dedup on partition:offset: first-inserted record wins and later
-        // duplicates are silently dropped. This matches the server's
-        // re-emission overlap semantics (e.g. a 'back' page and a 'live'
-        // tail can both deliver the same offset; only the first copy seen
-        // is kept, subsequent identical offsets are no-ops).
-        if (seen.has(k)) continue
-        seen.add(k)
-        let arr = partitions.get(msg.partition)
-        if (!arr) {
-          arr = []
-          partitions.set(msg.partition, arr)
-        }
-        insertByOffsetAscending(arr, msg)
-        changed = true
-      }
-      if (changed) cachedRows = null
-      return enforceCap(origin)
-    },
-    rows() {
-      // Freeze the memoized array so a consumer's in-place sort/splice can't
-      // silently corrupt every subsequent read of the shared cache — it's
-      // zero-copy (no clone) and mutation attempts throw in strict mode.
-      if (cachedRows === null) cachedRows = Object.freeze(mergeRows())
-      return cachedRows
-    },
-    dropped() {
-      return { top: dropCounts.top, bottom: dropCounts.bottom }
-    },
-    clear() {
-      partitions.clear()
-      seen.clear()
-      dropCounts.top = 0
-      dropCounts.bottom = 0
-      cachedRows = null
-    },
-  }
-}
-
 // ===========================================================================
 // v1.6 sliding window store (spec: docs/superpowers/specs/2026-08-13-
 // messages-timeline-design.md, "Sliding window (v1.6 — owner ruling)").
 //
-// This is a DELIBERATELY SEPARATE store, side by side with the v1.4-era
-// `createTimelineStore` above rather than a replacement of it: `Timeline.tsx`
-// (task 3's file, not touched here) still imports and drives the old store
-// (`insert`/`origin`/`InsertResult`-with-booleans), and the frontend suite
-// must keep compiling and passing until task 3 rewires it. `createTimelineStore`
-// above is therefore frozen as-is — task 3 is expected to switch
-// `Timeline.tsx` over to `createSlidingWindowStore` below and then delete the
-// old one (marked `// TODO(task-3): delete` at its definition above).
+// (Task 3: the v1.4-era `createTimelineStore` that used to live here —
+// merge-native `insert`/`origin`/`InsertResult`-with-booleans, no edge maps —
+// has been deleted. `Timeline.tsx` now drives `createSlidingWindowStore`
+// exclusively; `insertByOffsetAscending`/`partitionKey` above are the two
+// pieces of merge machinery this store still shares with that deleted code,
+// kept because they're still exactly right here too.)
 //
 // Design summary (see the doc comments below for the exact per-rule
 // reasoning): the store tracks two per-partition position maps — `bottomMap`
@@ -214,6 +63,22 @@ export interface SlidingWindowStore {
     direction: 'back' | 'forward',
     startPositions: Record<number, number> | null,
     contCursor: string | null,
+    /**
+     * `attach`: only meaningful for a BACK-direction anchor bootstrap
+     * (`startPositions === null`) — controls whether this bootstrap claims
+     * the window covers the live tail (M-new, task-3 review carry-over).
+     * Latest genuinely reads from `hi`, so it attaches; Offset/Timestamp
+     * anchors land mid-topic and must NOT attach even though they, too, are
+     * back-direction anchor bootstraps with no request cursor. A forward
+     * anchor bootstrap (Beginning) ignores this entirely — its own
+     * attached transition only ever comes from a later forward page
+     * reporting `exhausted`, never from its own bootstrap. Defaults to
+     * `true` for the unit-test suite's ergonomics (most anchor-bootstrap
+     * tests here model Latest); production callers (Timeline.tsx) must
+     * always pass this explicitly, on every anchor call, and never lean on
+     * the default.
+     */
+    opts?: { attach?: boolean },
   ): InsertOutcome
   /**
    * Live-tail rows: always extend the newest (top) end.
@@ -589,7 +454,7 @@ export function createSlidingWindowStore(cap = 2000): SlidingWindowStore {
   }
 
   return {
-    insertPage(rows, direction, startPositions, contCursor) {
+    insertPage(rows, direction, startPositions, contCursor, opts) {
       const { insertedMin, insertedMax } = insertRows(rows)
 
       if (startPositions === null) {
@@ -628,9 +493,14 @@ export function createSlidingWindowStore(cap = 2000): SlidingWindowStore {
       }
 
       // Attached transitions (see home doc comment): a back-anchor bootstrap
-      // starts at the tail; a forward page reporting exhausted caught back
-      // up to it.
-      if (direction === 'back' && startPositions === null) attached = true
+      // starts at the tail — but ONLY when the caller confirms this
+      // particular bootstrap is Latest-style (M-new: Offset/Timestamp
+      // anchors are also back-direction, startPositions === null bootstraps,
+      // but they land mid-topic, not at the tail, and must stay detached —
+      // see `opts.attach`'s own doc comment above). A forward page reporting
+      // `exhausted` caught back up to the tail regardless of how the window
+      // got here.
+      if (direction === 'back' && startPositions === null && (opts?.attach ?? true)) attached = true
       if (direction === 'forward' && contCursor === null) attached = true
 
       return enforceCap(direction === 'back' ? 'bottom-insert' : 'top-insert')
@@ -645,11 +515,25 @@ export function createSlidingWindowStore(cap = 2000): SlidingWindowStore {
           'insertLive called while detached: live rows must be buffered by the caller until the window re-attaches (edges().top === null)',
         )
       }
-      // N2 defensive drop (belt-and-suspenders, NOT load-bearing — see the
-      // class doc comment's bottom-map completeness argument for why a
-      // legal attached live row can never legitimately sit below
-      // `bottomMap[p]`): silently ignore one anyway, counted nowhere, purely
-      // against a future caller bug.
+      // N2 defensive drop — filter out anything at or below `bottomMap[p]`
+      // before inserting. This is NOT purely hypothetical belt-and-
+      // suspenders against some future caller bug (L-new, task-3 review
+      // carry-over): it IS reached in real usage by Task 3's re-attach
+      // buffer flush. A live row buffered while detached carries an offset
+      // that was genuinely above the window's top at the moment it was
+      // buffered — but forward paging can keep running for a while after
+      // that (advancing `bottomMap` via rule 1's row-derived tightening, or
+      // via a bottom trim) before the buffer is actually flushed through
+      // this method, once the store re-attaches. A buffered row can
+      // therefore legitimately arrive here already covered by what forward
+      // recovery has since fetched (or already trimmed back out) — this
+      // filter is what makes that safe, not just defensive. One
+      // consequence worth flagging rather than silently accepting: a row
+      // this filter drops is counted NOWHERE (no top/bottom trim counter,
+      // no caller-visible signal at all) — an accepted limitation (the row
+      // was never displayed and never will be, so there is nothing
+      // meaningful to surface), not a bug, but deliberately noted here so
+      // it isn't mistaken for telemetry this method doesn't provide.
       const safeRows = rows.filter((r) => r.offset >= (bottomMap.get(r.partition) ?? -Infinity))
       const { insertedMax } = insertRows(safeRows)
       // Unconditional ceiling (fix round 2, restored — see the class doc

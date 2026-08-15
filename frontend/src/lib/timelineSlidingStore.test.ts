@@ -590,6 +590,47 @@ describe('createSlidingWindowStore — C1 regression: live inserts and the top e
   })
 })
 
+// ---------------------------------------------------------------------------
+// M-new (task-3 review carry-over, hard requirement): the store previously
+// set `attached = true` on ANY back-direction anchor bootstrap
+// (`startPositions === null`), which is only correct for a Latest-style
+// anchor (genuinely reads from the tail). Offset/Timestamp anchors are
+// historical jumps — landing mid-topic must NOT claim the window already
+// covers the live tail. `insertPage` gains a caller-supplied opt so only a
+// caller that KNOWS it's bootstrapping from Latest can attach; every other
+// anchor bootstrap (offset/timestamp/beginning) must pass `attach: false`
+// (or omit it for a forward anchor, where it's a no-op either way) and stay
+// detached. Default (opt omitted) is `true` — deliberately: it keeps every
+// pre-existing back-anchor-bootstrap call above (all of which model a
+// Latest-style read) passing unchanged; production code (Timeline.tsx) is
+// required to pass the flag explicitly on every anchor call, never rely on
+// this default.
+// ---------------------------------------------------------------------------
+describe('createSlidingWindowStore — anchor-awareness (M-new)', () => {
+  it('an offset/timestamp-style anchor bootstrap (attach: false) leaves the store detached: edges().top is non-null and insertLive throws', () => {
+    const s = createSlidingWindowStore(10)
+    s.insertPage([mk(0, 9, 900), mk(0, 8, 800)], 'back', null, encodeCursor({ 0: 8 }), { attach: false })
+    // The opposite-side (top) edge is still seeded from row offsets exactly
+    // as any back-anchor bootstrap does — only `attached` itself must differ.
+    expect(s.edges().top).not.toBeNull()
+    expect(decodeCursor(s.edges().top!)).toEqual({ 0: 10 })
+    expect(() => s.insertLive([mk(0, 10, 1000)])).toThrow()
+  })
+
+  it('a Latest-style anchor bootstrap (default, attach omitted) still attaches: edges().top is null and insertLive does not throw', () => {
+    const s = createSlidingWindowStore(10)
+    s.insertPage([mk(0, 9, 900), mk(0, 8, 800)], 'back', null, encodeCursor({ 0: 8 }))
+    expect(s.edges().top).toBeNull()
+    expect(() => s.insertLive([mk(0, 10, 1000)])).not.toThrow()
+  })
+
+  it('a Latest-style anchor bootstrap with attach explicitly true attaches, same as the default', () => {
+    const s = createSlidingWindowStore(10)
+    s.insertPage([mk(0, 9, 900), mk(0, 8, 800)], 'back', null, encodeCursor({ 0: 8 }), { attach: true })
+    expect(s.edges().top).toBeNull()
+  })
+})
+
 describe('createSlidingWindowStore — codec integration', () => {
   it('accepts a real backend-shaped continuation cursor (carrying a direction field)', () => {
     // base64(JSON.stringify({"direction":"back","positions":[[0,60],[1,5]]}))
