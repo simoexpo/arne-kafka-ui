@@ -29,7 +29,7 @@ describe('copy affordance', () => {
   it('copies json-able values pretty-printed', async () => {
     const user = userEvent.setup()
     const writeText = vi.fn().mockResolvedValue(undefined)
-    Object.assign(navigator, { clipboard: { writeText } })
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true })
     render(<PayloadView payload={{ encoding: 'json', text: '{"a":{"b":1}}', schema_id: null, error: null }} label="value" />)
     await user.click(screen.getByLabelText('copy value'))
     expect(writeText).toHaveBeenCalledWith('{\n  "a": {\n    "b": 1\n  }\n}')
@@ -38,7 +38,7 @@ describe('copy affordance', () => {
   it('copies non-json text verbatim', async () => {
     const user = userEvent.setup()
     const writeText = vi.fn().mockResolvedValue(undefined)
-    Object.assign(navigator, { clipboard: { writeText } })
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true })
     render(<PayloadView payload={{ encoding: 'utf8', text: 'order-1', schema_id: null, error: null }} label="key" />)
     await user.click(screen.getByLabelText('copy key'))
     expect(writeText).toHaveBeenCalledWith('order-1')

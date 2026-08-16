@@ -20,7 +20,7 @@ export function PayloadView({ payload, label }: { payload: DecodedPayload | null
       <span>{label}</span>
       {payload && <EncodingBadge encoding={payload.encoding} />}
       {payload && payload.schema_id !== null && <span className="text-xs">schema id {payload.schema_id}</span>}
-      {payload && <CopyButton text={copyTextFor(payload)} label={`copy ${label}`} />}
+      {payload && <CopyButton text={copyTextFor(payload)} label={label} />}
     </div>
   )
   if (payload === null) {
