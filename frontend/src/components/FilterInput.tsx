@@ -6,17 +6,19 @@ export function FilterInput({
   placeholder,
   ariaLabel,
   className = 'w-72',
+  fullWidth = false,
 }: {
   value: string
   onChange: (value: string) => void
   placeholder: string
   ariaLabel?: string
   className?: string
+  fullWidth?: boolean
 }) {
   const inputRef = useRef<HTMLInputElement>(null)
 
   return (
-    <div className="relative inline-block w-fit">
+    <div className={`relative ${fullWidth ? 'block w-full' : 'inline-block w-fit'}`}>
       <input
         ref={inputRef}
         value={value}

@@ -3,6 +3,7 @@ import { tailTopic } from '../../api/sse'
 import type { TimelinePageParams } from '../../api/sse'
 import type { MessageOut } from '../../api/types'
 import { FilterInput } from '../../components/FilterInput'
+import { FilterHelp } from '../../components/FilterHelp'
 import { MessageList } from '../../components/messages/MessageList'
 import type { MessageListHandle } from '../../components/messages/MessageList'
 import { Panel } from '../../components/Panel'
@@ -1268,7 +1269,10 @@ export function Timeline({
         </div>
       </div>
       <div className="flex flex-wrap items-center gap-3">
-        <FilterInput value={filterText} onChange={setFilterText} placeholder="filter messages…" ariaLabel="filter messages" />
+        <div className="min-w-0 flex-1">
+          <FilterInput value={filterText} onChange={setFilterText} placeholder="filter messages…" ariaLabel="filter messages" className="w-full" fullWidth />
+        </div>
+        <FilterHelp />
         {progressVisible && (
           <div data-testid="filter-progress" className="flex items-center gap-2 text-xs text-zinc-500 dark:text-zinc-400">
             <span>{`scanned ${progressScanned} · ${progressMatches} matches`}</span>
