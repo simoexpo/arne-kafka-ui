@@ -85,10 +85,14 @@ describe('MessageRow', () => {
   })
 
   describe('keyboard operability', () => {
-    it('exposes the row as a button with aria-expanded reflecting the prop', () => {
+    // ARIA forbids interactive descendants inside role="button" (the row
+    // wraps focusable copy buttons and a JSON <details>/<summary>) —
+    // role="group" carries no such restriction while still supporting
+    // aria-expanded, tabIndex and the row's own click/keydown activation.
+    it('exposes the row as a focusable, keyboard-operable group with aria-expanded reflecting the prop', () => {
       const { rerender } = render(<MessageRow message={msg()} expanded={false} onToggle={() => {}} />)
       const row = screen.getByTestId('message-row')
-      expect(row).toHaveAttribute('role', 'button')
+      expect(row).toHaveAttribute('role', 'group')
       expect(row).toHaveAttribute('tabIndex', '0')
       expect(row).toHaveAttribute('aria-expanded', 'false')
 

@@ -35,9 +35,11 @@ export function MessageRow({
   // The row is the sole affordance for opening/closing a message's
   // inspection view, so it must be keyboard-operable like any other control
   // added since — a real <button> can't be used here (it would forbid the
-  // nested copy buttons/JSON summary <details> the expanded content renders),
-  // so it's a focusable div wearing `role="button"` instead, with the usual
-  // Enter/Space activation and `aria-expanded` announcing its state. The
+  // nested copy buttons/JSON summary <details> the expanded content
+  // renders — ARIA disallows interactive descendants inside role="button"
+  // too, which is why this is `role="group"` rather than `role="button"`),
+  // so it's a focusable div with the usual custom Enter/Space activation and
+  // `aria-expanded` announcing its state. The
   // `e.target !== e.currentTarget` guard below stops THIS handler from
   // acting on a nested control's own keydown bubbling up to it — but each
   // nested control also needs its OWN stopPropagation (CopyButton's own
@@ -54,7 +56,7 @@ export function MessageRow({
   return (
     <div
       data-testid="message-row"
-      role="button"
+      role="group"
       tabIndex={0}
       aria-expanded={expanded}
       onClick={onToggle}
