@@ -38,7 +38,7 @@ pub struct TimelineParams {
     pub path: Option<String>,
 }
 
-/// I2: the wire shape actually extracted from the query string — every
+/// The wire shape actually extracted from the query string — every
 /// field a plain, optional string, so axum's `Query<RawTimelineParams>`
 /// extraction itself can (almost) never fail to deserialize. A typed
 /// `Query<TimelineParams>` (a required `String` plus `Option<u64>`/
@@ -50,7 +50,7 @@ pub struct TimelineParams {
 /// by `parse_raw` below instead, inside the handler, so a bad numeric value
 /// becomes an ordinary `ApiError::bad_request` — which for this
 /// SSE-consumed endpoint flows through the same in-stream `app_error` path
-/// as every other pre-stream validation failure (see I4 / `timeline_sse`).
+/// as every other pre-stream validation failure (see `timeline_sse` below).
 #[derive(Debug, Deserialize)]
 pub struct RawTimelineParams {
     pub direction: Option<String>,
@@ -182,8 +182,8 @@ pub async fn timeline_sse(
     Path((cluster, topic)): Path<(String, String)>,
     Query(raw): Query<RawTimelineParams>,
 ) -> Result<Sse<impl Stream<Item = Result<Event, std::convert::Infallible>>>, ApiError> {
-    // I4: every one of these is a plain, synchronous validation — no I/O,
-    // no cluster handle needed — but the fix bundles them into one `Result`
+    // Every one of these is a plain, synchronous validation — no I/O,
+    // no cluster handle needed — but they're bundled into one `Result`
     // computed up front (rather than `?`-returning straight out of the
     // handler) for the same reason `resolved` below is: a pre-stream HTTP
     // error body is invisible to `EventSource` (it discards a non-200
@@ -193,8 +193,8 @@ pub async fn timeline_sse(
     // unknown cluster still reports the param error, never a
     // `cluster_not_found` that masks it.
     //
-    // I2: `parse_raw` (turning the query string's plain strings into
-    // typed fields) is INSIDE this same validated block, not a separate
+    // `parse_raw` (turning the query string's plain strings into typed
+    // fields) is INSIDE this same validated block, not a separate
     // `Query<TimelineParams>` extractor argument — see `RawTimelineParams`'s
     // doc comment for why: an extractor-level rejection bypasses this
     // whole mechanism and answers with axum's own `text/plain` body.

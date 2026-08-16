@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 
 /// Per-topic count of real (non-trivial) `fetch_ranges_blocking` calls —
 /// i.e. calls that actually built a `BaseConsumer`, not the early-return for
-/// an already-empty range set. Genuinely test-only now (M7): compiled only
+/// an already-empty range set. Genuinely test-only: compiled only
 /// under the `test-hooks` feature, which `cargo test` always carries via
 /// the dev-dependency self-reference in `Cargo.toml`, so a release build
 /// never allocates this map or pays its mutex lock on any real request. A

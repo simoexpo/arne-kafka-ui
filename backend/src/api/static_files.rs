@@ -12,7 +12,7 @@ const PLACEHOLDER: &str =
 
 /// Router-wide fallback for any request matching no declared route.
 ///
-/// Owner ruling (review I3): `/api/*` is API surface, not a page — an
+/// `/api/*` is API surface, not a page — an
 /// unmatched path there is a backend routing bug or a frontend typo, and
 /// must answer with the same structured `ApiError` envelope every other API
 /// failure uses, never the SPA's `text/html`. Everything else (a client-side

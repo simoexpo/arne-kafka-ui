@@ -114,7 +114,7 @@ mod tests {
         assert!(!matches(&Filter::ValueContains("rabbit".into()), &m));
     }
 
-    /// C2 regression: a value that failed to decode is stored as the raw
+    /// A value that failed to decode is stored as the raw
     /// payload's base64 `text` under `Encoding::DecodeError`. Matching
     /// content filters against that base64 blob produces false matches with
     /// no relationship to the actual (undecodable) content — per plan

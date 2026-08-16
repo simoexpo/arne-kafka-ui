@@ -158,7 +158,7 @@ mod tests {
         assert_eq!(p.schema_id, Some(9));
     }
 
-    /// I4 regression: the schema registry declares schema id 9 as JSON, but
+    /// The schema registry declares schema id 9 as JSON, but
     /// the actual payload body is not valid JSON. Stamping `Encoding::Json`
     /// on it anyway (as `decode_plain` would label it `Utf8`/`Bytes`)
     /// silently mislabels the payload; it must surface as a decode error.

@@ -216,10 +216,10 @@ mod tests {
         fetch::RawRecord { partition: 0, offset, timestamp_ms: Some(0), key: None, value: Some(b"x".to_vec()), headers: vec![] }
     }
 
-    /// C1 stall-detection regression: a poll loop that only ever errors
-    /// (dead broker, "Unknown topic or partition" after a delete, ...) must
-    /// eventually give up instead of polling forever with no visible sign
-    /// of trouble. Uses a tiny `stall_timeout` so the test stays fast; the real STALL_TIMEOUT
+    /// A poll loop that only ever errors (dead broker, "Unknown topic or
+    /// partition" after a delete, ...) must eventually give up instead of
+    /// polling forever with no visible sign of trouble. Uses a tiny
+    /// `stall_timeout` so the test stays fast; the real STALL_TIMEOUT
     /// constant is only used in production.
     #[test]
     fn stalls_after_persistent_poll_errors() {
@@ -243,7 +243,7 @@ mod tests {
 
     /// A quiet topic — poll always returning "no message", never an error —
     /// must never be reported as stalled, no matter how long it stays quiet.
-    /// This is the crux of the C1 fix's stall semantics: it counts *error*
+    /// This is the crux of the stall-detection semantics: it counts *error*
     /// time, not *idle* time.
     #[test]
     fn quiet_topic_never_stalls() {
@@ -360,7 +360,7 @@ mod tests {
         drop(rx);
     }
 
-    /// C1a regression: a consumer that fails to *create* (bad config,
+    /// A consumer that fails to *create* (bad config,
     /// resource exhaustion, ...) must surface as an `Err`, not `return;` and
     /// leave the SSE stream closing with no event. `compression.codec` is a
     /// librdkafka enum property validated at `rd_kafka_new()` time, so this

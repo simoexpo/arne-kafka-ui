@@ -193,7 +193,7 @@ pub(crate) mod tests {
         assert!(err.contains("999"), "got: {err}");
     }
 
-    /// I3 regression: decoding re-parsed the schema string (rebuilding the
+    /// Decoding must not re-parse the schema string (rebuilding the
     /// Avro `Schema` / protobuf `FileDescriptor` from scratch) on every
     /// single message, even though schemas are immutable per id and already
     /// have a string-level cache. `parsed()` must reuse the same parsed
@@ -218,7 +218,7 @@ pub(crate) mod tests {
         assert!(matches!(&*p1, ParsedSchema::Protobuf(_)));
     }
 
-    /// I6 regression: without negative caching, every lookup of a
+    /// Without negative caching, every lookup of a
     /// permanently-failing schema id pays a full HTTP round trip — under an
     /// unreachable/misbehaving registry this stampedes it on every message.
     /// Two lookups of the same failing id within the negative-cache TTL must

@@ -236,8 +236,8 @@ pub struct GroupDetail {
 }
 
 /// Per-`(cluster, topic_filter)` count of real `fetch_metadata` calls made
-/// while building a group-lag topic-partition list. Genuinely test-only now
-/// (M7): compiled only under the `test-hooks` feature — see
+/// while building a group-lag topic-partition list. Genuinely test-only:
+/// compiled only under the `test-hooks` feature — see
 /// `fetch::FETCH_CALLS`'s doc comment for how `cargo test` always carries
 /// it — so a release build never allocates this map or pays its mutex lock
 /// on any real request. Scoped by key so it stays meaningful when other
@@ -265,7 +265,7 @@ pub fn group_metadata_fetch_count(topic_filter: Option<&str>) -> u64 {
 }
 
 /// Per-topic count of real (cache-miss) `fetch_watermarks` calls made while
-/// resolving group lag. Genuinely test-only now (M7): compiled only under
+/// resolving group lag. Genuinely test-only: compiled only under
 /// the `test-hooks` feature — see `fetch::FETCH_CALLS`'s doc comment.
 /// Proves a partition read by several groups in the same request is
 /// watermarked once, not once per group.
