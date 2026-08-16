@@ -100,7 +100,15 @@ function CollapsibleNode({
   const [isOpen, setIsOpen] = useState(depth < 2)
   return (
     <details open={isOpen} onToggle={(e) => setIsOpen(e.currentTarget.open)}>
-      <summary className="cursor-pointer select-none text-zinc-500">
+      {/* MessageRow wraps its expanded content in a click handler that stops
+          propagation so nothing inside toggles the row underneath — but
+          that guard lives one level up and only covers a MOUSE click that
+          bubbles through it. Per the HTML spec, activating a focused
+          <summary> with Enter/Space also dispatches its own bubbling
+          `click` — stopping it right here, at the source, means this
+          disclosure is self-contained no matter what its ancestors do
+          (same reasoning as CopyButton's own stopPropagation on click). */}
+      <summary className="cursor-pointer select-none text-zinc-500" onClick={(e) => e.stopPropagation()}>
         {keyName !== null && <Key name={keyName} />}
         <span className="text-zinc-400">{openBracket}</span>
         {!isOpen && (

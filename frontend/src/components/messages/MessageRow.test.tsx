@@ -84,7 +84,7 @@ describe('MessageRow', () => {
     expect(screen.getByTestId('message-row').className).not.toMatch(/emerald/)
   })
 
-  describe('keyboard operability (M4)', () => {
+  describe('keyboard operability', () => {
     it('exposes the row as a button with aria-expanded reflecting the prop', () => {
       const { rerender } = render(<MessageRow message={msg()} expanded={false} onToggle={() => {}} />)
       const row = screen.getByTestId('message-row')
@@ -130,6 +130,24 @@ describe('MessageRow', () => {
       expect(copyKey).toHaveFocus()
       await user.keyboard('{Enter}')
       expect(writeText).toHaveBeenCalled()
+      expect(onToggle).not.toHaveBeenCalled()
+    })
+
+    // JsonView's <summary> is a nested disclosure control, exactly like the
+    // copy button above — a click on it (whether from a mouse, or the real
+    // bubbling `click` the HTML spec has the browser synthesize when
+    // Enter/Space activates a focused <summary>) must never also toggle the
+    // row underneath it. jsdom cannot synthesize that keyboard-triggered
+    // activation itself (there is no way to fire it from a keydown here),
+    // but a plain click on the <summary> element exercises the exact same
+    // bubbling path that activation's synthesized click would take — this
+    // is as far as this suite can verify without a real browser.
+    it('a click on JsonView\'s <summary> inside the expanded row does not toggle the row', () => {
+      const onToggle = vi.fn()
+      const { container } = render(<MessageRow message={msg()} expanded onToggle={onToggle} />)
+      const summary = container.querySelector('summary')
+      expect(summary).not.toBeNull()
+      fireEvent.click(summary!)
       expect(onToggle).not.toHaveBeenCalled()
     })
   })

@@ -32,16 +32,18 @@ export function MessageRow({
   const ts = message.timestamp_ms === null ? '—' : formatTimestamp(message.timestamp_ms, timeDisplayMode)
   const preview = message.value === null ? '∅ null' : message.value.text.replaceAll('\n', ' ')
   const isError = message.value?.encoding === 'decode_error'
-  // M4: the row is the sole affordance for opening/closing a message's
+  // The row is the sole affordance for opening/closing a message's
   // inspection view, so it must be keyboard-operable like any other control
   // added since — a real <button> can't be used here (it would forbid the
   // nested copy buttons/JSON summary <details> the expanded content renders),
   // so it's a focusable div wearing `role="button"` instead, with the usual
   // Enter/Space activation and `aria-expanded` announcing its state. The
-  // `e.target !== e.currentTarget` guard matters: those nested controls are
-  // independently focusable and dispatch their OWN keydown, which bubbles up
-  // through this handler too — without the guard, pressing Enter/Space on
-  // e.g. a copy button would also toggle the row underneath it.
+  // `e.target !== e.currentTarget` guard below stops THIS handler from
+  // acting on a nested control's own keydown bubbling up to it — but each
+  // nested control also needs its OWN stopPropagation (CopyButton's own
+  // click handler; JsonView's <summary> click handler) to stop what Enter/
+  // Space activation on IT dispatches from reaching this div's `onClick`
+  // instead. Both guards are needed; neither one alone is enough.
   const handleKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
     if (e.target !== e.currentTarget) return
     if (e.key === 'Enter' || e.key === ' ') {
