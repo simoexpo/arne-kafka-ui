@@ -383,17 +383,13 @@ pub fn run_page(
                 }
             }
 
-            // Step 4: exact offset-based cursor math (see doc comment
-            // above). A complete partition whose stream is now fully
-            // drained (every delivered record taken, or it started empty —
-            // a window that was nothing but holes) has had its *entire*
-            // window accounted for, real records and holes alike, so it
-            // jumps straight to the window boundary — not just to the edge
-            // of what got taken, which could strand it just short of a
-            // trailing hole forever. A partition that's complete but still
-            // has real records left in its stream (the merge loop hit the
-            // match target first) must NOT take that shortcut — there's
-            // pending data it would skip past.
+            // Step 4: exact offset-based cursor math — window boundary for
+            // a complete-and-drained partition, otherwise the extreme
+            // offset actually taken, otherwise unchanged. Each branch's
+            // reasoning is in `run_page`'s doc comment, step 4; the trap to
+            // remember while editing here is that `is_complete[i] &&
+            // streams[i].is_empty()` is the ONLY case allowed to skip past
+            // offsets no record was taken from.
             let new_positions: Vec<(i32, i64)> = cur_positions
                 .iter()
                 .map(|&(p, pos)| {
