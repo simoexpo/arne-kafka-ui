@@ -1,20 +1,14 @@
 use super::{fetch, MessageOut};
-use crate::cluster::ClusterHandle;
+use crate::cluster::{throwaway_group_id, ClusterHandle};
 use crate::error::ApiError;
 use rdkafka::consumer::{BaseConsumer, Consumer};
 use rdkafka::topic_partition_list::TopicPartitionList;
 use rdkafka::{ClientConfig, Offset};
 use serde::Serialize;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
-
-/// Monotonic per-process counter so each tail's throwaway group.id is unique
-/// even when two tails land in the same millisecond (mirrors fetch.rs's own
-/// per-fetch counter — `assign()` requires a group.id even though no real
-/// consumer group is involved).
-static TAIL_SEQ: AtomicU64 = AtomicU64::new(0);
 
 /// If the poll loop sees nothing but errors for this long (dead broker,
 /// deleted topic, ...) it gives up instead of spinning forever. A *quiet*
@@ -163,14 +157,8 @@ pub async fn run(
         let poll_topic = topic.clone();
         let poll_wm = wm.clone();
         let scan = tokio::task::spawn_blocking(move || {
-            // librdkafka's consumer machinery requires a group.id even for
-            // pure assign()-based consumption with no group management
-            // involved; this uses a throwaway id and never commits, so no
-            // real group is affected.
-            let seq = TAIL_SEQ.fetch_add(1, Ordering::Relaxed);
-            let group_id = format!("betrachtung-tail-{}-{}-{seq}", std::process::id(), crate::util::now_ms());
             let mut cc = crate::cluster::build_client_config(&cfg);
-            cc.set("group.id", group_id).set("enable.auto.commit", "false");
+            cc.set("group.id", throwaway_group_id("tail")).set("enable.auto.commit", "false");
             run_consumer_blocking(cc, &poll_topic, &poll_wm, &poll_cancel, raw_tx, STALL_TIMEOUT)
         });
 

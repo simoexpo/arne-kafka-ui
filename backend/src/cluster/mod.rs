@@ -10,7 +10,7 @@ use rdkafka::consumer::{BaseConsumer, Consumer};
 use rdkafka::error::KafkaResult;
 use rdkafka::ClientConfig;
 use serde::Serialize;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
@@ -46,6 +46,21 @@ pub fn group_consumer(cfg: &ClusterConfig, group: &str) -> KafkaResult<BaseConsu
     let mut cc = build_client_config(cfg);
     cc.set("group.id", group);
     cc.create()
+}
+
+/// Monotonic per-process counter backing `throwaway_group_id`, shared across
+/// every call site that mints one.
+static THROWAWAY_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// Mints a throwaway consumer group.id for pure assign()-based consumption
+/// with no group management involved (a bounded fetch, a live tail):
+/// librdkafka's consumer machinery requires a group.id even though no real
+/// consumer group is ever joined, subscribed to, or committed against.
+/// `kind` (e.g. "fetch", "tail") only distinguishes call sites for
+/// debugging; the id itself is otherwise arbitrary and never reused.
+pub fn throwaway_group_id(kind: &str) -> String {
+    let seq = THROWAWAY_SEQ.fetch_add(1, Ordering::Relaxed);
+    format!("betrachtung-{kind}-{}-{}-{seq}", std::process::id(), crate::util::now_ms())
 }
 
 pub struct ClusterHandle {

@@ -1,7 +1,7 @@
 use super::range::PartitionRange;
 use super::schema_registry::SchemaRegistry;
 use super::{decode, HeaderOut, MessageOut};
-use crate::cluster::{build_client_config, ClusterHandle, ADMIN_TIMEOUT};
+use crate::cluster::{build_client_config, throwaway_group_id, ClusterHandle, ADMIN_TIMEOUT};
 use crate::config::ClusterConfig;
 use crate::error::ApiError;
 use rdkafka::consumer::{BaseConsumer, Consumer};
@@ -9,13 +9,9 @@ use rdkafka::message::{BorrowedMessage, Headers, Message};
 use rdkafka::topic_partition_list::TopicPartitionList;
 use rdkafka::Offset;
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
-
-/// Monotonic per-process counter so each fetch's throwaway group.id is
-/// unique even when two fetches land in the same millisecond.
-static FETCH_SEQ: AtomicU64 = AtomicU64::new(0);
 
 /// Per-topic count of real (non-trivial) `fetch_ranges_blocking` calls —
 /// i.e. calls that actually built a `BaseConsumer`, not the early-return for
@@ -131,13 +127,8 @@ pub fn fetch_ranges_blocking(
         return Ok(FetchOutcome { records: Vec::new(), complete: trivially_complete });
     }
     record_fetch_call(topic);
-    // librdkafka's consumer machinery requires a group.id even for pure
-    // assign()-based fetches with no group management involved; each fetch
-    // uses a throwaway id and never commits, so no real group is affected.
-    let seq = FETCH_SEQ.fetch_add(1, Ordering::Relaxed);
-    let group_id = format!("betrachtung-fetch-{}-{}-{seq}", std::process::id(), crate::util::now_ms());
     let consumer: BaseConsumer = build_client_config(cfg)
-        .set("group.id", group_id)
+        .set("group.id", throwaway_group_id("fetch"))
         .set("enable.auto.commit", "false")
         .set("enable.partition.eof", "true")
         .create()
