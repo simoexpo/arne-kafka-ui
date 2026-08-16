@@ -24,26 +24,30 @@ use super::window::{adjacent_offset, at_edge, cap_windows_to_budget, clamp_posit
 /// loses data, the second loops the client forever): `run_page` turns it
 /// into a terminal `error` instead.
 ///
-/// All three conditions are load-bearing:
+/// The two narrowing conditions are what keep healthy topics quiet, and
+/// both are load-bearing:
 ///
-/// - **Nothing taken alone is not an error.** A window that is entirely
-///   legitimate holes (say, only a transaction control record) is scanned
-///   to completion, contributes zero taken records, and is correct — its
-///   position still advances to the window boundary in `run_page`, because
-///   nothing was missed; the range was confirmed empty. Firing here on that
-///   case would turn ordinary hole-only chunks into spurious errors.
+/// - **Nothing taken, by itself, is not an error.** A window that is
+///   entirely legitimate holes (say, only a transaction control record) is
+///   scanned to completion, contributes zero taken records, and is correct
+///   — its position still advances to the window boundary in `run_page`,
+///   because nothing was missed: the range was confirmed to hold no
+///   messages. Firing here on that case would turn ordinary hole-only
+///   chunks into spurious errors.
 /// - **Cancellation is carved out.** A client disconnect mid-scan can
 ///   legitimately leave nothing taken; that's not a broker anomaly.
 fn page_made_no_progress(taken_is_empty: bool, any_incomplete_window: bool, cancelled: bool) -> bool {
     taken_is_empty && any_incomplete_window && !cancelled
 }
 
-/// Per-partition span of one scan iteration ("chunk") whenever a page needs
-/// to keep looking past its first window — hunting for filter matches, or
-/// crossing a hole-dominated region on an unfiltered page. Deliberately much
-/// larger than a typical `limit` (100-500): a chunk's job is to make real
-/// progress against sparse matches/holes without round-tripping to the
-/// broker for every few records.
+/// Per-partition span of one scan iteration ("chunk"): used by every chunk
+/// of a filtered page, and by every chunk after the first on an unfiltered
+/// one (whose first chunk uses `limit` instead — see `run_page`).
+/// Deliberately much larger than a typical `limit` (100-500), because those
+/// are exactly the cases that must keep looking past one window's worth of
+/// records: hunting a sparse filter match, or crossing a hole-dominated
+/// region. A chunk's job is to make real progress without round-tripping to
+/// the broker for every few records.
 const CHUNK_SPAN: u64 = 5_000;
 
 /// How often (in records popped) a mid-chunk `progress` event goes out —
@@ -181,6 +185,13 @@ fn mid_chunk_progress(total_scanned: u64, records_popped_this_chunk: u64) -> Opt
 /// Chunking is what lets a hole-dominated or match-sparse region — filtered
 /// or not — be crossed within one request instead of one near-empty page
 /// per `limit` offsets.
+///
+/// Failures never leave the page half-reported: a fetch error, a
+/// `spawn_blocking` join failure, or the no-progress condition all go out as
+/// a terminal `TimelineEvent::Error` and end the stream *without* a
+/// `page_end`, so a client can tell "this page finished" from "this page
+/// broke". A client disconnect ends the task silently instead — there is
+/// nobody left to tell.
 #[allow(clippy::too_many_arguments)] // one request's worth of parameters, six of eight are the request itself
 pub fn run_page(
     handle: Arc<ClusterHandle>,
