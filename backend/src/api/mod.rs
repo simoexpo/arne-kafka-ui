@@ -20,7 +20,12 @@ pub fn app(state: AppState) -> Router {
         .route("/api/clusters/{cluster}/topics/{topic}/timeline", get(messages::timeline_sse))
         .route("/api/clusters/{cluster}/groups", get(groups::list))
         .route("/api/clusters/{cluster}/groups/{group}", get(groups::detail))
-        .fallback(get(static_files::spa_fallback))
+        // A bare handler (not wrapped in `get(...)`), so axum registers it as
+        // an ANY-method fallback: a wrong-method request under `/api/*` (or
+        // to any matched route) still reaches `spa_fallback` and gets the
+        // structured envelope, instead of `MethodRouter`'s own bare, bodyless
+        // 405 for an unhandled method.
+        .fallback(static_files::spa_fallback)
         .with_state(state)
 }
 
@@ -46,5 +51,21 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::OK);
+    }
+
+    /// The 404 envelope's own contract ("unknown `/api/*` paths return a 404
+    /// envelope") isn't GET-only: a wrong-method request under `/api/*` must
+    /// get the SAME structured `ApiError` body, not a bare, bodyless 405 —
+    /// `MethodRouter`'s own default fallback for an unhandled method.
+    #[tokio::test]
+    async fn a_wrong_method_under_api_still_gets_the_404_envelope_not_a_bare_405() {
+        let res = app(test_state())
+            .oneshot(Request::builder().method("POST").uri("/api/nope").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::NOT_FOUND);
+        let body = axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["code"], "not_found");
     }
 }

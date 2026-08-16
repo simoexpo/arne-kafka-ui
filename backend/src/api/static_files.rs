@@ -20,7 +20,7 @@ const PLACEHOLDER: &str =
 /// and refreshes work.
 pub async fn spa_fallback(uri: Uri) -> Response {
     let path = uri.path().trim_start_matches('/');
-    if uri.path().starts_with("/api/") {
+    if uri.path() == "/api" || uri.path().starts_with("/api/") {
         return ApiError::not_found_route(uri.path()).into_response();
     }
     if !path.is_empty()
@@ -32,5 +32,23 @@ pub async fn spa_fallback(uri: Uri) -> Response {
     match Assets::get("index.html") {
         Some(index) => Html(index.data).into_response(),
         None => (StatusCode::OK, Html(PLACEHOLDER)).into_response(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::to_bytes;
+
+    /// `/api` (no trailing slash) is unmatched API surface exactly like
+    /// `/api/anything` — `starts_with("/api/")` alone misses this bare form
+    /// and would serve the SPA shell instead of the 404 envelope.
+    #[tokio::test]
+    async fn bare_slash_api_gets_the_404_envelope_not_the_spa_shell() {
+        let res = spa_fallback(Uri::from_static("/api")).await;
+        assert_eq!(res.status(), StatusCode::NOT_FOUND);
+        let body = to_bytes(res.into_body(), usize::MAX).await.unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["code"], "not_found");
     }
 }
