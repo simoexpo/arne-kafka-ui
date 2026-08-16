@@ -371,10 +371,14 @@ interface SlidingWindowStore {
  * `min(offset)` (forward anchor's opposite/bottom side) — but ONLY when
  * that partition's entry is still ABSENT (fix round 2, N2): this same
  * window can already hold a genuinely-established value for the opposite
- * side from an EARLIER insert with no `clear()` in between (Timeline's
- * loadNewer forward-anchor fallback re-issues an anchor this way), and an
+ * side from an EARLIER insert with no `clear()` in between, and an
  * unrelated page's own row offsets are never grounds to clobber it — see
- * `insertPage`'s own doc comment on this seeding step. This is the
+ * `insertPage`'s own doc comment on this seeding step. N2's motivating call
+ * site (a `loadNewer` forward-anchor fallback that re-issued an anchor
+ * without an intervening `clear()`) was deleted from `Timeline.tsx` and is
+ * now production-unreachable — every anchor re-issue there goes through
+ * `resetWindow`, which always `clear()`s first — so this guard is currently
+ * defensive-only, not exercised by any live call site. This is the
  * documented exception ("the edge map seeds from the response continuation
  * + row offsets instead" — see the design doc and this store's own brief);
  * it's exact as long as the anchor's own starting offset has no leading hole

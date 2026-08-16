@@ -797,10 +797,10 @@ describe('createSlidingWindowStore — isAttached() and InsertOutcome.attached (
 // multi-partition anchor page (a real, unremarkable scenario, not just an
 // adversarial one) is silently OMITTED from that seed. Left unaddressed,
 // `edges().top` would mint a cursor missing that partition's key entirely —
-// worse than null, since a partial cursor doesn't trigger any recovery path
-// (Timeline's forward-anchor fallback only ever fires on a NULL top edge):
-// the backend would never be asked about that partition again, a permanent,
-// silent gap.
+// worse than null, since `Timeline.tsx`'s `loadNewer` only checks for a NULL
+// cursor before issuing a request; a partial (non-null) cursor would sail
+// through unnoticed, and the backend would never be asked about that
+// partition again — a permanent, silent gap.
 //
 // Fix: `edges().top` treats the map as complete only when every partition
 // `bottomMap` currently knows about ALSO has a `topMap` entry. `bottomMap`
@@ -880,10 +880,9 @@ describe('createSlidingWindowStore — edges().top completeness (C2, fix round 1
 // above the anchor point is the live tail (nothing has been produced yet
 // that a forward read could ever find, for ANY partition, cold or not).
 // Applying the C2 check here anyway meant `edges().top` stayed `null`
-// FOREVER once such a window detached — `loadNewer` finds no cursor,
-// `forwardAnchorFallback` returns null for the 'default' anchor context
-// (Latest has no "same anchor, forward" replay to fall back to — see
-// Timeline.tsx's own comment), so NO request ever fires: a dead scroll-up,
+// FOREVER once such a window detached — `loadNewer` finds no cursor and
+// simply no-ops (there is no fallback to fall back to for a Latest/
+// 'default' anchor context), so NO request ever fires: a dead scroll-up,
 // the window can never re-attach. Reachable on any over-partitioned topic
 // (any partition quiet enough to contribute zero rows to one Latest page).
 //
@@ -1117,21 +1116,26 @@ describe('createSlidingWindowStore — previewWithOverlay (M2, fix round 1)', ()
 // Fix round 2 — N2 (Medium): the anchor opposite-side seed used to `.set()`
 // the opposite map unconditionally, clobbering an already-established,
 // more trustworthy value from an EARLIER insert in the SAME window (no
-// `clear()` in between) — reachable via Timeline's own loadNewer
-// forward-anchor fallback re-issuing an anchor while `bottomMap` already
-// holds the real edge from the window's first (back-anchor) bootstrap.
+// `clear()` in between). This store-level guard is exercised directly here;
+// the call site that originally motivated it (a `Timeline.tsx` `loadNewer`
+// forward-anchor fallback re-issuing an anchor without an intervening
+// `clear()`) was since deleted and is production-unreachable today (every
+// anchor re-issue in `Timeline.tsx` goes through `resetWindow`, which always
+// `clear()`s first) — the guard stays as defense against any future caller
+// that re-issues an anchor page into an already-populated window.
 // ---------------------------------------------------------------------------
 describe('createSlidingWindowStore — opposite-side anchor seed merges, never clobbers (N2, fix round 2)', () => {
-  it("the reviewer's exact probe: a forward-anchor re-issue (loadNewer's fallback) must not clobber an established bottom edge with its own (much higher) row minima", () => {
+  it('a forward-anchor page issued into an already-populated window (no clear() in between) must not clobber an established bottom edge with its own (much higher) row minima', () => {
     const s = createSlidingWindowStore(100)
     // An earlier back-anchor bootstrap already established a real,
     // trustworthy bottom edge.
     s.insertPage([mk(0, 25, 2500), mk(1, 15, 1500)], 'back', null, encodeCursor({ 0: 20, 1: 10 }), { attach: false })
     expect(decodeCursor(s.edges().bottom!)).toEqual({ 0: 20, 1: 10 })
 
-    // Timeline's loadNewer fallback re-issues the SAME anchor forward (no
-    // clear() in between) — this page's own rows are 73-79, nowhere near
-    // the true bottom edge. The opposite-side seed must not abandon it.
+    // A second anchor page lands forward with no clear() in between (see
+    // this describe block's own comment) — this page's own rows are 73-79,
+    // nowhere near the true bottom edge. The opposite-side seed must not
+    // abandon it.
     s.insertPage(
       [mk(0, 79, 7900), mk(0, 78, 7800), mk(1, 41, 4100)],
       'forward',
