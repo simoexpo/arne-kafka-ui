@@ -40,7 +40,7 @@ describe('TopicDetailView', () => {
   it('shows partitions with offsets and flags shrunken ISR', async () => {
     vi.mocked(client.getTopicDetail).mockResolvedValue(detail)
     renderWithQuery(<TopicDetailView cluster="prod" topic="orders" />)
-    await userEvent.click(screen.getByRole('button', { name: 'Partitions' }))
+    await userEvent.click(screen.getByRole('tab', { name: 'Partitions' }))
     expect(await screen.findByText('42')).toBeInTheDocument() // end offset p0
     expect(screen.getByRole('heading', { name: '2 partitions' })).toBeInTheDocument()
     const rows = screen.getAllByTestId('partition-row')
@@ -51,7 +51,7 @@ describe('TopicDetailView', () => {
   it('config tab summary shows partitions, cleanup policy, and retention with a human hint', async () => {
     vi.mocked(client.getTopicDetail).mockResolvedValue(detail)
     renderWithQuery(<TopicDetailView cluster="prod" topic="orders" />)
-    await userEvent.click(screen.getByRole('button', { name: 'Config' }))
+    await userEvent.click(screen.getByRole('tab', { name: 'Config' }))
     expect(await screen.findByTestId('stat-partitions')).toHaveTextContent('2')
     expect(screen.getByRole('heading', { name: 'Summary' })).toBeInTheDocument()
     expect(screen.getByTestId('stat-cleanup.policy')).toHaveTextContent('delete')
@@ -70,7 +70,7 @@ describe('TopicDetailView', () => {
       ],
     })
     renderWithQuery(<TopicDetailView cluster="prod" topic="orders" />)
-    await userEvent.click(screen.getByRole('button', { name: 'Config' }))
+    await userEvent.click(screen.getByRole('tab', { name: 'Config' }))
     expect(await screen.findByTestId('stat-cleanup.policy')).toHaveTextContent('compact')
     expect(screen.getByTestId('stat-delete.retention.ms')).toHaveTextContent('86400000 (1d)')
     expect(screen.queryByTestId('stat-retention.ms')).not.toBeInTheDocument()
@@ -88,7 +88,7 @@ describe('TopicDetailView', () => {
       ],
     })
     renderWithQuery(<TopicDetailView cluster="prod" topic="orders" />)
-    await userEvent.click(screen.getByRole('button', { name: 'Config' }))
+    await userEvent.click(screen.getByRole('tab', { name: 'Config' }))
     expect(await screen.findByTestId('stat-cleanup.policy')).toHaveTextContent('compact,delete')
     expect(screen.getByTestId('stat-retention.ms')).toHaveTextContent('604800000 (7d)')
     expect(screen.getByTestId('stat-retention.bytes')).toHaveTextContent('∞')
@@ -101,14 +101,14 @@ describe('TopicDetailView', () => {
       configs: detail.configs.filter((c) => c.name !== 'cleanup.policy'),
     })
     renderWithQuery(<TopicDetailView cluster="prod" topic="orders" />)
-    await userEvent.click(screen.getByRole('button', { name: 'Config' }))
+    await userEvent.click(screen.getByRole('tab', { name: 'Config' }))
     expect(await screen.findByTestId('stat-cleanup.policy')).toHaveTextContent('—')
   })
 
   it('config tab table shows only overridden entries by default', async () => {
     vi.mocked(client.getTopicDetail).mockResolvedValue(detail)
     renderWithQuery(<TopicDetailView cluster="prod" topic="orders" />)
-    await userEvent.click(screen.getByRole('button', { name: 'Config' }))
+    await userEvent.click(screen.getByRole('tab', { name: 'Config' }))
     expect(await screen.findByTestId('config-retention.ms')).toHaveTextContent('overridden')
     expect(screen.queryByTestId('config-cleanup.policy')).not.toBeInTheDocument()
     expect(screen.queryByTestId('config-all-retention.ms')).not.toBeInTheDocument() // full table collapsed
@@ -120,14 +120,14 @@ describe('TopicDetailView', () => {
       configs: detail.configs.map((c) => ({ ...c, is_default: true })),
     })
     renderWithQuery(<TopicDetailView cluster="prod" topic="orders" />)
-    await userEvent.click(screen.getByRole('button', { name: 'Config' }))
+    await userEvent.click(screen.getByRole('tab', { name: 'Config' }))
     expect(await screen.findByText('no overrides — all values are broker defaults')).toBeInTheDocument()
   })
 
   it('config tab "show all configs" expands the full table with defaults and overrides', async () => {
     vi.mocked(client.getTopicDetail).mockResolvedValue(detail)
     renderWithQuery(<TopicDetailView cluster="prod" topic="orders" />)
-    await userEvent.click(screen.getByRole('button', { name: 'Config' }))
+    await userEvent.click(screen.getByRole('tab', { name: 'Config' }))
     await screen.findByTestId('config-retention.ms')
     expect(screen.queryByTestId('config-all-retention.ms')).not.toBeInTheDocument()
     await userEvent.click(screen.getByRole('switch', { name: 'show all configs' }))
@@ -139,7 +139,7 @@ describe('TopicDetailView', () => {
   it('show-all-configs switch label is content-sized, not stretched to fill the row', async () => {
     vi.mocked(client.getTopicDetail).mockResolvedValue(detail)
     renderWithQuery(<TopicDetailView cluster="prod" topic="orders" />)
-    await userEvent.click(screen.getByRole('button', { name: 'Config' }))
+    await userEvent.click(screen.getByRole('tab', { name: 'Config' }))
     await screen.findByTestId('config-retention.ms')
     const label = screen.getByRole('switch', { name: 'show all configs' }).closest('label')
     expect(label?.className).toMatch(/\bw-fit\b/)
@@ -148,7 +148,7 @@ describe('TopicDetailView', () => {
   it('config tab filter box is hidden until "show all configs" is on', async () => {
     vi.mocked(client.getTopicDetail).mockResolvedValue(detail)
     renderWithQuery(<TopicDetailView cluster="prod" topic="orders" />)
-    await userEvent.click(screen.getByRole('button', { name: 'Config' }))
+    await userEvent.click(screen.getByRole('tab', { name: 'Config' }))
     await screen.findByTestId('config-retention.ms')
     expect(screen.queryByLabelText('filter configs')).not.toBeInTheDocument()
     await userEvent.click(screen.getByRole('switch', { name: 'show all configs' }))
@@ -158,7 +158,7 @@ describe('TopicDetailView', () => {
   it('config tab filter box narrows the full table to matching names', async () => {
     vi.mocked(client.getTopicDetail).mockResolvedValue(detail)
     renderWithQuery(<TopicDetailView cluster="prod" topic="orders" />)
-    await userEvent.click(screen.getByRole('button', { name: 'Config' }))
+    await userEvent.click(screen.getByRole('tab', { name: 'Config' }))
     await userEvent.click(screen.getByRole('switch', { name: 'show all configs' }))
     await userEvent.type(await screen.findByLabelText('filter configs'), 'retention')
     expect(screen.getByTestId('config-all-retention.ms')).toBeInTheDocument()
@@ -170,7 +170,7 @@ describe('TopicDetailView', () => {
   it('config tab filter box shows a message when nothing matches', async () => {
     vi.mocked(client.getTopicDetail).mockResolvedValue(detail)
     renderWithQuery(<TopicDetailView cluster="prod" topic="orders" />)
-    await userEvent.click(screen.getByRole('button', { name: 'Config' }))
+    await userEvent.click(screen.getByRole('tab', { name: 'Config' }))
     await userEvent.click(screen.getByRole('switch', { name: 'show all configs' }))
     await userEvent.type(await screen.findByLabelText('filter configs'), 'zzz-nope')
     expect(await screen.findByText('no matching configs')).toBeInTheDocument()
@@ -180,7 +180,7 @@ describe('TopicDetailView', () => {
   it('config tab filter box resets when the switch is turned off and back on', async () => {
     vi.mocked(client.getTopicDetail).mockResolvedValue(detail)
     renderWithQuery(<TopicDetailView cluster="prod" topic="orders" />)
-    await userEvent.click(screen.getByRole('button', { name: 'Config' }))
+    await userEvent.click(screen.getByRole('tab', { name: 'Config' }))
     const toggle = screen.getByRole('switch', { name: 'show all configs' })
     await userEvent.click(toggle)
     await userEvent.type(await screen.findByLabelText('filter configs'), 'retention')

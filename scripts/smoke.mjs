@@ -51,7 +51,7 @@ try {
   // which the scroll-pagination check below needs) and check the flagship tab
   await page.getByPlaceholder('filter topics…').fill('demo-')
   await page.locator('table a').first().click()
-  await page.getByRole('button', { name: 'Messages' }).waitFor({ timeout: 10000 })
+  await page.getByRole('tab', { name: 'Messages' }).waitFor({ timeout: 10000 })
   await page.getByTestId('message-row').first().waitFor({ timeout: 10000 })
   await page.getByText('● live').waitFor({ timeout: 10000 })
   await page.getByPlaceholder('filter messages…').waitFor({ timeout: 10000 })

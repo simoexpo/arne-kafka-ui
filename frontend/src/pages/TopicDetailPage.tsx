@@ -40,10 +40,12 @@ export function TopicDetailView({ cluster, topic }: { cluster: string; topic: st
         </h1>
         <StalenessChip asOf={detail.data?.as_of ?? null} refreshing={detail.isFetching} failed={detail.isError} />
       </div>
-      <div className="flex gap-1 border-b border-zinc-200 dark:border-zinc-800">
+      <div role="tablist" className="flex gap-1 border-b border-zinc-200 dark:border-zinc-800">
         {TABS.map((t) => (
           <button
             key={t}
+            role="tab"
+            aria-selected={t === tab}
             onClick={() => setTab(t)}
             className={`px-3 py-1.5 text-sm ${
               t === tab
