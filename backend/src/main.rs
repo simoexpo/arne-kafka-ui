@@ -19,7 +19,7 @@ async fn main() -> anyhow::Result<()> {
         .or_else(|| std::env::var("BETRACHTUNG_CONFIG").ok())
         .unwrap_or_else(|| "config.yaml".into())
         .into();
-    let config = Config::load(&path).map_err(|e| anyhow::anyhow!("{e}"))?; // fail fast, precise message
+    let config = Config::load(&path)?; // fail fast, precise message
 
     let registry = Arc::new(ClusterRegistry::from_config(config.clusters.clone())?);
     for handle in registry.all() {

@@ -94,7 +94,7 @@ fn default_port() -> u16 { 8080 }
 fn default_sampler_interval() -> u64 { 10 }
 fn default_timeline_scan_budget() -> u64 { 250_000 }
 
-pub fn interpolate(raw: &str, lookup: &dyn Fn(&str) -> Option<String>) -> Result<String, ConfigError> {
+fn interpolate(raw: &str, lookup: &dyn Fn(&str) -> Option<String>) -> Result<String, ConfigError> {
     let mut out = String::with_capacity(raw.len());
     let mut rest = raw;
     while let Some(start) = rest.find("${") {
