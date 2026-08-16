@@ -491,14 +491,7 @@ describe('Timeline filter box', () => {
     await emit(idx, 'page_end', { cursor: cur({ 0: 9 }), exhausted: false })
     expect(screen.getByTestId('continue-scan')).toHaveTextContent('scanned 5000 records · 1 matches — continue')
 
-    const restoreScrollHeight = stubScrollHeight(810)
-    const restoreClientHeight = stubClientHeight(600)
-    try {
-      fireEvent.scroll(screen.getByTestId('timeline-scroll'), { target: { scrollTop: 200 } })
-    } finally {
-      restoreScrollHeight()
-      restoreClientHeight()
-    }
+    scrollToBottom()
 
     // The scroll-triggered continuation must be the SAME gesture — totals
     // must still reflect what was scanned before it, exactly like clicking
