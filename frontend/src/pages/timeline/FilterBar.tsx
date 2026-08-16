@@ -9,11 +9,11 @@ export function FilterBar({
 }: {
   value: string
   onChange: (value: string) => void
-  // M6 (charter: "real progress — known total up front"), fixed for B1:
-  // `budget` is the GESTURE's accumulated known ceiling — the sum of every
-  // page's budget in this scan so far, matching `scanned`/`matches` above
-  // (see Timeline.tsx's `gestureBudgetRef` and `knownBudget`) — null only
-  // until at least one page's budget has actually been observed.
+  // Charter: "real progress — known total up front". `budget` is the
+  // GESTURE's accumulated known ceiling — the sum of every page's budget in
+  // this scan so far, matching `scanned`/`matches` above (see Timeline.tsx's
+  // `gestureBudgetRef` and `knownBudget`) — null only until at least one
+  // page's budget has actually been observed.
   progress: { scanned: number; matches: number; budget: number | null } | null
   onCancel: () => void
 }) {

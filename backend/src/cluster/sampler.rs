@@ -72,14 +72,13 @@ pub fn spawn_sampler(handle: Arc<ClusterHandle>, interval: Duration) -> tokio::t
 /// that topic's sample entirely rather than reporting a partial/misleading
 /// total (`complete` is all-or-nothing).
 ///
-/// B2 (queue-review): an earlier revision skipped `__`-prefixed topics here
-/// too, mirroring `admin::list_topics`'s own skip — but that skip only
-/// suppresses a *count* there; here it silently zeroed out
-/// `sampler.rate_points`, the sole source for `GET /throughput`, leaving an
-/// internal topic's Throughput/Sparkline panel permanently and unexplainedly
-/// empty. Chart correctness beats the tick tax, so the skip was reverted.
-/// The tax itself (every internal topic's watermark fetch runs on every
-/// sampler tick, even for topics no one has open) is a real cost worth
+/// Internal topics are sampled deliberately, unlike `admin::list_topics`'s
+/// own `__`-prefixed skip: that skip only suppresses a *count* there, but
+/// `sampler.rate_points` is the sole source for `GET /throughput` — skipping
+/// the fetch here would silently and permanently empty an internal topic's
+/// Throughput/Sparkline panel with no explanation. Chart correctness beats
+/// the tick tax. The tax itself (every internal topic's watermark fetch runs
+/// on every sampler tick, even for topics no one has open) is a real cost worth
 /// revisiting with a better shape — e.g. lazy/on-demand sampling keyed off
 /// which topic's detail page is actually open — tracked in
 /// `docs/superpowers/plans/2026-08-15-sliding-window-followups.md`, not
@@ -140,16 +139,15 @@ mod tests {
     use super::*;
     use std::cell::RefCell;
 
-    /// B2 revert: an internal (`__`-prefixed) topic must be sampled exactly
-    /// like any other topic. `admin::list_topics` skips them for its
-    /// inventory *count* — safe there, since nothing downstream renders a
-    /// chart off it — but `sampler.rate_points` is the sole source for
+    /// An internal (`__`-prefixed) topic must be sampled exactly like any
+    /// other topic. `admin::list_topics` skips them for its inventory
+    /// *count* — safe there, since nothing downstream renders a chart off
+    /// it — but `sampler.rate_points` is the sole source for
     /// `GET /throughput`, which `ConsumersTab` renders as a live
     /// Throughput/Sparkline panel for whatever topic the user opened,
-    /// internal or not. Skipping the fetch here left that chart
-    /// permanently, silently empty for internal topics — the exact
-    /// "blank without a reason" pattern the sibling I5 tooltip work
-    /// existed to avoid. Proven by pointer-free means: the fetch closure
+    /// internal or not. Skipping the fetch here would leave that chart
+    /// permanently, silently empty for internal topics — blank with no
+    /// explanation for why. Proven by pointer-free means: the fetch closure
     /// IS invoked for the internal topic's every partition (the call
     /// counter covers both topics' partitions), not merely that its
     /// result isn't discarded.

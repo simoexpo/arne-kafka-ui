@@ -436,9 +436,9 @@ describe('Timeline filter box', () => {
     }
 
     const btn = screen.getByTestId('continue-scan')
-    // M6, fixed for B1: the continue affordance's own label carries the
-    // known budget too — accumulated across every page of the gesture, same
-    // as scanned/matches (never a single page's own value — B1).
+    // The continue affordance's own label carries the known budget too —
+    // accumulated across every page of the gesture, same as scanned/matches
+    // (never a single page's own value).
     expect(btn).toHaveTextContent(`scanned ${totalScanned} of ${totalBudget} records · 0 matches — continue`)
   })
 
@@ -509,7 +509,7 @@ describe('Timeline filter box', () => {
     )
   })
 
-  it('a continued gesture accumulates budget alongside scanned/matches — the continue affordance never shows scanned exceeding budget (B1)', async () => {
+  it('a continued gesture accumulates budget alongside scanned/matches — the continue affordance never shows scanned exceeding budget', async () => {
     mockTail()
     await mountAndSettleInitial()
 
@@ -529,7 +529,7 @@ describe('Timeline filter box', () => {
 
     // Both scanned AND budget must accumulate across the gesture: never
     // "scanned 10000 of 5000" (cumulative numerator against a single page's
-    // ceiling, which reads as having blown the known budget by 2x — B1).
+    // ceiling, which reads as having blown the known budget by 2x).
     const btn = screen.getByTestId('continue-scan')
     expect(btn).toHaveTextContent('scanned 10000 of 10000 records · 2 matches — continue')
   })
@@ -574,10 +574,10 @@ describe('Timeline filter box', () => {
     // Clicking continue starts a new in-flight page — past the show-delay,
     // the running total must still reflect everything scanned before the
     // click, NOT reset back to 0 (before any new progress event arrives).
-    // Budget, fixed for B1, is also already known at this point — it's the
-    // accumulated total from every prior page in the gesture, shown even
-    // before the new page's own first `progress` event arrives (which would
-    // only ADD to it, never replace it).
+    // Budget is also already known at this point — it's the accumulated
+    // total from every prior page in the gesture, shown even before the new
+    // page's own first `progress` event arrives (which would only ADD to
+    // it, never replace it).
     await settle(PAST_SHOW_DELAY_MS)
     expect(screen.getByText(`scanned ${totalScanned} of ${totalBudget} · 0 matches`)).toBeInTheDocument()
 
@@ -608,7 +608,7 @@ describe('Timeline filter box', () => {
     // gesture totals"). A naive scroll-triggered `loadOlder()` would instead
     // start a fresh gesture and reset the totals to 0. (Past the show-delay:
     // this new page is deliberately left running long enough to render.)
-    // Budget (fixed for B1) is likewise carried over, not reset to unknown.
+    // Budget is likewise carried over, not reset to unknown.
     await settle(PAST_SHOW_DELAY_MS)
     expect(screen.getByText('scanned 5000 of 5000 · 1 matches')).toBeInTheDocument()
   })

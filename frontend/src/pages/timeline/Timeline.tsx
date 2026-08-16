@@ -141,14 +141,13 @@ export function Timeline({
   // this from double-counting the page currently in flight.
   const gestureScannedRef = useRef(0)
   const gestureMatchesRef = useRef(0)
-  // B1 fix: `budget` must accumulate the SAME way as scanned/matches above —
-  // it is resent per-page (currently always the same configured value, but
+  // `budget` accumulates the SAME way as scanned/matches above — it is
+  // resent per-page (currently always the same configured value, but
   // nothing here may assume that), so a multi-page gesture's own total
   // ceiling is the SUM of every page's budget, not any single page's value.
   // Comparing a cumulative numerator against a non-cumulative denominator
-  // was exactly the bug this ref fixes (queue-review B1): after N pages the
-  // UI could read "scanned 10000 of 5000" even though nothing was ever
-  // over-scanned.
+  // would read as "scanned 10000 of 5000" after two continued pages, even
+  // though nothing was ever over-scanned.
   const gestureBudgetRef = useRef(0)
   // Whether a gesture (a user-issued page plus every
   // auto-continued empty page that follows it) is still running — as
@@ -1071,17 +1070,17 @@ export function Timeline({
   // adding it again here would double-count it.
   const progressScanned = gestureScannedRef.current + (state.loading ? (state.progress?.scanned ?? 0) : 0)
   const progressMatches = gestureMatchesRef.current + (state.loading ? (state.progress?.matches ?? 0) : 0)
-  // M6 (charter: "real progress — known total up front"), fixed for B1:
-  // `budget` is resent per-page (currently always the backend's fixed
-  // configured ceiling — see `state.limits.timeline_scan_budget` — but nothing
-  // here assumes that), so a multi-page gesture's own budget is the SUM of
-  // every page's budget, exactly like scanned/matches above — comparing a
-  // cumulative numerator to a single page's denominator was the bug
-  // (queue-review B1: "scanned 10000 of 5000" after two continued pages).
-  // The current/in-flight page's own budget is only added while it's
-  // actually loading (mirrors progressScanned/progressMatches above); once a
-  // page ends, its final budget has already been folded into
-  // gestureBudgetRef, so adding it again here would double-count it.
+  // Charter: "real progress — known total up front". `budget` is resent
+  // per-page (currently always the backend's fixed configured ceiling —
+  // see `state.limits.timeline_scan_budget` — but nothing here assumes
+  // that), so a multi-page gesture's own budget is the SUM of every page's
+  // budget, exactly like scanned/matches above — comparing a cumulative
+  // numerator to a single page's denominator would read as "scanned 10000
+  // of 5000" after two continued pages. The current/in-flight page's own
+  // budget is only added while it's actually loading (mirrors
+  // progressScanned/progressMatches above); once a page ends, its final
+  // budget has already been folded into gestureBudgetRef, so adding it
+  // again here would double-count it.
   // Stays `null` (never "of 0") until at least one budget value has actually
   // been observed for this gesture — a page can end without ever emitting a
   // `progress` event (e.g. exhausted on its very first batch), and showing a
