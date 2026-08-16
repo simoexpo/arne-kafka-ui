@@ -985,8 +985,15 @@ export function Timeline({
         { pauseReason: pauseReasonRef.current, attached: attachedRef.current, inspecting: inspectingRef.current },
         'scrollPinnedTop',
       )
+      // `flush` is acted on unconditionally, same discipline as
+      // `handleToggleExpand` — never folded into the `pause`-changed check
+      // below. Today `scrollPinnedTop`'s table only ever pairs `flush: true`
+      // with a pause change (so this is currently a no-op difference), but
+      // gating flush on an unrelated field is a latent trap: a future table
+      // change that returns `flush: true` with the SAME pause would
+      // otherwise have its flush silently dropped here.
+      if (decision.flush) flushBuffer()
       if (decision.pause !== pauseReasonRef.current) {
-        if (decision.flush) flushBuffer()
         pauseReasonRef.current = decision.pause
         bump()
       }
