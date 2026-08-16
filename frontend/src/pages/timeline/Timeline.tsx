@@ -15,6 +15,7 @@ import { decodeCursor } from '../../lib/timelineCursor'
 import { createSlidingWindowStore, type InsertOutcome } from '../../lib/timelineStore'
 import { useTimeDisplayMode } from '../../lib/timeDisplayMode'
 import { createLiveBuffer } from '../../lib/timeline/liveBuffer'
+import { classifyScroll } from '../../lib/timeline/scrollZones'
 import { useFallingEdge } from './useFallingEdge'
 import { JumpControl, type JumpTarget } from './JumpControl'
 import { LivePill, PlayPauseToggle } from './LivePill'
@@ -35,15 +36,6 @@ const ITERATION_CAP = 20
 // arrival and switch the pill to an honest "500+ · older dropped" label
 // rather than a raw (and increasingly meaningless) count.
 const BUFFER_CAP = 500
-// Scroll offset below which the viewport counts as "pinned to top" —
-// roughly half a row, per the design spec's threshold.
-const TOP_PIN_THRESHOLD = 20
-// How close to the bottom (in px of unscrolled remaining distance) counts as
-// "reached the last row" for the bottom-sentinel scroll-triggered
-// pagination (spec: "scroll down -> next 100 older"). Same order of
-// magnitude as TOP_PIN_THRESHOLD, kept as its own named constant since it
-// guards a different feature (load-older, not live-pause).
-const BOTTOM_PIN_THRESHOLD = 20
 // Bounds a jump landing's settling re-snaps (see `settlingRef`'s own
 // comment on `Timeline`) — content that never genuinely stabilizes (a
 // pathological case, not the expected one) must still eventually stop
@@ -1010,7 +1002,7 @@ export function Timeline({
       }
       return
     }
-    const pinnedTop = scrollTop < TOP_PIN_THRESHOLD
+    const { pinnedTop, nearBottom } = classifyScroll({ scrollTop, scrollHeight, clientHeight })
     if (pinnedTop) {
       if (attachedRef.current && pauseReasonRef.current === 'auto') {
         flushBuffer()
@@ -1025,7 +1017,6 @@ export function Timeline({
       pauseReasonRef.current = 'auto'
       bump()
     }
-    const nearBottom = scrollHeight - (scrollTop + clientHeight) < BOTTOM_PIN_THRESHOLD
     if (nearBottom && !state.loading) {
       if (continueDirection === 'back') continueScan()
       else loadOlder()
