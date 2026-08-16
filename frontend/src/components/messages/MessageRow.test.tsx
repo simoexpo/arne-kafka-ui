@@ -86,31 +86,36 @@ describe('MessageRow', () => {
 
   describe('keyboard operability', () => {
     // ARIA forbids interactive descendants inside role="button" (the row
-    // wraps focusable copy buttons and a JSON <details>/<summary>) —
-    // role="group" carries no such restriction while still supporting
-    // aria-expanded, tabIndex and the row's own click/keydown activation.
-    it('exposes the row as a focusable, keyboard-operable group with aria-expanded reflecting the prop', () => {
+    // wraps focusable copy buttons and a JSON <details>/<summary>), and
+    // aria-expanded is not a supported property of role="group" — so the
+    // disclosure control is the row's HEADER LINE, which never contains an
+    // interactive descendant: a real role="button" carrying tabIndex,
+    // aria-expanded and Enter/Space activation. The outer row keeps plain
+    // click-to-toggle as a mouse convenience with no ARIA claims of its own.
+    it('exposes the header line as a focusable disclosure button with aria-expanded reflecting the prop', () => {
       const { rerender } = render(<MessageRow message={msg()} expanded={false} onToggle={() => {}} />)
-      const row = screen.getByTestId('message-row')
-      expect(row).toHaveAttribute('role', 'group')
-      expect(row).toHaveAttribute('tabIndex', '0')
-      expect(row).toHaveAttribute('aria-expanded', 'false')
+      const toggle = screen.getByTestId('message-row-toggle')
+      expect(toggle).toHaveAttribute('role', 'button')
+      expect(toggle).toHaveAttribute('tabIndex', '0')
+      expect(toggle).toHaveAttribute('aria-expanded', 'false')
+      expect(screen.getByTestId('message-row')).not.toHaveAttribute('aria-expanded')
+      expect(screen.getByTestId('message-row')).not.toHaveAttribute('role')
 
       rerender(<MessageRow message={msg()} expanded onToggle={() => {}} />)
-      expect(screen.getByTestId('message-row')).toHaveAttribute('aria-expanded', 'true')
+      expect(screen.getByTestId('message-row-toggle')).toHaveAttribute('aria-expanded', 'true')
     })
 
     it('Enter toggles the row', () => {
       const onToggle = vi.fn()
       render(<MessageRow message={msg()} expanded={false} onToggle={onToggle} />)
-      fireEvent.keyDown(screen.getByTestId('message-row'), { key: 'Enter' })
+      fireEvent.keyDown(screen.getByTestId('message-row-toggle'), { key: 'Enter' })
       expect(onToggle).toHaveBeenCalledTimes(1)
     })
 
     it('Space toggles the row and prevents the page from scrolling', () => {
       const onToggle = vi.fn()
       render(<MessageRow message={msg()} expanded={false} onToggle={onToggle} />)
-      const event = fireEvent.keyDown(screen.getByTestId('message-row'), { key: ' ' })
+      const event = fireEvent.keyDown(screen.getByTestId('message-row-toggle'), { key: ' ' })
       expect(onToggle).toHaveBeenCalledTimes(1)
       expect(event).toBe(false) // fireEvent returns false when preventDefault() was called
     })
@@ -118,7 +123,7 @@ describe('MessageRow', () => {
     it('ignores other keys', () => {
       const onToggle = vi.fn()
       render(<MessageRow message={msg()} expanded={false} onToggle={onToggle} />)
-      fireEvent.keyDown(screen.getByTestId('message-row'), { key: 'a' })
+      fireEvent.keyDown(screen.getByTestId('message-row-toggle'), { key: 'a' })
       expect(onToggle).not.toHaveBeenCalled()
     })
 

@@ -33,19 +33,21 @@ export function MessageRow({
   const preview = message.value === null ? '∅ null' : message.value.text.replaceAll('\n', ' ')
   const isError = message.value?.encoding === 'decode_error'
   // The row is the sole affordance for opening/closing a message's
-  // inspection view, so it must be keyboard-operable like any other control
-  // added since — a real <button> can't be used here (it would forbid the
-  // nested copy buttons/JSON summary <details> the expanded content
-  // renders — ARIA disallows interactive descendants inside role="button"
-  // too, which is why this is `role="group"` rather than `role="button"`),
-  // so it's a focusable div with the usual custom Enter/Space activation and
-  // `aria-expanded` announcing its state. The
-  // `e.target !== e.currentTarget` guard below stops THIS handler from
-  // acting on a nested control's own keydown bubbling up to it — but each
-  // nested control also needs its OWN stopPropagation (CopyButton's own
-  // click handler; JsonView's <summary> click handler) to stop what Enter/
-  // Space activation on IT dispatches from reaching this div's `onClick`
-  // instead. Both guards are needed; neither one alone is enough.
+  // inspection view, so it must be keyboard-operable like any other
+  // control. The whole row can't be the ARIA control: role="button"
+  // forbids the interactive descendants the expanded content renders (copy
+  // buttons, JSON <details>/<summary>), and role="group" doesn't support
+  // aria-expanded. So the disclosure control is the HEADER LINE — it never
+  // contains an interactive descendant, so it's a valid role="button" with
+  // tabIndex, aria-expanded and Enter/Space activation; the outer div
+  // keeps plain click-to-toggle as a mouse convenience with no ARIA claims
+  // of its own. The `e.target !== e.currentTarget` guard below stops this
+  // handler from acting on a descendant's keydown bubbling up to it — but
+  // each nested control in the expanded content also needs its OWN
+  // stopPropagation (CopyButton's click handler; JsonView's <summary>
+  // click handler) to stop what Enter/Space activation on IT dispatches
+  // from reaching the outer div's `onClick`. Both guards are needed;
+  // neither one alone is enough.
   const handleKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
     if (e.target !== e.currentTarget) return
     if (e.key === 'Enter' || e.key === ' ') {
@@ -56,18 +58,21 @@ export function MessageRow({
   return (
     <div
       data-testid="message-row"
-      role="group"
-      tabIndex={0}
-      aria-expanded={expanded}
       onClick={onToggle}
-      onKeyDown={handleKeyDown}
       className={`cursor-pointer border-b border-zinc-100 px-2 py-1.5 font-mono text-sm dark:border-zinc-800 ${
         isJumpTarget
           ? 'bg-emerald-50 hover:bg-emerald-100 dark:bg-emerald-950/40 dark:hover:bg-emerald-950/60'
           : 'hover:bg-zinc-50 dark:hover:bg-zinc-800/70'
       }`}
     >
-      <div className="flex items-center gap-3">
+      <div
+        data-testid="message-row-toggle"
+        role="button"
+        tabIndex={0}
+        aria-expanded={expanded}
+        onKeyDown={handleKeyDown}
+        className="flex items-center gap-3"
+      >
         {isJumpTarget && (
           <span
             data-testid="jump-target"
