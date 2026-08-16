@@ -58,9 +58,11 @@ impl ApiError {
     }
     /// A `spawn_blocking`/`JoinHandle` failed to join (the blocking task
     /// panicked or was cancelled) — never a Kafka-side failure, so this is
-    /// always `internal`, not `kafka`.
+    /// always `internal`, not `kafka`. Product voice: never say "task join"
+    /// or `JoinError` on the wire — this is an internal fault, not anything
+    /// the user's request did wrong.
     pub fn task_join(e: tokio::task::JoinError) -> Self {
-        Self::internal(format!("task join: {e}"))
+        Self::internal(format!("something went wrong completing the request ({e})"))
     }
 }
 

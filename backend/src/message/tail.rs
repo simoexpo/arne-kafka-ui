@@ -190,7 +190,9 @@ pub async fn run(
                 let _ = tx.send(TailEvent::from(&err)).await;
             }
             Err(join_err) => {
-                let err = ApiError::internal(format!("tail poll task failed: {join_err}"));
+                // Product voice: the internal `JoinError` diagnostic stays
+                // subdued in parens, never the headline vocabulary.
+                let err = ApiError::internal(format!("the live stream stopped unexpectedly ({join_err})"));
                 let _ = tx.send(TailEvent::from(&err)).await;
             }
         }

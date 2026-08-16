@@ -453,9 +453,12 @@ pub fn run_page(
             // path.
             let any_incomplete_window = is_complete.iter().any(|&c| !c);
             if page_made_no_progress(!taken.any_taken, any_incomplete_window, cancelled.load(Ordering::SeqCst)) {
+                // Product voice: no "page"/"window"/"broker" internals on
+                // the wire — this is what a user would observe (Kafka went
+                // quiet mid-read), not how the scan loop tracks it.
                 let _ = tx.send(ApiError::kafka(
                     &handle.name,
-                    "page made no progress: broker returned no records for non-empty windows",
+                    "Kafka stopped returning messages while reading this topic",
                 ).into()).await;
                 return;
             }

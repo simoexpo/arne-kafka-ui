@@ -121,11 +121,11 @@ pub fn resolve_timestamp_offsets_blocking(
     let mut tpl = TopicPartitionList::new();
     for &(p, _, _) in watermarks {
         tpl.add_partition_offset(topic, p, Offset::Offset(ts_ms))
-            .map_err(|e| error::from_kafka(&handle.name, "offsets_for_times", &e))?;
+            .map_err(|e| error::from_kafka(&handle.name, "resolve message timestamps", &e))?;
     }
     let resolved = handle.consumer()
         .offsets_for_times(tpl, ADMIN_TIMEOUT)
-        .map_err(|e| error::from_kafka(&handle.name, "offsets_for_times", &e))?;
+        .map_err(|e| error::from_kafka(&handle.name, "resolve message timestamps", &e))?;
     Ok(resolved.elements().iter().map(|e| {
         let start = match e.offset() {
             Offset::Offset(o) => Some(o),

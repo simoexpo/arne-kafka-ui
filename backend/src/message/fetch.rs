@@ -168,7 +168,7 @@ pub fn fetch_ranges_blocking(
         tpl.add_partition_offset(topic, r.partition, Offset::Offset(r.start))
             .map_err(|e| crate::error::from_kafka(&cfg.name, "assign offsets", &e))?;
     }
-    consumer.assign(&tpl).map_err(|e| crate::error::from_kafka(&cfg.name, "assign", &e))?;
+    consumer.assign(&tpl).map_err(|e| crate::error::from_kafka(&cfg.name, "assign partitions", &e))?;
 
     let targets: HashMap<i32, i64> = ranges.iter().map(|r| (r.partition, r.end)).collect();
     let mut done: HashMap<i32, bool> = ranges.iter().map(|r| (r.partition, false)).collect();
