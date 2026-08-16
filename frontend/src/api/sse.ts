@@ -14,7 +14,7 @@ const enc = encodeURIComponent
 // wire boundary this file owns.
 const APP_ERROR_EVENT = 'app_error'
 
-export function openSse(
+function openSse(
   url: string,
   eventNames: string[],
   handlers: { onEvent: (name: string, data: unknown) => void; onTransportError: () => void },
@@ -42,7 +42,7 @@ export function tailTopic(
 export interface TimelineProgress { scanned: number; matches: number; budget: number }
 
 export type TimelineDirection = 'back' | 'forward'
-export type TimelineAnchor = 'latest' | 'beginning' | 'offset' | 'timestamp'
+type TimelineAnchor = 'latest' | 'beginning' | 'offset' | 'timestamp'
 export type TimelineFilterKind = 'contains' | 'key_contains' | 'value_contains' | 'json_eq'
 
 export interface TimelinePageParams {
