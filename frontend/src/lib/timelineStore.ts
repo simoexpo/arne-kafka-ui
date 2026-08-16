@@ -270,9 +270,10 @@ interface SlidingWindowStore {
  *   it: a caller bug here is a programming error, not a data condition to
  *   quietly tolerate.
  *
- * Both maps are updated by exactly three kinds of event, and NEVER by a
- * fourth ad hoc path — this is what keeps a trimmed (or never-yet-loaded)
- * region's re-read exact and duplicate-free:
+ * Both maps are updated by exactly three kinds of event — plus one narrow,
+ * explicitly-scoped fourth (the anchor opposite-side seed, below) — and
+ * never by any other ad hoc path. This is what keeps a trimmed (or
+ * never-yet-loaded) region's re-read exact and duplicate-free:
  *
  * 1. **Same-direction page continuation** (authoritative, hole-safe): every
  *    `insertPage` call updates the map matching its own `direction`
