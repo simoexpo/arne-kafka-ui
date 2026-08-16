@@ -1043,17 +1043,10 @@ export function Timeline({
     if (cursor === null) return
     runPage('back', withFilter({ direction: 'back', limit: PAGE_LIMIT, cursor }), { resetIteration: true, attach: false })
   }
-  // Ruling (2026-08-15 review): the forward-anchor fallback this used to
-  // fall back to (re-issuing a BACK-anchored offset/timestamp jump's own
-  // anchor with direction=forward, when the top map was never seeded) was
-  // deleted as unreachable, untested dead code — 'offset'/'timestamp' jumps
-  // are now THEMSELVES forward-anchored bootstraps (see `handleJump`),
-  // exactly like 'beginning' already was, so their top map is always
-  // authoritatively seeded from rule 1 the same way 'beginning`'s always
-  // was; a null `edges().top` here can now only mean "nothing more to load"
-  // (`state.exhausted.forward` covers that case above already). If a future
-  // call site ever reintroduces a back-anchored offset/timestamp bootstrap,
-  // the spec/followups record how to re-derive this fallback.
+  // `edges().top === null` here means nothing more to load; `state.exhausted
+  // .forward` already covers that case above. See docs/superpowers/specs/
+  // timeline-design-decisions.md ("loadNewer's deleted forward-anchor
+  // fallback") for why no fallback is needed for a null top edge.
   const loadNewer = () => {
     if (state.exhausted.forward && !topTrimmedSinceRef.current) return
     const cursor = storeRef.current.edges().top
