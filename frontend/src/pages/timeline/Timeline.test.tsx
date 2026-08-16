@@ -384,7 +384,7 @@ describe('Timeline', () => {
     expect(screen.getByText('p0·9')).toBeInTheDocument()
     // Scroll is the only pagination affordance — no button, even though a
     // back cursor exists and the direction isn't exhausted.
-    expect(screen.queryByTestId('load-older')).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /load older/i })).not.toBeInTheDocument()
 
     scrollToBottom()
     expect(FakeEventSource.instances[1].url).toBe(url({ direction: 'back', limit: '100', cursor: cur({ 0: 9 }) }))
@@ -434,7 +434,7 @@ describe('Timeline', () => {
     render(<Timeline cluster="prod" topic="orders" />)
     await emit(0, 'match', mk(1))
     await emit(0, 'page_end', { cursor: null, exhausted: true })
-    expect(screen.queryByTestId('load-older')).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /load older/i })).not.toBeInTheDocument()
     expect(screen.getByText('— beginning of topic —')).toBeInTheDocument()
 
     scrollToBottom()
@@ -1176,7 +1176,7 @@ describe('Timeline', () => {
       // latest page lands with a back cursor -> bottom-scroll pagination is live.
       await emit(0, 'match', mk(9))
       await emit(0, 'page_end', { cursor: cur({ 0: 9 }), exhausted: false })
-      expect(screen.queryByTestId('load-older')).not.toBeInTheDocument() // no button — scroll only
+      expect(screen.queryByRole('button', { name: /load older/i })).not.toBeInTheDocument() // no button — scroll only
 
       // Page further back once, so the back cursor is now 'c2' (not just
       // the initial page's cursor) — this is the reviewer's exact repro.
@@ -1202,7 +1202,7 @@ describe('Timeline', () => {
       // The beginning page lands and sets a fresh forward cursor.
       await emit(2, 'match', mk(1))
       await emit(2, 'page_end', { cursor: cur({ 0: 2 }), exhausted: false })
-      expect(screen.queryByTestId('load-newer')).not.toBeInTheDocument() // no button — scroll only
+      expect(screen.queryByRole('button', { name: /load newer/i })).not.toBeInTheDocument() // no button — scroll only
       consumeLandingEcho() // the real browser's own echo of this jump's scrollToEdge — see its own comment
 
       // Task 3: the beginning bootstrap ALSO seeded a real bottom edge from

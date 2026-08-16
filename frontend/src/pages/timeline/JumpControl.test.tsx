@@ -11,13 +11,15 @@ import { JumpControl } from './JumpControl'
 declare const process: { env: Record<string, string | undefined> }
 
 describe('JumpControl', () => {
-  it('jumping to "now" calls onJump immediately with kind now, no expansion', async () => {
+  it('jumping to "now" calls onJump immediately with kind now, and collapses any open offset expansion', async () => {
     const user = userEvent.setup()
     const onJump = vi.fn()
     render(<JumpControl onJump={onJump} />)
+    await user.click(screen.getByTestId('jump-offset'))
+    expect(screen.getByTestId('jump-offset-partition-input')).toBeInTheDocument()
     await user.click(screen.getByTestId('jump-now'))
     expect(onJump).toHaveBeenCalledExactlyOnceWith({ kind: 'now' })
-    expect(screen.queryByTestId('jump-offset-input')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('jump-offset-partition-input')).not.toBeInTheDocument()
   })
 
   it('jumping to "beginning" calls onJump immediately with kind beginning', async () => {
