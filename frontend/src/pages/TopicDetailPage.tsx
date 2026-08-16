@@ -246,7 +246,7 @@ function ConfigTab({ data, error, loading }: { data?: TopicDetail; error: unknow
                 )}
           </dl>
           <div>
-            <h3 className="mb-2 text-xs font-medium text-zinc-500">Overridden values</h3>
+            <h3 className="mb-2 text-sm font-medium text-zinc-500">Overridden values</h3>
             {overridden.length === 0
               ? <p className="text-sm text-zinc-500">no overrides — all values are broker defaults</p>
               : <ConfigTable entries={overridden} testPrefix="config" />}
@@ -276,7 +276,7 @@ function ConfigTab({ data, error, loading }: { data?: TopicDetail; error: unknow
           {showAll && (
             <div>
               <div className="mb-2 flex items-center justify-between">
-                <h3 className="text-xs font-medium text-zinc-500">All configs</h3>
+                <h3 className="text-sm font-medium text-zinc-500">All configs</h3>
                 <FilterInput
                   value={filter}
                   onChange={setFilter}
