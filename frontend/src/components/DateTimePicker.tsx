@@ -541,7 +541,7 @@ export function DateTimePicker({
         onKeyDown={(e) => {
           if (e.key === 'Enter') onTextEnter?.()
         }}
-        className="w-32 rounded border border-zinc-300 bg-transparent px-1.5 py-0.5 pr-6 dark:border-zinc-700 dark:bg-zinc-900"
+        className="w-44 rounded border border-zinc-300 bg-transparent px-1.5 py-0.5 pr-6 dark:border-zinc-700 dark:bg-zinc-900"
       />
       <button
         type="button"

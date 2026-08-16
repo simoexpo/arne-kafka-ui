@@ -56,7 +56,7 @@ export function TopicDetailView({ cluster, topic }: { cluster: string; topic: st
         ))}
       </div>
       <div className="min-h-0 flex-1">
-        {tab === 'Messages' && <MessagesTab cluster={cluster} topic={topic} />}
+        {tab === 'Messages' && <MessagesTab cluster={cluster} topic={topic} partitionIds={detail.data?.partitions.map((p) => p.id)} />}
         {tab === 'Partitions' && (
           <div className="h-full overflow-y-auto">
             <Panel

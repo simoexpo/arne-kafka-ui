@@ -18,7 +18,7 @@ function parseNonNegativeInt(text: string): number | null {
   return Number(text)
 }
 
-export function JumpControl({ onJump }: { onJump: (target: JumpTarget) => void }) {
+export function JumpControl({ onJump, partitionIds = [] }: { onJump: (target: JumpTarget) => void; partitionIds?: number[] }) {
   // UTC/local display toggle (owner ruling 2026-08-15, extended 2026-08-16
   // picker3 feedback round): the preview below AND the picker popover both
   // follow this now — the popover's calendar/columns/internal textbox all
@@ -98,15 +98,31 @@ export function JumpControl({ onJump }: { onJump: (target: JumpTarget) => void }
 
       {expanded === 'offset' && (
         <div className="flex items-center gap-1">
-          <input
-            data-testid="jump-offset-partition-input"
-            aria-label="partition"
-            placeholder="partition"
-            value={partitionText}
-            onChange={(e) => setPartitionText(e.target.value)}
-            onKeyDown={(e) => e.key === 'Enter' && applyOffset()}
-            className="w-16 rounded border border-zinc-300 px-1 py-0.5 dark:border-zinc-700 dark:bg-zinc-900"
-          />
+          {partitionIds.length > 0 ? (
+            // The partition list is known — offer it instead of free text.
+            <select
+              data-testid="jump-offset-partition-input"
+              aria-label="partition"
+              value={partitionText}
+              onChange={(e) => setPartitionText(e.target.value)}
+              className="rounded border border-zinc-300 px-1 py-0.5 dark:border-zinc-700 dark:bg-zinc-900"
+            >
+              <option value="" disabled>partition</option>
+              {partitionIds.map((id) => (
+                <option key={id} value={String(id)}>{id}</option>
+              ))}
+            </select>
+          ) : (
+            <input
+              data-testid="jump-offset-partition-input"
+              aria-label="partition"
+              placeholder="partition"
+              value={partitionText}
+              onChange={(e) => setPartitionText(e.target.value)}
+              onKeyDown={(e) => e.key === 'Enter' && applyOffset()}
+              className="w-16 rounded border border-zinc-300 px-1 py-0.5 dark:border-zinc-700 dark:bg-zinc-900"
+            />
+          )}
           <input
             data-testid="jump-offset-value-input"
             aria-label="offset"

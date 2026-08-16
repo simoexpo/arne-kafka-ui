@@ -46,7 +46,6 @@ export function FilterHelp() {
             <div><dt className="inline font-mono text-sky-800 dark:text-sky-300">value:foo</dt><dd className="inline text-zinc-600 dark:text-zinc-400"> — value contains foo</dd></div>
             <div><dt className="inline font-mono text-sky-800 dark:text-sky-300">path.to.field=42</dt><dd className="inline text-zinc-600 dark:text-zinc-400"> — JSON field equals the value</dd></div>
           </dl>
-          <p className="mt-2 text-zinc-500">Applies to loaded pages and the live stream alike. Values that fail to decode never match a value filter.</p>
         </div>
       )}
     </div>

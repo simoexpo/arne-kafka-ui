@@ -216,3 +216,19 @@ describe('JumpControl', () => {
     })
   })
 })
+
+describe('partition dropdown', () => {
+  it('renders the known partitions as a select and jumps with the chosen one', async () => {
+    const user = userEvent.setup()
+    const onJump = vi.fn()
+    render(<JumpControl onJump={onJump} partitionIds={[0, 1, 2]} />)
+    await user.click(screen.getByTestId('jump-offset'))
+    const select = screen.getByTestId('jump-offset-partition-input')
+    expect(select.tagName).toBe('SELECT')
+    expect(select.querySelectorAll('option[value]:not([value=""])')).toHaveLength(3)
+    await user.selectOptions(select, '2')
+    await user.type(screen.getByTestId('jump-offset-value-input'), '77')
+    await user.click(screen.getByTestId('jump-offset-apply'))
+    expect(onJump).toHaveBeenCalledWith({ kind: 'offset', partition: 2, offset: 77 })
+  })
+})

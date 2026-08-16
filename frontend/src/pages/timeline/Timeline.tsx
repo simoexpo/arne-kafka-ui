@@ -92,6 +92,7 @@ export function Timeline({
   cluster,
   topic,
   windowCap,
+  partitionIds,
 }: {
   cluster: string
   topic: string
@@ -100,6 +101,7 @@ export function Timeline({
   // walk and the window-cap-honesty tests can force top/bottom trims with a
   // handful of messages instead of needing to insert thousands of rows.
   windowCap?: number
+  partitionIds?: number[]
 }) {
   // The store is mutable (edge-map-tracking insert/rows), so it lives in a
   // ref; `bump` forces a re-render whenever a store mutation changes what
@@ -1287,7 +1289,7 @@ export function Timeline({
           </div>
         )}
       </div>
-      <JumpControl onJump={handleJump} />
+      <JumpControl onJump={handleJump} partitionIds={partitionIds} />
       {tailErrorText && (
         <p className="text-sm text-amber-600 dark:text-amber-400">{`live stopped — ${tailErrorText}`}</p>
       )}
