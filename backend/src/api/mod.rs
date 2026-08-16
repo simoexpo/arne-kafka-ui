@@ -21,10 +21,13 @@ pub fn app(state: AppState) -> Router {
         .route("/api/clusters/{cluster}/groups", get(groups::list))
         .route("/api/clusters/{cluster}/groups/{group}", get(groups::detail))
         // A bare handler (not wrapped in `get(...)`), so axum registers it as
-        // an ANY-method fallback: a wrong-method request under `/api/*` (or
-        // to any matched route) still reaches `spa_fallback` and gets the
-        // structured envelope, instead of `MethodRouter`'s own bare, bodyless
-        // 405 for an unhandled method.
+        // an ANY-method fallback: any request to an UNMATCHED path — every
+        // method, not just GET — reaches `spa_fallback` and gets the
+        // structured envelope. A wrong-method request to a MATCHED route
+        // (e.g. POST /api/clusters) never gets here: each `MethodRouter`
+        // answers it itself with axum's bare, bodyless 405
+        // (`method_not_allowed_fallback` exists to change that; v1's
+        // frontend only ever sends the methods it registers, so it doesn't).
         .fallback(static_files::spa_fallback)
         .with_state(state)
 }
