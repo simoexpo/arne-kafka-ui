@@ -1,5 +1,6 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { render, screen } from '@testing-library/react'
+import { StrictMode } from 'react'
 import userEvent from '@testing-library/user-event'
 import { MessageRow } from './MessageRow'
 import type { MessageOut } from '../../api/types'
@@ -49,6 +50,44 @@ describe('MessageRow', () => {
     render(<MessageRow message={msg()} />)
     expect(screen.queryByTestId('jump-target')).not.toBeInTheDocument()
     expect(screen.getByTestId('message-row').className).not.toMatch(/emerald/)
+  })
+
+  // Design spec v1.7 "Inspection pause": Timeline needs to know when a row
+  // opens/closes to count live inspections.
+  describe('onExpandChange', () => {
+    it('fires with true on open, then false on close', async () => {
+      const onExpandChange = vi.fn()
+      const user = userEvent.setup()
+      render(<MessageRow message={msg()} onExpandChange={onExpandChange} />)
+
+      await user.click(screen.getByTestId('message-row'))
+      expect(onExpandChange).toHaveBeenNthCalledWith(1, true)
+
+      await user.click(screen.getByTestId('message-row'))
+      expect(onExpandChange).toHaveBeenNthCalledWith(2, false)
+      expect(onExpandChange).toHaveBeenCalledTimes(2)
+    })
+
+    it('fires exactly once per click under StrictMode double-rendering', async () => {
+      const onExpandChange = vi.fn()
+      const user = userEvent.setup()
+      render(
+        <StrictMode>
+          <MessageRow message={msg()} onExpandChange={onExpandChange} />
+        </StrictMode>,
+      )
+
+      await user.click(screen.getByTestId('message-row'))
+      expect(onExpandChange).toHaveBeenCalledTimes(1)
+      expect(onExpandChange).toHaveBeenCalledWith(true)
+    })
+
+    it('is optional — omitting it does not break the existing toggle behavior', async () => {
+      const user = userEvent.setup()
+      render(<MessageRow message={msg()} />)
+      await user.click(screen.getByTestId('message-row'))
+      expect(screen.getByText('trace-id')).toBeInTheDocument()
+    })
   })
 
   // UTC/local display toggle (owner ruling 2026-08-15): rows re-render the

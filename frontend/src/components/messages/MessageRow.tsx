@@ -9,12 +9,29 @@ export function MessageRow({
   message,
   tsInverted = false,
   isJumpTarget = false,
+  onExpandChange,
 }: {
   message: MessageOut
   tsInverted?: boolean
   isJumpTarget?: boolean
+  // Design spec v1.7 "Inspection pause": Timeline counts open inspections
+  // across the whole list to gate live-tail routing — this is how it hears
+  // about THIS row's own open/close. Deliberately called from the plain
+  // click handler, not from inside a `setOpen` updater function: React 18
+  // StrictMode double-invokes a functional state updater to surface
+  // impurity, so a side effect placed inside one (as opposed to computing
+  // the next value first, then calling both setOpen and this) would fire
+  // twice per click in development — exactly the ref-during-render/
+  // mount-guard fragility class this codebase's StrictMode audit exists to
+  // catch.
+  onExpandChange?: (open: boolean) => void
 }) {
   const [open, setOpen] = useState(false)
+  const toggleOpen = () => {
+    const next = !open
+    setOpen(next)
+    onExpandChange?.(next)
+  }
   const timeDisplayMode = useTimeDisplayMode()
   const ts = message.timestamp_ms === null ? '—' : formatTimestamp(message.timestamp_ms, timeDisplayMode)
   const preview = message.value === null ? '∅ null' : message.value.text.replaceAll('\n', ' ')
@@ -22,7 +39,7 @@ export function MessageRow({
   return (
     <div
       data-testid="message-row"
-      onClick={() => setOpen((o) => !o)}
+      onClick={toggleOpen}
       className={`cursor-pointer border-b border-zinc-100 px-2 py-1.5 font-mono text-sm dark:border-zinc-800 ${
         isJumpTarget
           ? 'bg-emerald-50 hover:bg-emerald-100 dark:bg-emerald-950/40 dark:hover:bg-emerald-950/60'

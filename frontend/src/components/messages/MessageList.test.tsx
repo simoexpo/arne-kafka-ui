@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MessageList, type MessageListHandle } from './MessageList'
@@ -67,6 +67,24 @@ describe('MessageList', () => {
     render(<MessageList messages={rows} jumpTarget={null} />)
     expect(screen.queryAllByTestId('jump-target')).toHaveLength(0)
   })
+  // Design spec v1.7 "Inspection pause": passed straight through to every
+  // row (Timeline only needs a raw open/close count, never which row) — see
+  // MessageRow's own onExpandChange doc comment for why it's called from the
+  // plain click handler rather than from inside a state updater.
+  it('threads onExpandChange straight through to every row', async () => {
+    const user = userEvent.setup()
+    const onExpandChange = vi.fn()
+    const rows = [msg({ partition: 0, offset: 1 }), msg({ partition: 0, offset: 2 })]
+    render(<MessageList messages={rows} onExpandChange={onExpandChange} />)
+
+    await user.click(screen.getAllByTestId('message-row')[0])
+    expect(onExpandChange).toHaveBeenCalledWith(true)
+
+    await user.click(screen.getAllByTestId('message-row')[1])
+    expect(onExpandChange).toHaveBeenCalledWith(true)
+    expect(onExpandChange).toHaveBeenCalledTimes(2)
+  })
+
   it('a prepended forward page does not reset an already-open row (row identity survives an index shift)', async () => {
     const user = userEvent.setup()
     const rowA = msg({ partition: 0, offset: 5 })

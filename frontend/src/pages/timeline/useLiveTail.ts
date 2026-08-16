@@ -11,6 +11,11 @@ export interface UseLiveTailDeps {
   predicateRef: RefObject<(m: MessageOut) => boolean>
   attachedRef: RefObject<boolean>
   pauseReasonRef: RefObject<PauseReason>
+  // True while at least one message row is expanded (design spec v1.7,
+  // "Inspection pause"): forces buffering even in the ordinarily "merge
+  // live" case (attached, unpaused) — an open inspection is a stronger
+  // "don't move things" signal than either of those.
+  inspectingRef: RefObject<boolean>
   onLiveInsert: (m: MessageOut) => void
   onBuffer: (m: MessageOut) => void
   onChange: () => void
@@ -34,7 +39,7 @@ export function useLiveTail(cluster: string, topic: string, deps: UseLiveTailDep
     const handle = tailTopic(cluster, topic, {
       onMessage: (m) => {
         if (!deps.predicateRef.current(m)) return
-        if (deps.attachedRef.current && deps.pauseReasonRef.current === 'none') {
+        if (deps.attachedRef.current && deps.pauseReasonRef.current === 'none' && !deps.inspectingRef.current) {
           deps.onLiveInsert(m)
         } else {
           deps.onBuffer(m)

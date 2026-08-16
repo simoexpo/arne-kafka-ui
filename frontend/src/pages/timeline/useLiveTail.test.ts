@@ -40,6 +40,7 @@ function deps(overrides: Partial<UseLiveTailDeps> = {}): UseLiveTailDeps {
     predicateRef: { current: () => true },
     attachedRef: { current: true },
     pauseReasonRef: { current: 'none' as PauseReason },
+    inspectingRef: { current: false },
     onLiveInsert: vi.fn(),
     onBuffer: vi.fn(),
     onChange: vi.fn(),
@@ -105,6 +106,20 @@ describe('useLiveTail', () => {
     act(() => handles[0].handlers.onMessage(m))
     expect(d.onBuffer).toHaveBeenCalledWith(m)
     expect(d.onLiveInsert).not.toHaveBeenCalled()
+  })
+
+  // Design spec v1.7 "Inspection pause": an open inspection buffers live
+  // messages regardless of attachment/pause state — even the ordinarily
+  // "merge live" case (attached, unpaused).
+  it('a matching message buffers instead of merging while inspecting, even attached and unpaused', () => {
+    const handles = mockTail()
+    const d = deps({ attachedRef: { current: true }, pauseReasonRef: { current: 'none' }, inspectingRef: { current: true } })
+    renderHook(() => useLiveTail('prod', 'orders', d))
+    const m = mk(1)
+    act(() => handles[0].handlers.onMessage(m))
+    expect(d.onBuffer).toHaveBeenCalledWith(m)
+    expect(d.onLiveInsert).not.toHaveBeenCalled()
+    expect(d.onChange).toHaveBeenCalledTimes(1)
   })
 
   it('a server error stops the stream for good and surfaces its text', () => {

@@ -243,6 +243,27 @@ export function Timeline({
   const pauseReasonRef = useRef<PauseReason>('none')
   const liveBufferRef = useRef(createLiveBuffer(BUFFER_CAP))
 
+  // Inspection pause (design spec v1.7): count of currently-expanded rows,
+  // independent of WHICH rows — message-row identity keying (MessageList's
+  // own `getItemKey` comment) already keeps each row's own `open` state
+  // correct across prepends/trims on its own, so Timeline only ever needs a
+  // running total. A ref (not state), paired with `bump()` like
+  // `pauseReasonRef` above: the tail routing (useLiveTail's `inspectingRef`
+  // dep) reads it from inside a mount-once effect, which needs the CURRENT
+  // value at message-arrival time, not whatever it was at mount.
+  const inspectionCountRef = useRef(0)
+  // Derived boolean companion (inspectionCountRef.current > 0), kept in sync
+  // wherever the count changes: useLiveTail's `UseLiveTailDeps` wants a
+  // ready-made boolean ref, not a number one it would have to compare itself.
+  const inspectingRef = useRef(false)
+  // Whether the viewport is CURRENTLY pinned at top, as of the last scroll
+  // classification (handleScroll below) — closing the last inspection is a
+  // click, not a scroll event, so it needs its own memory of "are we at the
+  // top right now" rather than re-deriving it from an event that isn't
+  // firing. Starts true: a freshly mounted, unscrolled list genuinely IS at
+  // its top (scrollTop 0) before any 'scroll' event has ever fired.
+  const pinnedTopRef = useRef(true)
+
   // `state.exhausted.back`/`.forward` (React state from useTimelinePage) is
   // only refreshed by a NEW page landing in that direction — these two refs
   // override a STALE exhausted flag when a trim (page or live insert) has
@@ -276,6 +297,39 @@ export function Timeline({
       noteOutcome(storeRef.current.insertLive(drained))
     }
   }, [noteOutcome])
+
+  // Inspection pause (design spec v1.7): MessageList reports every row's own
+  // open/close through this one callback — Timeline only ever needs a raw
+  // count (see inspectionCountRef's own comment), never which row. Closing
+  // the LAST open inspection while pinned at top resumes live automatically,
+  // mirroring auto-pause's own top-pin resume rule — the decision itself
+  // lives in pauseMachine ('lastInspectionClosed'); every other transition
+  // (opening any row, closing one that isn't the last, or closing the last
+  // while NOT pinned at top — "auto rules take over") just updates the count.
+  const handleExpandChange = useCallback(
+    (open: boolean) => {
+      const next = inspectionCountRef.current + (open ? 1 : -1)
+      inspectionCountRef.current = next
+      inspectingRef.current = next > 0
+      if (open || next > 0 || !pinnedTopRef.current) return
+      const decision = nextPause(
+        { pauseReason: pauseReasonRef.current, attached: attachedRef.current, inspecting: false },
+        'lastInspectionClosed',
+      )
+      // Unlike the scrollPinnedTop branch elsewhere in this file, `flush` can
+      // be true here even when `pause` itself doesn't change (pauseReason
+      // stayed 'none' throughout — buffering was driven purely by
+      // `inspecting`, see useLiveTail's routing) — so flush and the pause
+      // reassignment are each gated on their own condition, not bundled
+      // behind one "did pause change" check.
+      if (decision.flush) flushBuffer()
+      if (decision.pause !== pauseReasonRef.current || decision.flush) {
+        pauseReasonRef.current = decision.pause
+        bump()
+      }
+    },
+    [flushBuffer],
+  )
 
   // Resends the currently active filter's server-side params (a no-op when
   // unfiltered) onto any page request — see activeFilterApiRef. Moved above
@@ -479,7 +533,10 @@ export function Timeline({
           // which would wrongly call insertLive on a still-detached store (see its own throw precondition).
           if (!attachedRef.current && outcome.attached) {
             setAttached(true)
-            const decision = nextPause({ pauseReason: pauseReasonRef.current, attached: false }, 'reattached')
+            const decision = nextPause(
+              { pauseReason: pauseReasonRef.current, attached: false, inspecting: inspectingRef.current },
+              'reattached',
+            )
             if (decision.flush) flushBuffer()
             pauseReasonRef.current = decision.pause
           }
@@ -708,6 +765,7 @@ export function Timeline({
     predicateRef,
     attachedRef,
     pauseReasonRef,
+    inspectingRef,
     onLiveInsert: handleLiveInsert,
     onBuffer: handleLiveBuffer,
     onChange: bump,
@@ -721,7 +779,10 @@ export function Timeline({
   const rows = pageRowsRef.current.length > 0 ? storeRef.current.previewWithOverlay(pageRowsRef.current) : storeRef.current.rows()
 
   const handlePillClick = () => {
-    const decision = nextPause({ pauseReason: pauseReasonRef.current, attached: attachedRef.current }, 'pillClick')
+    const decision = nextPause(
+      { pauseReason: pauseReasonRef.current, attached: attachedRef.current, inspecting: inspectingRef.current },
+      'pillClick',
+    )
     if (decision.jumpToNow) {
       handleJump({ kind: 'now' })
       return
@@ -733,7 +794,10 @@ export function Timeline({
   }
 
   const handlePlayPauseToggle = () => {
-    const decision = nextPause({ pauseReason: pauseReasonRef.current, attached: attachedRef.current }, 'toggleClick')
+    const decision = nextPause(
+      { pauseReason: pauseReasonRef.current, attached: attachedRef.current, inspecting: inspectingRef.current },
+      'toggleClick',
+    )
     if (decision.jumpToNow) {
       handleJump({ kind: 'now' })
       return
@@ -820,8 +884,15 @@ export function Timeline({
       return
     }
     const { pinnedTop, nearBottom } = classifyScroll({ scrollTop, scrollHeight, clientHeight })
+    // Inspection pause (design spec v1.7): closing the LAST inspection is a
+    // click, not a scroll event — handleExpandChange consults this to know
+    // whether the viewport happens to be pinned at top right now.
+    pinnedTopRef.current = pinnedTop
     if (pinnedTop) {
-      const decision = nextPause({ pauseReason: pauseReasonRef.current, attached: attachedRef.current }, 'scrollPinnedTop')
+      const decision = nextPause(
+        { pauseReason: pauseReasonRef.current, attached: attachedRef.current, inspecting: inspectingRef.current },
+        'scrollPinnedTop',
+      )
       if (decision.pause !== pauseReasonRef.current) {
         if (decision.flush) flushBuffer()
         pauseReasonRef.current = decision.pause
@@ -832,7 +903,10 @@ export function Timeline({
         else loadNewer()
       }
     } else {
-      const decision = nextPause({ pauseReason: pauseReasonRef.current, attached: attachedRef.current }, 'scrollAwayFromTop')
+      const decision = nextPause(
+        { pauseReason: pauseReasonRef.current, attached: attachedRef.current, inspecting: inspectingRef.current },
+        'scrollAwayFromTop',
+      )
       if (decision.pause !== pauseReasonRef.current) {
         pauseReasonRef.current = decision.pause
         bump()
@@ -936,7 +1010,13 @@ export function Timeline({
         hasData={rows.length > 0}
         loading={state.loading && rows.length === 0}
       >
-        <MessageList ref={listRef} messages={rows} onScroll={handleScroll} jumpTarget={jumpTarget} />
+        <MessageList
+          ref={listRef}
+          messages={rows}
+          onScroll={handleScroll}
+          jumpTarget={jumpTarget}
+          onExpandChange={handleExpandChange}
+        />
       </Panel>
       {continueDirection === 'back' ? (
         <ContinueScanButton label={continueScanLabel} onClick={continueScan} />

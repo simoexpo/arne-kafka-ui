@@ -693,6 +693,127 @@ describe('Timeline', () => {
     })
   })
 
+  // Design spec v1.7 "Inspection pause": expanding a row to inspect it is a
+  // stronger "don't move things" signal than scroll position — while ANY row
+  // is expanded, live messages buffer to the pill regardless of scroll
+  // position (even pinned at top), and the top-pin auto-resume rule is
+  // dominated by the open inspection. Live only resumes automatically once
+  // the LAST inspection closes while pinned at top (mirroring auto-pause);
+  // the pill/toggle remain available as explicit overrides throughout, and
+  // never close an inspection themselves.
+  describe('inspection pause', () => {
+    function scrollTo(scrollTop: number) {
+      fireEvent.scroll(screen.getByTestId('timeline-scroll'), { target: { scrollTop } })
+    }
+
+    it('expanding a row buffers live messages and counts them in the pill, even pinned at top', async () => {
+      const tail = mockTail()
+      const user = userEvent.setup()
+      render(<Timeline cluster="prod" topic="orders" />)
+      await settleWithOneRow()
+
+      await user.click(screen.getByTestId('message-row'))
+      expect(screen.getByText('no headers')).toBeInTheDocument() // expanded
+
+      await act(async () => tail.handlers().onMessage(mk(5)))
+      expect(screen.queryByText('p0·5')).not.toBeInTheDocument()
+      expect(screen.getByText('▲ 1 new')).toBeInTheDocument()
+
+      await act(async () => tail.handlers().onMessage(mk(6)))
+      expect(screen.getByText('▲ 2 new')).toBeInTheDocument()
+      expect(screen.queryByText('p0·6')).not.toBeInTheDocument()
+    })
+
+    it('a second, independent expansion keeps buffering after the first closes; closing the last while pinned resumes', async () => {
+      const tail = mockTail()
+      const user = userEvent.setup()
+      render(<Timeline cluster="prod" topic="orders" />)
+      await emit(0, 'match', mk(2))
+      await emit(0, 'match', mk(1))
+      await emit(0, 'page_end', { cursor: null, exhausted: true })
+
+      const rows = screen.getAllByTestId('message-row')
+      await user.click(rows[0])
+      await user.click(rows[1])
+
+      await act(async () => tail.handlers().onMessage(mk(5)))
+      expect(screen.getByText('▲ 1 new')).toBeInTheDocument()
+
+      // Collapsing the FIRST still leaves the SECOND open — still paused.
+      await user.click(rows[0])
+      await act(async () => tail.handlers().onMessage(mk(6)))
+      expect(screen.getByText('▲ 2 new')).toBeInTheDocument()
+      expect(screen.queryByText('p0·6')).not.toBeInTheDocument()
+
+      // Collapsing the SECOND (now the LAST) while pinned at top resumes.
+      await user.click(rows[1])
+      expect(screen.queryByTestId('live-pill')).not.toBeInTheDocument()
+      expect(screen.getByText('p0·5')).toBeInTheDocument()
+      expect(screen.getByText('p0·6')).toBeInTheDocument()
+
+      await act(async () => tail.handlers().onMessage(mk(7)))
+      expect(screen.getByText('p0·7')).toBeInTheDocument() // resumed: merges directly
+      expect(screen.queryByTestId('live-pill')).not.toBeInTheDocument()
+    })
+
+    it('collapsing the last inspection while scrolled away from top stays paused (auto rules take over)', async () => {
+      const tail = mockTail()
+      const user = userEvent.setup()
+      render(<Timeline cluster="prod" topic="orders" />)
+      await settleWithOneRow()
+
+      scrollTo(100) // off top -> auto-pause, independent of any inspection
+      await user.click(screen.getByTestId('message-row'))
+      await act(async () => tail.handlers().onMessage(mk(5)))
+      expect(screen.getByText('▲ 1 new')).toBeInTheDocument()
+
+      await user.click(screen.getByTestId('message-row')) // collapse the last, still scrolled away
+      expect(screen.getByText('▲ 1 new')).toBeInTheDocument() // not flushed
+      expect(screen.queryByText('p0·5')).not.toBeInTheDocument()
+
+      await act(async () => tail.handlers().onMessage(mk(6)))
+      expect(screen.getByText('▲ 2 new')).toBeInTheDocument() // still auto-paused by the scroll rule
+    })
+
+    it('scrolling to a pinned top with inspections open does not resume live and does not close inspections', async () => {
+      const tail = mockTail()
+      const user = userEvent.setup()
+      render(<Timeline cluster="prod" topic="orders" />)
+      await settleWithOneRow()
+
+      scrollTo(100) // off top -> auto-pause
+      await user.click(screen.getByTestId('message-row')) // expand while auto-paused
+      await act(async () => tail.handlers().onMessage(mk(5)))
+      expect(screen.getByText('▲ 1 new')).toBeInTheDocument()
+
+      scrollTo(0) // back to a pinned top, WHILE still inspecting
+      expect(screen.getByText('▲ 1 new')).toBeInTheDocument() // no auto-resume
+      expect(screen.queryByText('p0·5')).not.toBeInTheDocument()
+      expect(screen.getByText('no headers')).toBeInTheDocument() // inspection still open
+    })
+
+    it('clicking the pill while inspecting flushes the buffer but keeps inspections open', async () => {
+      const tail = mockTail()
+      const user = userEvent.setup()
+      render(<Timeline cluster="prod" topic="orders" />)
+      await settleWithOneRow()
+
+      await user.click(screen.getByTestId('message-row')) // expand while pinned at top
+      await act(async () => tail.handlers().onMessage(mk(5)))
+      expect(screen.getByText('▲ 1 new')).toBeInTheDocument()
+
+      await user.click(screen.getByTestId('live-pill'))
+      expect(screen.queryByTestId('live-pill')).not.toBeInTheDocument()
+      expect(screen.getByText('p0·5')).toBeInTheDocument() // flushed into the store
+      expect(screen.getByText('no headers')).toBeInTheDocument() // inspection intact
+
+      // Still inspecting: further live messages still buffer, not merge.
+      await act(async () => tail.handlers().onMessage(mk(9)))
+      expect(screen.getByText('▲ 1 new')).toBeInTheDocument()
+      expect(screen.queryByText('p0·9')).not.toBeInTheDocument()
+    })
+  })
+
   describe('scroll-triggered pagination', () => {
     // Spec: "Scroll down -> next 100 older (cursor pagination)" — scroll is
     // the ONLY pagination affordance (no load-older/load-newer buttons).

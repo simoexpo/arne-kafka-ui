@@ -57,8 +57,14 @@ export const MessageList = forwardRef<
     // window's own jump, never a stale one from a window already left.
     // `null`/`undefined` (no jump, or a non-offset jump) marks nothing.
     jumpTarget?: { partition: number; offset: number } | null
+    // Design spec v1.7 "Inspection pause": passed straight through to every
+    // row, unwrapped — Timeline only ever needs a raw open/close count, never
+    // which row (message-row identity keying, see `getItemKey` below,
+    // already keeps each row's own `open` state correct across prepends/
+    // trims on its own).
+    onExpandChange?: (open: boolean) => void
   }
->(function MessageList({ messages, onScroll, jumpTarget }, ref) {
+>(function MessageList({ messages, onScroll, jumpTarget, onExpandChange }, ref) {
   const parentRef = useRef<HTMLDivElement>(null)
   const virtualizer = useVirtualizer({
     count: messages.length,
@@ -155,7 +161,7 @@ export const MessageList = forwardRef<
               data-index={item.index}
               style={{ position: 'absolute', top: 0, left: 0, width: '100%', transform: `translateY(${item.start}px)` }}
             >
-              <MessageRow message={m} tsInverted={tsInverted} isJumpTarget={isJumpTarget} />
+              <MessageRow message={m} tsInverted={tsInverted} isJumpTarget={isJumpTarget} onExpandChange={onExpandChange} />
             </div>
           )
         })}
