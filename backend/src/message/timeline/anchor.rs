@@ -6,13 +6,18 @@ pub enum Anchor {
     Latest,
     /// Start at the low watermark of every partition (jump to beginning).
     Beginning,
-    /// Jump to a specific message. Only the named partition is positioned
-    /// at that message; every other partition starts at its own high
+    /// Jump to a specific message, used for `direction=back` offset jumps
+    /// (a forward jump uses `OffsetForwardAligned` — see
+    /// `api::messages::timeline_sse`). Only the named partition is
+    /// positioned at that message (at `offset + 1`, since a `Back` position
+    /// is an exclusive upper bound, so the anchored message itself is the
+    /// first record read); every other partition starts at its own high
     /// watermark.
     ///
-    /// This is a deliberate simplification, not an oversight: an offset
-    /// anchor is a *partition-local* jump (the user picked one message in
-    /// one partition), and there's no principled cross-partition offset to
+    /// Pinning the others at their high watermark is a deliberate
+    /// simplification, not an oversight: an offset anchor is a
+    /// *partition-local* jump (the user picked one message in one
+    /// partition), and there's no principled cross-partition offset to
     /// derive from it — a message's timestamp doesn't imply a comparable
     /// offset in another partition. The global timeline is produced by the
     /// merge-sort-by-timestamp step downstream, which is what actually
@@ -28,26 +33,26 @@ pub enum Anchor {
     /// here": position at the high watermark, matching `Latest`'s
     /// behavior for that partition.
     TimestampResolved(Vec<(i32, Option<i64>)>),
-    /// Offset anchor, FORWARD-direction alignment (owner ruling
-    /// 2026-08-15 — supersedes `Offset`'s "pin everyone else at their high
-    /// watermark" behavior for a forward read only; `Offset` itself is
-    /// unchanged and still used for `direction=back`, see its own doc
-    /// comment). The anchored `(partition, offset)` message's own
-    /// timestamp is resolved upstream (one bounded single-record fetch),
-    /// then every OTHER partition is resolved via the same
-    /// `OffsetsForTimes` machinery `TimestampResolved` uses, at that same
-    /// timestamp — `aligned` carries that per-partition result (`None` =
-    /// nothing at/after the timestamp there: high watermark, matching
-    /// `Latest`). The anchored partition itself is pinned to exactly
-    /// `offset`, never re-derived from the timestamp lookup (`aligned` may
-    /// also contain an entry for it, from the shared resolution call — it
-    /// is simply ignored below): the whole point is that partition reads
-    /// forward from the EXACT message the user picked, not a second
-    /// approximation of it. This is what makes the anchored message the
-    /// OLDEST row of its own partition in the resulting forward page,
-    /// while every other partition picks up at-or-after the same instant —
-    /// "nothing lost, nothing pinned to the wrong end" relative to a
-    /// `TimestampResolved` anchor at that same timestamp.
+    /// Offset anchor for a FORWARD read (`direction=back` uses `Offset`
+    /// instead — see `api::messages::timeline_sse`).
+    ///
+    /// Upstream resolves the anchored `(partition, offset)` message's own
+    /// timestamp with one bounded single-record fetch
+    /// (`fetch::fetch_one_record_blocking`), then resolves every partition
+    /// at that timestamp through the same `OffsetsForTimes` call
+    /// `TimestampResolved` uses; `aligned` carries that per-partition result
+    /// (`None` = nothing at/after the timestamp in that partition, which
+    /// falls back to its high watermark, matching `Latest`).
+    ///
+    /// The anchored partition is pinned to exactly `offset` and never
+    /// re-derived from the timestamp lookup — `aligned` may carry an entry
+    /// for it from the shared resolution call, and that entry is ignored.
+    /// The point is that this partition reads forward from the EXACT message
+    /// the user picked rather than a second approximation of it, which is
+    /// what makes the anchored message the OLDEST row of its own partition
+    /// in the resulting page while every other partition picks up at-or-after
+    /// the same instant: nothing lost, nothing pinned to the wrong end,
+    /// relative to a `TimestampResolved` anchor at that same timestamp.
     OffsetForwardAligned { partition: i32, offset: i64, aligned: Vec<(i32, Option<i64>)> },
 }
 
@@ -100,11 +105,11 @@ mod tests {
         assert_eq!(p, vec![(0, 10), (1, 0)]);
     }
 
-    /// Owner ruling 2026-08-15: a forward offset anchor pins the anchored
-    /// partition at the EXACT offset (not `aligned`'s own resolution for
-    /// it, even if present) and every other partition at its aligned
-    /// timestamp-resolved offset — `None` there falls back to the high
-    /// watermark, exactly like `TimestampResolved`.
+    /// A forward offset anchor pins the anchored partition at the EXACT
+    /// offset (not `aligned`'s own resolution for it, even when present)
+    /// and every other partition at its aligned timestamp-resolved offset —
+    /// `None` there falls back to the high watermark, exactly like
+    /// `TimestampResolved`.
     #[test]
     fn offset_forward_aligned_pins_anchor_exactly_and_aligns_others() {
         let wm: &[(i32, i64, i64)] = &[(0, 0, 100), (1, 0, 100), (2, 0, 100)];
