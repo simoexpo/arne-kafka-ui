@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { render, screen } from '@testing-library/react'
+import { fireEvent, render, screen } from '@testing-library/react'
 import { StrictMode } from 'react'
 import userEvent from '@testing-library/user-event'
 import { MessageRow } from './MessageRow'
@@ -82,6 +82,56 @@ describe('MessageRow', () => {
     render(<MessageRow message={msg()} expanded={false} onToggle={() => {}} />)
     expect(screen.queryByTestId('jump-target')).not.toBeInTheDocument()
     expect(screen.getByTestId('message-row').className).not.toMatch(/emerald/)
+  })
+
+  describe('keyboard operability (M4)', () => {
+    it('exposes the row as a button with aria-expanded reflecting the prop', () => {
+      const { rerender } = render(<MessageRow message={msg()} expanded={false} onToggle={() => {}} />)
+      const row = screen.getByTestId('message-row')
+      expect(row).toHaveAttribute('role', 'button')
+      expect(row).toHaveAttribute('tabIndex', '0')
+      expect(row).toHaveAttribute('aria-expanded', 'false')
+
+      rerender(<MessageRow message={msg()} expanded onToggle={() => {}} />)
+      expect(screen.getByTestId('message-row')).toHaveAttribute('aria-expanded', 'true')
+    })
+
+    it('Enter toggles the row', () => {
+      const onToggle = vi.fn()
+      render(<MessageRow message={msg()} expanded={false} onToggle={onToggle} />)
+      fireEvent.keyDown(screen.getByTestId('message-row'), { key: 'Enter' })
+      expect(onToggle).toHaveBeenCalledTimes(1)
+    })
+
+    it('Space toggles the row and prevents the page from scrolling', () => {
+      const onToggle = vi.fn()
+      render(<MessageRow message={msg()} expanded={false} onToggle={onToggle} />)
+      const event = fireEvent.keyDown(screen.getByTestId('message-row'), { key: ' ' })
+      expect(onToggle).toHaveBeenCalledTimes(1)
+      expect(event).toBe(false) // fireEvent returns false when preventDefault() was called
+    })
+
+    it('ignores other keys', () => {
+      const onToggle = vi.fn()
+      render(<MessageRow message={msg()} expanded={false} onToggle={onToggle} />)
+      fireEvent.keyDown(screen.getByTestId('message-row'), { key: 'a' })
+      expect(onToggle).not.toHaveBeenCalled()
+    })
+
+    it('a copy button inside the expanded row is independently focusable and does not toggle the row on Enter', async () => {
+      const onToggle = vi.fn()
+      const user = userEvent.setup()
+      const writeText = vi.fn().mockResolvedValue(undefined)
+      Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true })
+      render(<MessageRow message={msg()} expanded onToggle={onToggle} />)
+
+      const copyKey = screen.getByLabelText('copy key')
+      copyKey.focus()
+      expect(copyKey).toHaveFocus()
+      await user.keyboard('{Enter}')
+      expect(writeText).toHaveBeenCalled()
+      expect(onToggle).not.toHaveBeenCalled()
+    })
   })
 
   // UTC/local display toggle (owner ruling 2026-08-15): rows re-render the

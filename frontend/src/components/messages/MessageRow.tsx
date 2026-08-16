@@ -1,3 +1,4 @@
+import type { KeyboardEvent } from 'react'
 import type { MessageOut } from '../../api/types'
 import { formatTimestamp } from '../../lib/format'
 import { useTimeDisplayMode } from '../../lib/timeDisplayMode'
@@ -31,10 +32,31 @@ export function MessageRow({
   const ts = message.timestamp_ms === null ? '—' : formatTimestamp(message.timestamp_ms, timeDisplayMode)
   const preview = message.value === null ? '∅ null' : message.value.text.replaceAll('\n', ' ')
   const isError = message.value?.encoding === 'decode_error'
+  // M4: the row is the sole affordance for opening/closing a message's
+  // inspection view, so it must be keyboard-operable like any other control
+  // added since — a real <button> can't be used here (it would forbid the
+  // nested copy buttons/JSON summary <details> the expanded content renders),
+  // so it's a focusable div wearing `role="button"` instead, with the usual
+  // Enter/Space activation and `aria-expanded` announcing its state. The
+  // `e.target !== e.currentTarget` guard matters: those nested controls are
+  // independently focusable and dispatch their OWN keydown, which bubbles up
+  // through this handler too — without the guard, pressing Enter/Space on
+  // e.g. a copy button would also toggle the row underneath it.
+  const handleKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
+    if (e.target !== e.currentTarget) return
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault()
+      onToggle()
+    }
+  }
   return (
     <div
       data-testid="message-row"
+      role="button"
+      tabIndex={0}
+      aria-expanded={expanded}
       onClick={onToggle}
+      onKeyDown={handleKeyDown}
       className={`cursor-pointer border-b border-zinc-100 px-2 py-1.5 font-mono text-sm dark:border-zinc-800 ${
         isJumpTarget
           ? 'bg-emerald-50 hover:bg-emerald-100 dark:bg-emerald-950/40 dark:hover:bg-emerald-950/60'
