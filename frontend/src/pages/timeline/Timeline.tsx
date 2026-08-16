@@ -1133,13 +1133,20 @@ export function Timeline({
       />
       <JumpControl onJump={handleJump} partitionIds={partitionIds} />
       {tailError && (
-        // M5: routed through the same `describeError` product-voice path as
-        // every other error surface (Panel, the sidebar's cluster list) —
-        // never the raw wire code/message — and announced via aria-live so
-        // a screen reader catches the live stream dying, not just a visual
+        // Routed through the same `describeError` product-voice path as
+        // every other error surface (Panel, the sidebar's cluster list) for
+        // the headline — but the headline ALONE can't distinguish an ACL
+        // denial from a deleted topic from a genuinely dead broker (every
+        // `kafka_error` collapses to the same "Kafka unreachable" text), so
+        // the reason renders too, never replaced by it. Same reasoning as
+        // Panel's headline+message pair. Announced via aria-live so a
+        // screen reader catches the live stream dying, not just a visual
         // color change.
         <p role="status" aria-live="polite" className="text-sm text-amber-600 dark:text-amber-400">
-          {`live stopped — ${describeError(tailError).headline ?? tailError.message}`}
+          {(() => {
+            const { headline } = describeError(tailError)
+            return headline ? `live stopped — ${headline} — ${tailError.message}` : `live stopped — ${tailError.message}`
+          })()}
         </p>
       )}
       {continueDirection === 'forward' && <ContinueScanButton label={continueScanLabel} onClick={continueScan} />}

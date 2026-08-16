@@ -462,7 +462,7 @@ describe('Timeline', () => {
   // product-voice wording with kafka attribution, never the raw wire code —
   // and lives in an aria-live region so a screen reader announces the live
   // stream dying.
-  it('a tail error stops live and shows a describeError-routed, product-voice caption in an aria-live region', async () => {
+  it('a tail error stops live and shows a describeError-routed, product-voice headline PLUS the specific reason, in an aria-live region', async () => {
     const tail = mockTail()
     render(<Timeline cluster="prod" topic="orders" />)
     await emit(0, 'page_end', { cursor: null, exhausted: true })
@@ -471,19 +471,28 @@ describe('Timeline', () => {
     })
     expect(screen.queryByText('● live')).not.toBeInTheDocument()
     expect(screen.queryByText(/kafka_error/)).not.toBeInTheDocument()
-    const banner = screen.getByText("live stopped — Kafka unreachable — cluster 'prod'")
+    // The headline alone can't distinguish an ACL denial from a deleted
+    // topic from a genuinely dead broker — the reason must render too, not
+    // be replaced by the headline.
+    const banner = screen.getByText("live stopped — Kafka unreachable — cluster 'prod' — broker gone")
     expect(banner).toBeInTheDocument()
     expect(banner).toHaveAttribute('aria-live', 'polite')
   })
 
-  it('a tail transport error surfaces the same connection-lost wording used everywhere else', async () => {
+  it('a tail transport error keeps its own specific reason ("retrying is manual") visible alongside the shared connection-lost headline', async () => {
     const tail = mockTail()
     render(<Timeline cluster="prod" topic="orders" />)
     await emit(0, 'page_end', { cursor: null, exhausted: true })
     await act(async () => {
       tail.handlers().onTransportError()
     })
-    expect(screen.getByText('live stopped — Connection to Betrachtung lost')).toBeInTheDocument()
+    // Regression: a headline-only banner made this string unreachable even
+    // though useLiveTail sets it, and it's the opposite of errors.ts's
+    // generic "retrying automatically" hint — reconnecting the tail really
+    // is manual (no auto-reconnect exists), so it must still be visible.
+    expect(
+      screen.getByText('live stopped — Connection to Betrachtung lost — connection lost — retrying is manual'),
+    ).toBeInTheDocument()
   })
 
   it('a page error renders as a banner while keeping already-loaded rows visible', async () => {
