@@ -41,10 +41,13 @@ impl TailEvent {
             TailEvent::Error { .. } => "app_error",
         }
     }
+}
 
-    /// Shapes a terminal error event to match the `ApiError` JSON envelope
-    /// used everywhere else in the API, per the C1 fix's requirement.
-    fn from_api_error(err: &ApiError) -> Self {
+/// Shapes a terminal error event to match the `ApiError` JSON envelope used
+/// everywhere else in the API — mirrors `impl From<ApiError> for
+/// TimelineEvent` (`message/timeline.rs`).
+impl From<&ApiError> for TailEvent {
+    fn from(err: &ApiError) -> Self {
         TailEvent::Error {
             code: err.code.to_string(),
             message: err.message.clone(),
@@ -179,11 +182,11 @@ pub async fn run(
             Ok(Ok(())) => {}
             Ok(Err(e)) => {
                 let err = ApiError::kafka(&cluster_name, e);
-                let _ = tx.send(TailEvent::from_api_error(&err)).await;
+                let _ = tx.send(TailEvent::from(&err)).await;
             }
             Err(join_err) => {
                 let err = ApiError::internal(format!("tail poll task failed: {join_err}"));
-                let _ = tx.send(TailEvent::from_api_error(&err)).await;
+                let _ = tx.send(TailEvent::from(&err)).await;
             }
         }
     });
@@ -316,7 +319,7 @@ mod tests {
         assert_eq!(msg_event.name(), "message");
 
         let api_err = ApiError::kafka("prod", "assign tail consumer: boom");
-        let err_event = TailEvent::from_api_error(&api_err);
+        let err_event = TailEvent::from(&api_err);
         assert_eq!(err_event.name(), "app_error");
         let json = serde_json::to_value(&err_event).unwrap();
         assert_eq!(json["code"], "kafka_error");
