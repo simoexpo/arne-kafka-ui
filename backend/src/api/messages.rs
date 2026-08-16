@@ -80,9 +80,8 @@ fn parse_numeric_field<T: std::str::FromStr>(field: &str, raw: Option<&str>) -> 
 fn parse_raw(raw: &RawTimelineParams) -> Result<TimelineParams, ApiError> {
     Ok(TimelineParams {
         // A missing `direction` is reported by `parse_direction`'s own
-        // "unknown direction" branch below (empty string matches neither
-        // "back" nor "forward"), so no separate required-field check is
-        // needed here.
+        // dedicated "" branch below (empty string is what a missing param
+        // becomes here), so no separate required-field check is needed.
         direction: raw.direction.clone().unwrap_or_default(),
         limit: parse_numeric_field("limit", raw.limit.as_deref())?,
         anchor: raw.anchor.clone(),
@@ -132,6 +131,10 @@ fn parse_direction(params: &TimelineParams) -> Result<timeline::Direction, ApiEr
     match params.direction.as_str() {
         "back" => Ok(timeline::Direction::Back),
         "forward" => Ok(timeline::Direction::Forward),
+        // A missing `direction` reaches here as an empty string (see
+        // `parse_raw`'s comment) — "direction is required" says what's
+        // actually wrong; "unknown direction ''" would read as confusing.
+        "" => Err(ApiError::bad_request("direction is required")),
         other => Err(ApiError::bad_request(format!("unknown direction '{other}'"))),
     }
 }
@@ -332,6 +335,18 @@ mod tests {
     fn parse_direction_rejects_anything_else() {
         let err = parse_direction(&TimelineParams { direction: "sideways".into(), ..params() }).unwrap_err();
         assert_eq!(err.code, "bad_request");
+        assert_eq!(err.message, "unknown direction 'sideways'");
+    }
+
+    /// A missing `direction` reaches `parse_direction` as an empty string
+    /// (see `parse_raw`'s own comment) — "unknown direction ''" is a
+    /// confusing way to say that; "direction is required" says exactly
+    /// what's wrong.
+    #[test]
+    fn parse_direction_names_a_missing_direction_as_required_not_unknown() {
+        let err = parse_direction(&TimelineParams { direction: String::new(), ..params() }).unwrap_err();
+        assert_eq!(err.code, "bad_request");
+        assert_eq!(err.message, "direction is required");
     }
 
     #[test]
