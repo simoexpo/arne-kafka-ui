@@ -33,8 +33,8 @@ function PauseIcon({ active }: { active: boolean }) {
     <svg
       data-testid="icon-pause"
       viewBox="0 0 16 16"
-      width="14"
-      height="14"
+      width="16"
+      height="16"
       className={active ? 'text-amber-500' : 'text-zinc-400 dark:text-zinc-600'}
     >
       <rect x="3.5" y="2.5" width="3" height="11" rx="1" fill="currentColor" />
@@ -48,8 +48,8 @@ function PlayIcon({ active }: { active: boolean }) {
     <svg
       data-testid="icon-play"
       viewBox="0 0 16 16"
-      width="14"
-      height="14"
+      width="16"
+      height="16"
       className={active ? 'text-emerald-500' : 'text-zinc-400 dark:text-zinc-600'}
     >
       <path d="M4 2.3 13.5 8 4 13.7Z" fill="currentColor" />

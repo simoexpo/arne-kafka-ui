@@ -98,8 +98,8 @@ function SunIcon({ active }: { active: boolean }) {
     <svg
       data-testid="icon-sun"
       viewBox="0 0 16 16"
-      width="14"
-      height="14"
+      width="16"
+      height="16"
       className={active ? 'text-amber-500' : 'text-zinc-400 dark:text-zinc-600'}
     >
       <circle cx="8" cy="8" r="3.2" fill="currentColor" />
@@ -122,8 +122,8 @@ function MoonIcon({ active }: { active: boolean }) {
     <svg
       data-testid="icon-moon"
       viewBox="0 0 16 16"
-      width="14"
-      height="14"
+      width="16"
+      height="16"
       className={active ? 'text-indigo-400' : 'text-zinc-400 dark:text-zinc-600'}
     >
       <path
