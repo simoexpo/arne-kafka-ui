@@ -71,7 +71,7 @@ export interface InsertOutcome {
   rejectedStale: boolean
 }
 
-export interface SlidingWindowStore {
+interface SlidingWindowStore {
   /**
    * Inserts one page's rows.
    *

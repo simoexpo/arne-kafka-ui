@@ -7,7 +7,7 @@ export interface FilterQueryApi {
   path?: string
 }
 
-export interface ParsedFilterQuery {
+interface ParsedFilterQuery {
   api: FilterQueryApi | null
   predicate: (m: MessageOut) => boolean
 }
