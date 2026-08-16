@@ -442,6 +442,32 @@ fn chunk_display_order(matches: Vec<MessageOut>, direction: Direction) -> Vec<Me
 /// records.
 const CHUNK_SPAN: u64 = 5_000;
 
+/// How often (in records popped) a mid-chunk `progress` event goes out —
+/// see `mid_chunk_progress`.
+const PROGRESS_INTERVAL: u64 = 2_000;
+
+/// Whether the `records_popped_this_chunk`-th record popped in the current
+/// chunk (a plain running count, 1-indexed, reset only when a new chunk
+/// starts) is due a mid-chunk `progress` emission, and if so, the `scanned`
+/// value to report.
+///
+/// B1 fix: fires every `PROGRESS_INTERVAL` records, reporting
+/// `total_scanned` (every earlier chunk's already-committed, offset-based
+/// charge) plus how far *this* chunk has gotten so far. Critically,
+/// `records_popped_this_chunk` is cumulative for the whole chunk and is
+/// never reset between calls — the pre-fix version reset its counter to 0
+/// after every emission, so the first emit in a chunk reported
+/// `total_scanned + PROGRESS_INTERVAL` and the second, `PROGRESS_INTERVAL`
+/// records later in that SAME chunk, reported `total_scanned +
+/// PROGRESS_INTERVAL` again: an identical number, i.e. a progress bar that
+/// visibly freezes then jumps at chunk boundaries. Reporting the running
+/// total instead makes every mid-chunk emission strictly greater than the
+/// last.
+fn mid_chunk_progress(total_scanned: u64, records_popped_this_chunk: u64) -> Option<u64> {
+    (records_popped_this_chunk > 0 && records_popped_this_chunk.is_multiple_of(PROGRESS_INTERVAL))
+        .then_some(total_scanned + records_popped_this_chunk)
+}
+
 /// Truncates `windows` — kept in their original order, which is
 /// `cur_positions`' own stable order — to a prefix whose total span does
 /// not exceed `budget_cap`, dropping any windows past that point entirely
@@ -734,7 +760,7 @@ pub fn run_page(
             let mut taken_max: Vec<Option<i64>> = vec![None; windows.len()];
             let mut any_taken = false;
             let mut chunk_matches: Vec<MessageOut> = Vec::new();
-            let mut since_progress: u64 = 0;
+            let mut records_popped_this_chunk: u64 = 0;
             loop {
                 if total_matches + chunk_matches.len() as u64 >= limit_u64 {
                     break;
@@ -762,25 +788,27 @@ pub fn run_page(
                     chunk_matches.push(decoded);
                 }
 
-                // Progress guarantee (design doc): at least every 2,000
-                // scanned, a `progress` event goes out mid-chunk, not just
-                // at chunk boundaries — a single chunk can span thousands
-                // of records (`CHUNK_SPAN`), and a filtered scan hunting a
-                // sparse needle must not go quiet for that long.
-                since_progress += 1;
-                if since_progress >= 2_000 {
+                // Progress guarantee (design doc): at least every
+                // PROGRESS_INTERVAL scanned, a `progress` event goes out
+                // mid-chunk, not just at chunk boundaries — a single chunk
+                // can span thousands of records (`CHUNK_SPAN`), and a
+                // filtered scan hunting a sparse needle must not go quiet
+                // for that long. `mid_chunk_progress` reports a running
+                // total (see its own doc comment, B1 fix) so consecutive
+                // emissions within one chunk are never the same number.
+                records_popped_this_chunk += 1;
+                if let Some(scanned) = mid_chunk_progress(total_scanned, records_popped_this_chunk) {
                     // C1: a failed send means the client is gone — stop
                     // right here instead of ignoring the error and looping
                     // on regardless (the belt-and-braces half of the fix,
                     // alongside the top-of-loop cancellation check above).
                     if tx.send(TimelineEvent::Progress {
-                        scanned: total_scanned + since_progress,
+                        scanned,
                         matches: total_matches + chunk_matches.len() as u64,
                         budget,
                     }).await.is_err() {
                         return;
                     }
-                    since_progress = 0;
                 }
             }
 
@@ -872,6 +900,30 @@ mod tests {
     use super::*;
 
     const WM: &[(i32, i64, i64)] = &[(0, 10, 110), (1, 0, 5)];
+
+    /// B1 regression: two mid-chunk progress emissions in the SAME chunk
+    /// must report strictly increasing `scanned` values. The pre-fix
+    /// arithmetic reset its counter to 0 after every emission, so the first
+    /// emit reported `total_scanned + 2000` and the second (2000 records
+    /// later, same chunk) reported `total_scanned + 2000` again — an
+    /// identical number, i.e. a progress bar that visibly freezes.
+    #[test]
+    fn mid_chunk_progress_fires_every_2000_and_never_repeats_within_a_chunk() {
+        assert_eq!(mid_chunk_progress(0, 1_999), None);
+        let first = mid_chunk_progress(0, 2_000);
+        assert_eq!(first, Some(2_000));
+        assert_eq!(mid_chunk_progress(0, 3_999), None);
+        let second = mid_chunk_progress(0, 4_000);
+        assert_eq!(second, Some(4_000));
+        assert_ne!(first, second, "consecutive mid-chunk emissions in one chunk must not repeat the same scanned value");
+    }
+
+    #[test]
+    fn mid_chunk_progress_scanned_includes_every_earlier_chunks_charge() {
+        // `total_scanned` (prior chunks' real, offset-based charge) plus how
+        // far this chunk has gotten so far — not just this chunk's count.
+        assert_eq!(mid_chunk_progress(10_000, 2_000), Some(12_000));
+    }
 
     #[test]
     fn cursor_roundtrips() {
