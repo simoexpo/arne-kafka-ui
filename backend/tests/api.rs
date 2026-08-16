@@ -990,6 +990,40 @@ async fn timeline_bad_cursor_is_an_in_stream_error() {
     assert!(err["message"].as_str().unwrap().contains("bad cursor"), "{err}");
 }
 
+/// I2: a query string axum's `Query<T>` would otherwise reject at
+/// deserialization time (a non-numeric `limit`) must report the same
+/// structured envelope every other bad request does — in-stream, per I4,
+/// since this endpoint is SSE-consumed — never axum's default
+/// `text/plain` rejection body.
+#[tokio::test]
+async fn timeline_non_numeric_limit_is_an_in_stream_error_not_text_plain() {
+    let bootstrap = start_kafka().await;
+    let state = state_for(&bootstrap, vec![]);
+    let events = collect_sse(
+        app(state),
+        "/api/clusters/test/topics/x/timeline?direction=back&limit=abc&anchor=latest",
+        20,
+    ).await;
+    let (_, err) = events.iter().find(|(n, _)| n == "app_error").expect("an in-stream error event: {events:?}").clone();
+    assert_eq!(err["code"], "bad_request", "{err}");
+}
+
+/// I2: a missing required query field (`direction`) must likewise report
+/// the structured envelope in-stream, never axum's default
+/// "missing field `direction`" `text/plain` rejection.
+#[tokio::test]
+async fn timeline_missing_direction_is_an_in_stream_error_not_text_plain() {
+    let bootstrap = start_kafka().await;
+    let state = state_for(&bootstrap, vec![]);
+    let events = collect_sse(
+        app(state),
+        "/api/clusters/test/topics/x/timeline?limit=5&anchor=latest",
+        20,
+    ).await;
+    let (_, err) = events.iter().find(|(n, _)| n == "app_error").expect("an in-stream error event: {events:?}").clone();
+    assert_eq!(err["code"], "bad_request", "{err}");
+}
+
 /// Fix round 3, N4 + N6 (reviewer's exact reproduction): a real Kafka
 /// transactional producer commits `count` records to a single-partition
 /// topic. The commit leaves a legitimate offset hole (the transaction's own

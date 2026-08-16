@@ -38,6 +38,64 @@ pub struct TimelineParams {
     pub path: Option<String>,
 }
 
+/// I2: the wire shape actually extracted from the query string — every
+/// field a plain, optional string, so axum's `Query<RawTimelineParams>`
+/// extraction itself can (almost) never fail to deserialize. A typed
+/// `Query<TimelineParams>` (a required `String` plus `Option<u64>`/
+/// `Option<i32>`/`Option<i64>` fields) rejects a malformed value (`limit=
+/// abc`) or a missing required field *before* the handler body ever runs,
+/// via axum's own `QueryRejection` — a bare `text/plain` body with serde's
+/// own vocabulary, bypassing the `{code,message,cluster,retriable}`
+/// envelope every other error uses. Parsing into `TimelineParams` is done
+/// by `parse_raw` below instead, inside the handler, so a bad numeric value
+/// becomes an ordinary `ApiError::bad_request` — which for this
+/// SSE-consumed endpoint flows through the same in-stream `app_error` path
+/// as every other pre-stream validation failure (see I4 / `timeline_sse`).
+#[derive(Debug, Deserialize)]
+pub struct RawTimelineParams {
+    pub direction: Option<String>,
+    pub limit: Option<String>,
+    pub anchor: Option<String>,
+    pub cursor: Option<String>,
+    pub partition: Option<String>,
+    pub offset: Option<String>,
+    pub ts_ms: Option<String>,
+    pub filter: Option<String>,
+    pub q: Option<String>,
+    pub path: Option<String>,
+}
+
+/// Parses one optional numeric string field, producing a precise
+/// `bad_request` (naming the field) rather than the generic serde message
+/// axum's own `Query` rejection would have produced.
+fn parse_numeric_field<T: std::str::FromStr>(field: &str, raw: Option<&str>) -> Result<Option<T>, ApiError> {
+    match raw {
+        None => Ok(None),
+        Some(s) => s.parse::<T>().map(Some).map_err(|_| {
+            ApiError::bad_request(format!("{field}: invalid number '{s}'"))
+        }),
+    }
+}
+
+fn parse_raw(raw: &RawTimelineParams) -> Result<TimelineParams, ApiError> {
+    Ok(TimelineParams {
+        // A missing `direction` is reported by `parse_direction`'s own
+        // "unknown direction" branch below (empty string matches neither
+        // "back" nor "forward"), so no separate required-field check is
+        // needed here.
+        direction: raw.direction.clone().unwrap_or_default(),
+        limit: parse_numeric_field("limit", raw.limit.as_deref())?,
+        anchor: raw.anchor.clone(),
+        cursor: raw.cursor.clone(),
+        partition: parse_numeric_field("partition", raw.partition.as_deref())?,
+        offset: parse_numeric_field("offset", raw.offset.as_deref())?,
+        ts_ms: parse_numeric_field("ts_ms", raw.ts_ms.as_deref())?,
+        filter: raw.filter.clone(),
+        q: raw.q.clone(),
+        path: raw.path.clone(),
+    })
+}
+
 /// Validated before any Kafka round-trip: a malformed request must 400
 /// fast, even against a topic that doesn't exist and even on a request that
 /// would otherwise stream. Parses into `timeline::TimelineAnchorInput`,
@@ -119,7 +177,7 @@ fn single_event_stream(event: TimelineEvent) -> (mpsc::Receiver<TimelineEvent>, 
 pub async fn timeline_sse(
     State(state): State<AppState>,
     Path((cluster, topic)): Path<(String, String)>,
-    Query(params): Query<TimelineParams>,
+    Query(raw): Query<RawTimelineParams>,
 ) -> Result<Sse<impl Stream<Item = Result<Event, std::convert::Infallible>>>, ApiError> {
     // I4: every one of these is a plain, synchronous validation — no I/O,
     // no cluster handle needed — but the fix bundles them into one `Result`
@@ -131,7 +189,14 @@ pub async fn timeline_sse(
     // before `registry.get` either way, so a bad request against an
     // unknown cluster still reports the param error, never a
     // `cluster_not_found` that masks it.
+    //
+    // I2: `parse_raw` (turning the query string's plain strings into
+    // typed fields) is INSIDE this same validated block, not a separate
+    // `Query<TimelineParams>` extractor argument — see `RawTimelineParams`'s
+    // doc comment for why: an extractor-level rejection bypasses this
+    // whole mechanism and answers with axum's own `text/plain` body.
     let validated: Result<(timeline::Direction, usize, PositionSource, Option<Filter>), ApiError> = (|| {
+        let params = parse_raw(&raw)?;
         let direction = parse_direction(&params)?;
         let limit = parse_limit(&params)?;
         if params.cursor.is_some() == params.anchor.is_some() {
