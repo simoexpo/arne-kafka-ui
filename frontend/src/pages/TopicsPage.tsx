@@ -6,6 +6,7 @@ import { CopyButton } from '../components/CopyButton'
 import { FilterInput } from '../components/FilterInput'
 import { Panel } from '../components/Panel'
 import { StalenessChip } from '../components/StalenessChip'
+import { Switch } from '../components/Switch'
 import { formatCount } from '../lib/format'
 
 export function TopicsView({ cluster }: { cluster: string }) {
@@ -32,25 +33,7 @@ export function TopicsView({ cluster }: { cluster: string }) {
       </div>
       <div className="flex items-center gap-4">
         <FilterInput value={filter} onChange={setFilter} placeholder="filter topics…" ariaLabel="filter topics" />
-        <label className="inline-flex w-fit items-center gap-2 text-sm text-zinc-500">
-          <button
-            type="button"
-            role="switch"
-            aria-checked={showInternal}
-            aria-label="show internal"
-            onClick={() => setShowInternal((v) => !v)}
-            className={`relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors ${
-              showInternal ? 'bg-blue-600 dark:bg-blue-500' : 'bg-zinc-300 dark:bg-zinc-700'
-            }`}
-          >
-            <span
-              className={`absolute left-0.5 top-0.5 h-4 w-4 transform rounded-full bg-white transition-transform ${
-                showInternal ? 'translate-x-4' : 'translate-x-0'
-              }`}
-            />
-          </button>
-          show internal
-        </label>
+        <Switch checked={showInternal} label="show internal" onChange={() => setShowInternal((v) => !v)} />
       </div>
       <Panel
         title={`${visible.length} topics`}

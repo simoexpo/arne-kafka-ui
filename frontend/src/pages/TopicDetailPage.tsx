@@ -8,6 +8,7 @@ import { FilterInput } from '../components/FilterInput'
 import { Panel } from '../components/Panel'
 import { StalenessChip } from '../components/StalenessChip'
 import { Sparkline } from '../components/Sparkline'
+import { Switch } from '../components/Switch'
 import { formatCount, formatRetentionValue, retentionMsHint } from '../lib/format'
 import { MessagesTab } from './MessagesTab'
 import type { ConfigEntry, TopicDetail, TopicGroupLag } from '../api/types'
@@ -253,28 +254,14 @@ function ConfigTab({ data, error, loading }: { data?: TopicDetail; error: unknow
               ? <p className="text-sm text-zinc-500">no overrides — all values are broker defaults</p>
               : <ConfigTable entries={overridden} testPrefix="config" />}
           </div>
-          <label className="inline-flex w-fit items-center gap-2 text-sm text-zinc-500">
-            <button
-              type="button"
-              role="switch"
-              aria-checked={showAll}
-              aria-label="show all configs"
-              onClick={() => {
-                setShowAll((v) => !v)
-                setFilter('')
-              }}
-              className={`relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors ${
-                showAll ? 'bg-blue-600 dark:bg-blue-500' : 'bg-zinc-300 dark:bg-zinc-700'
-              }`}
-            >
-              <span
-                className={`absolute left-0.5 top-0.5 h-4 w-4 transform rounded-full bg-white transition-transform ${
-                  showAll ? 'translate-x-4' : 'translate-x-0'
-                }`}
-              />
-            </button>
-            show all configs
-          </label>
+          <Switch
+            checked={showAll}
+            label="show all configs"
+            onChange={() => {
+              setShowAll((v) => !v)
+              setFilter('')
+            }}
+          />
           {showAll && (
             <div>
               <div className="mb-2 flex items-center justify-between">
