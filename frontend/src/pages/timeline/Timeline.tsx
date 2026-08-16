@@ -1046,8 +1046,19 @@ export function Timeline({
   // adding it again here would double-count it.
   const progressScanned = gestureScannedRef.current + (state.loading ? (state.progress?.scanned ?? 0) : 0)
   const progressMatches = gestureMatchesRef.current + (state.loading ? (state.progress?.matches ?? 0) : 0)
+  // M6 (charter: "real progress — known total up front"): `budget` is a
+  // per-request constant (the backend's configured scan ceiling for a
+  // single page, resent unchanged on every page of the same gesture — see
+  // `state.limits.timeline_scan_budget` on the backend) — never gesture-
+  // cumulative like scanned/matches above, so the CURRENT/just-ended page's
+  // own value is the right one to show. `state.progress` itself is reset to
+  // null the instant a new page starts loading, until its first `progress`
+  // event arrives — that brief window is the only time this is null.
+  const knownBudget = state.progress?.budget ?? null
   const continueScanLabel = filterActive
-    ? `scanned ${progressScanned} records · ${progressMatches} matches — continue`
+    ? knownBudget === null
+      ? `scanned ${progressScanned} records · ${progressMatches} matches — continue`
+      : `scanned ${progressScanned} of ${knownBudget} records · ${progressMatches} matches — continue`
     : 'scanned far, nothing found here — continue'
 
   // B-2 fix: gates on the GESTURE (a user-issued page plus every auto-continued empty page that follows it), not on
@@ -1082,7 +1093,7 @@ export function Timeline({
       <FilterBar
         value={filterText}
         onChange={setFilterText}
-        progress={progressVisible ? { scanned: progressScanned, matches: progressMatches } : null}
+        progress={progressVisible ? { scanned: progressScanned, matches: progressMatches, budget: knownBudget } : null}
         onCancel={handleCancelScan}
       />
       <JumpControl onJump={handleJump} partitionIds={partitionIds} />

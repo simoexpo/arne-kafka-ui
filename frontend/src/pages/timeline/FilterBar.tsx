@@ -9,7 +9,11 @@ export function FilterBar({
 }: {
   value: string
   onChange: (value: string) => void
-  progress: { scanned: number; matches: number } | null
+  // M6 (charter: "real progress — known total up front"): `budget` is the
+  // wire's own known ceiling for the current scan request — null only in
+  // the brief window between a fresh page starting to load and its first
+  // `progress` event arriving (see Timeline.tsx's `state.progress`).
+  progress: { scanned: number; matches: number; budget: number | null } | null
   onCancel: () => void
 }) {
   return (
@@ -20,7 +24,11 @@ export function FilterBar({
       <FilterHelp />
       {progress && (
         <div data-testid="filter-progress" className="flex items-center gap-2 text-xs text-zinc-500 dark:text-zinc-400">
-          <span>{`scanned ${progress.scanned} · ${progress.matches} matches`}</span>
+          <span>
+            {progress.budget === null
+              ? `scanned ${progress.scanned} · ${progress.matches} matches`
+              : `scanned ${progress.scanned} of ${progress.budget} · ${progress.matches} matches`}
+          </span>
           <button
             type="button"
             data-testid="cancel-scan"

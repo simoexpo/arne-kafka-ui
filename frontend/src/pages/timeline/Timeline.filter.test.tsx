@@ -303,7 +303,9 @@ describe('Timeline filter box', () => {
     expect(screen.queryByTestId('filter-progress')).not.toBeInTheDocument()
 
     await settle(PAST_SHOW_DELAY_MS)
-    expect(screen.getByText('scanned 40 · 0 matches')).toBeInTheDocument()
+    // M6: the wire's known `budget` (real progress, known total up front)
+    // renders alongside scanned/matches.
+    expect(screen.getByText('scanned 40 of 250000 · 0 matches')).toBeInTheDocument()
     const cancelBtn = screen.getByTestId('cancel-scan')
 
     fireEvent.click(cancelBtn)
@@ -432,7 +434,11 @@ describe('Timeline filter box', () => {
     }
 
     const btn = screen.getByTestId('continue-scan')
-    expect(btn).toHaveTextContent(`scanned ${totalScanned} records · 0 matches — continue`)
+    // M6: the continue affordance's own label carries the known budget too —
+    // it retains the just-ended page's last `progress` values (see
+    // useTimelinePage: `state.progress` is only reset when the NEXT page
+    // starts loading).
+    expect(btn).toHaveTextContent(`scanned ${totalScanned} of 250000 records · 0 matches — continue`)
   })
 
   it('a filtered page that finds some matches but stops short of a full page (budget spent) shows the continue affordance, not a silent load-older', async () => {
@@ -455,7 +461,7 @@ describe('Timeline filter box', () => {
     expect(screen.getByText('p0·1')).toBeInTheDocument()
     expect(screen.getByText('p0·2')).toBeInTheDocument()
     const btn = screen.getByTestId('continue-scan')
-    expect(btn).toHaveTextContent('scanned 5000 records · 2 matches — continue')
+    expect(btn).toHaveTextContent('scanned 5000 of 5000 records · 2 matches — continue')
   })
 
   // Task 3 (supersedes the v1.4-era "reposition by timestamp" regression
@@ -534,18 +540,21 @@ describe('Timeline filter box', () => {
       if (screen.queryByTestId('continue-scan')) break
     }
     const btn = screen.getByTestId('continue-scan')
-    expect(btn).toHaveTextContent(`scanned ${totalScanned} records · 0 matches — continue`)
+    expect(btn).toHaveTextContent(`scanned ${totalScanned} of 250000 records · 0 matches — continue`)
 
     fireEvent.click(btn)
     // Clicking continue starts a new in-flight page — past the show-delay,
     // the running total must still reflect everything scanned before the
     // click, NOT reset back to 0 (before any new progress event arrives).
+    // No budget yet either: `state.progress` (M6's source for it) is reset
+    // to null the instant the new page starts loading, before its own first
+    // `progress` event arrives.
     await settle(PAST_SHOW_DELAY_MS)
     expect(screen.getByText(`scanned ${totalScanned} · 0 matches`)).toBeInTheDocument()
 
     const idx2 = FakeEventSource.instances.length - 1
     await emit(idx2, 'progress', { scanned: 30, matches: 0, budget: 250000 })
-    expect(screen.getByText(`scanned ${totalScanned + 30} · 0 matches`)).toBeInTheDocument()
+    expect(screen.getByText(`scanned ${totalScanned + 30} of 250000 · 0 matches`)).toBeInTheDocument()
   })
 
   it('scrolling near the bottom while the continue affordance is showing continues the gesture (preserves totals), not a silent reset', async () => {
@@ -560,7 +569,7 @@ describe('Timeline filter box', () => {
     // I2's partial-match budget stop: 1 match, cursor non-null, not
     // exhausted -> continue-scan shows instead of load-older.
     await emit(idx, 'page_end', { cursor: cur({ 0: 9 }), exhausted: false })
-    expect(screen.getByTestId('continue-scan')).toHaveTextContent('scanned 5000 records · 1 matches — continue')
+    expect(screen.getByTestId('continue-scan')).toHaveTextContent('scanned 5000 of 5000 records · 1 matches — continue')
 
     scrollToBottom()
 
