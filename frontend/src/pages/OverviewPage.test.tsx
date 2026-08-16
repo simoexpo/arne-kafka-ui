@@ -70,4 +70,34 @@ describe('OverviewView', () => {
     expect(errors).toHaveLength(2) // both overview panels show error
     expect(screen.getByText('Top topics')).toBeInTheDocument() // sibling panel intact
   })
+
+  it('renders an inline error in Top topics only when the topics query fails', async () => {
+    vi.mocked(client.getOverview).mockResolvedValue({
+      brokers: [{ id: 1, host: 'b1', port: 9092 }],
+      controller_id: null,
+      topic_count: 4,
+      partition_count: 12,
+      under_replicated_partitions: 0,
+      as_of: Date.now(),
+    })
+    vi.mocked(client.getTopics).mockRejectedValue(
+      new client.ApiError(504, 'kafka_timeout', 'fetch metadata timed out', 'prod', true),
+    )
+    renderWithQuery(<OverviewView cluster="prod" />)
+    const errors = await screen.findAllByText(/kafka_timeout/)
+    expect(errors).toHaveLength(1) // only the Top topics panel shows error
+    expect(await screen.findByText('b1:9092')).toBeInTheDocument() // Cluster/Brokers panels intact
+  })
+
+  it('renders an inline error in every panel when both queries fail', async () => {
+    vi.mocked(client.getOverview).mockRejectedValue(
+      new client.ApiError(504, 'kafka_timeout', 'fetch metadata timed out', 'prod', true),
+    )
+    vi.mocked(client.getTopics).mockRejectedValue(
+      new client.ApiError(502, 'kafka_unreachable', 'no brokers reachable', 'prod', true),
+    )
+    renderWithQuery(<OverviewView cluster="prod" />)
+    expect((await screen.findAllByText(/kafka_timeout/)).length).toBe(2) // Cluster + Brokers
+    expect(screen.getAllByText(/kafka_unreachable/)).toHaveLength(1) // Top topics
+  })
 })
