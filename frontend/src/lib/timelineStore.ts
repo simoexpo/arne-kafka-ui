@@ -638,9 +638,12 @@ export function createSlidingWindowStore(cap = 2000): SlidingWindowStore {
         // THIS page's own row offsets, nothing about the map's true
         // history), and this same window can already hold a
         // genuinely-established, independently-verified value for it from
-        // an EARLIER insert with no `clear()` in between (e.g. a live insert
-        // that already set the real edge for this side before this anchor
-        // bootstrap ran). Deferring entirely to whatever's already
+        // an EARLIER insert with no `clear()` in between (e.g. an earlier
+        // same-direction page's own rule-1 fill/cursor override — see
+        // below — already having set the real edge for this side, before
+        // this anchor bootstrap ran; NOT `insertLive`, which only ever
+        // writes `topMap`, never `bottomMap`). Deferring entirely to
+        // whatever's already
         // there — rather than trying to "merge" the estimate in via some
         // min/max rule — is the simplest rule that can only ever leave the
         // map correct: an already-present entry was necessarily planted by

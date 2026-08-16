@@ -1,5 +1,5 @@
 // Single shared stat-headline component: OverviewPage.tsx and
-// TopicDetailPage.tsx each used to define their own local `Stat` with
+// ConfigTab.tsx each used to define their own local `Stat` with
 // identical classes
 // (text-xs label / text-xl font-semibold value) — nothing enforced they'd
 // keep agreeing, just coincidence. This is a consistency guarantee only:

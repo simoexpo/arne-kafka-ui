@@ -444,8 +444,9 @@ export function DateTimePicker({
   const leadBlanks = leadingBlankCount(viewYear, viewMonth)
   const today = decompose(Date.now(), mode)
 
-  // The popover's own zone badge: the word "local" disappears everywhere —
-  // this adopts the same numeric, DST-honest `zoneSuffix` family the rest of
+  // The popover's own zone badge: scoped like the trigger's `modeLabel`
+  // above — DISPLAYED zone values never say the word "local", so this
+  // adopts the same numeric, DST-honest `zoneSuffix` family the rest of
   // the app uses. Derived from the
   // instant CURRENTLY BEING EDITED (the picked fields composed back to an
   // epoch), not "now" — browsing from an August date to a January one

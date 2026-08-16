@@ -19,7 +19,7 @@ Object.defineProperty(HTMLElement.prototype, 'offsetHeight', { configurable: tru
 
 // @tanstack/virtual-core schedules
 // some of its own scroll/rect bookkeeping via `requestAnimationFrame` on the
-// window it was constructed against (see e.g. `observeElementOffset`'s
+// window it was constructed against (see `Virtualizer.scheduleScrollReconcile`'s
 // `this.targetWindow.requestAnimationFrame(...)` call). jsdom's default rAF
 // runs on a REAL ~16ms timer — one can still be pending when a test's own
 // `cleanup()` unmounts the component (or, across test FILES, after that

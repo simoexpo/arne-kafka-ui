@@ -8,10 +8,11 @@ function pad(n: number, len = 2): string {
 // `toISOString()` for UTC (`T`/`Z` ISO shape) and
 // a differently-laid-out, word-labelled "local" string: same
 // "yyyy-mm-dd hh:mm:ss[.mmm] <ZONE>" layout in both modes — only the
-// trailing zone SUFFIX differs (see `zoneSuffix` below). This is the one
-// place per-component date math for DISPLAY is allowed to live; every
-// caller (rows, the window-range header, the picker's zone badge) goes
-// through here or `zoneSuffix` rather than re-deriving fields itself.
+// trailing zone SUFFIX differs (see `zoneSuffix` below). Every single-instant
+// display (rows, the picker's zone badge) goes through here (via
+// `formatTimestamp`) rather than re-deriving fields itself. The window-range
+// header does NOT go through here — see `formatWindowRange`'s own comment,
+// which composes `dateOnly`/`timeOnly` below for its own compact layout.
 function dateAndTime(ms: number, mode: TimeDisplayMode, millis: boolean): string {
   const d = new Date(ms)
   const y = mode === 'utc' ? d.getUTCFullYear() : d.getFullYear()
