@@ -1,4 +1,3 @@
-import { useState } from 'react'
 import type { MessageOut } from '../../api/types'
 import { formatTimestamp } from '../../lib/format'
 import { useTimeDisplayMode } from '../../lib/timeDisplayMode'
@@ -9,29 +8,25 @@ export function MessageRow({
   message,
   tsInverted = false,
   isJumpTarget = false,
-  onExpandChange,
+  expanded,
+  onToggle,
 }: {
   message: MessageOut
   tsInverted?: boolean
   isJumpTarget?: boolean
-  // Design spec v1.7 "Inspection pause": Timeline counts open inspections
-  // across the whole list to gate live-tail routing — this is how it hears
-  // about THIS row's own open/close. Deliberately called from the plain
-  // click handler, not from inside a `setOpen` updater function: React 18
-  // StrictMode double-invokes a functional state updater to surface
-  // impurity, so a side effect placed inside one (as opposed to computing
-  // the next value first, then calling both setOpen and this) would fire
-  // twice per click in development — exactly the ref-during-render/
-  // mount-guard fragility class this codebase's StrictMode audit exists to
-  // catch.
-  onExpandChange?: (open: boolean) => void
+  // Fix: expansion state survives virtualization, owned by identity — this
+  // used to be local `useState`, which a virtualized row scrolled out of the
+  // renderer's overscan (routine, not exotic) loses on unmount: the row
+  // silently un-expanded, and the count Timeline kept of open inspections
+  // leaked by one forever (recoverable only via an unrelated explicit pill/
+  // toggle click, with no visible reason why). MessageRow is now a fully
+  // CONTROLLED component — Timeline (via MessageList) owns the actual
+  // expanded/collapsed truth, keyed by (partition, offset) identity, so a
+  // remounted row simply re-derives the same answer from that owner instead
+  // of starting over.
+  expanded: boolean
+  onToggle: () => void
 }) {
-  const [open, setOpen] = useState(false)
-  const toggleOpen = () => {
-    const next = !open
-    setOpen(next)
-    onExpandChange?.(next)
-  }
   const timeDisplayMode = useTimeDisplayMode()
   const ts = message.timestamp_ms === null ? '—' : formatTimestamp(message.timestamp_ms, timeDisplayMode)
   const preview = message.value === null ? '∅ null' : message.value.text.replaceAll('\n', ' ')
@@ -39,7 +34,7 @@ export function MessageRow({
   return (
     <div
       data-testid="message-row"
-      onClick={toggleOpen}
+      onClick={onToggle}
       className={`cursor-pointer border-b border-zinc-100 px-2 py-1.5 font-mono text-sm dark:border-zinc-800 ${
         isJumpTarget
           ? 'bg-emerald-50 hover:bg-emerald-100 dark:bg-emerald-950/40 dark:hover:bg-emerald-950/60'
@@ -80,7 +75,7 @@ export function MessageRow({
         </span>
         {message.value && <EncodingBadge encoding={message.value.encoding} />}
       </div>
-      {open && (
+      {expanded && (
         <div className="mt-2 grid grid-cols-1 gap-3 md:grid-cols-2" onClick={(e) => e.stopPropagation()}>
           <div>
             <div className="mb-1 text-zinc-500">key</div>

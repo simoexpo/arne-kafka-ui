@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { render, screen } from '@testing-library/react'
+import { fireEvent, render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MessageList, type MessageListHandle } from './MessageList'
 import type { MessageOut } from '../../api/types'
@@ -67,42 +67,73 @@ describe('MessageList', () => {
     render(<MessageList messages={rows} jumpTarget={null} />)
     expect(screen.queryAllByTestId('jump-target')).toHaveLength(0)
   })
-  // Design spec v1.7 "Inspection pause": passed straight through to every
-  // row (Timeline only needs a raw open/close count, never which row) — see
-  // MessageRow's own onExpandChange doc comment for why it's called from the
-  // plain click handler rather than from inside a state updater.
-  it('threads onExpandChange straight through to every row', async () => {
+  // Fix: expansion state survives virtualization, owned by identity —
+  // MessageList threads `onToggleExpand` with each row's OWN (partition,
+  // offset) identity (never a bare open/close bool: Timeline needs to know
+  // WHICH row), and reflects `expandedKeys` back as each row's `expanded`
+  // prop — see MessageRow's own doc comment on why it's a controlled
+  // component now.
+  it('threads onToggleExpand with each row\'s own identity, and reflects expandedKeys back as `expanded`', async () => {
     const user = userEvent.setup()
-    const onExpandChange = vi.fn()
+    const onToggleExpand = vi.fn()
     const rows = [msg({ partition: 0, offset: 1 }), msg({ partition: 0, offset: 2 })]
-    render(<MessageList messages={rows} onExpandChange={onExpandChange} />)
+    render(<MessageList messages={rows} onToggleExpand={onToggleExpand} expandedKeys={new Set(['0-2'])} />)
+
+    // Row at offset 2 is in `expandedKeys` — renders expanded with no click.
+    expect(screen.getByText('no headers')).toBeInTheDocument()
 
     await user.click(screen.getAllByTestId('message-row')[0])
-    expect(onExpandChange).toHaveBeenCalledWith(true)
+    expect(onToggleExpand).toHaveBeenCalledWith(0, 1)
 
     await user.click(screen.getAllByTestId('message-row')[1])
-    expect(onExpandChange).toHaveBeenCalledWith(true)
-    expect(onExpandChange).toHaveBeenCalledTimes(2)
+    expect(onToggleExpand).toHaveBeenCalledWith(0, 2)
+    expect(onToggleExpand).toHaveBeenCalledTimes(2)
   })
 
-  it('a prepended forward page does not reset an already-open row (row identity survives an index shift)', async () => {
-    const user = userEvent.setup()
+  it('a prepended forward page keeps a row expanded via expandedKeys (identity-based), regardless of the index shift', () => {
     const rowA = msg({ partition: 0, offset: 5 })
     const rowB = msg({
       partition: 0,
       offset: 3,
       headers: [{ key: 'trace-id', value: 'abc' }],
     })
-    const { rerender } = render(<MessageList messages={[rowA, rowB]} />)
-    // Open rowB (currently at index 1) — its expanded headers become visible.
-    await user.click(screen.getAllByTestId('message-row')[1])
+    const expandedKeys = new Set(['0-3']) // rowB's identity
+    const { rerender } = render(<MessageList messages={[rowA, rowB]} expandedKeys={expandedKeys} />)
     expect(screen.getByText('trace-id')).toBeInTheDocument()
 
     // A forward page prepends a newer row — rowB shifts from index 1 to
-    // index 2, same (partition, offset) identity throughout.
+    // index 2, same (partition, offset) identity, same (unchanged)
+    // `expandedKeys` — Timeline never has a reason to touch it on its own.
     const rowC = msg({ partition: 0, offset: 10 })
-    rerender(<MessageList messages={[rowC, rowA, rowB]} />)
+    rerender(<MessageList messages={[rowC, rowA, rowB]} expandedKeys={expandedKeys} />)
     expect(screen.getByText('trace-id')).toBeInTheDocument()
+  })
+
+  // The actual bug this fix addresses: a virtualized row scrolled far enough
+  // away that its DOM unmounts (routine — the virtualizer only renders a
+  // window around the viewport, see `overscan` above), then scrolled back
+  // into view. With the OLD local-`useState` MessageRow this came back
+  // collapsed (state lost on unmount); `expanded` is now derived fresh from
+  // the externally-owned `expandedKeys` prop on every render, remount or
+  // not, so there is nothing to lose.
+  it('a row scrolled out of the virtualizer\'s rendered range and back stays expanded', () => {
+    const rows = Array.from({ length: 200 }, (_, i) =>
+      msg({ partition: 0, offset: i, headers: [{ key: 'k', value: String(i) }] }),
+    )
+    render(<MessageList messages={rows} expandedKeys={new Set(['0-5'])} />)
+    expect(screen.getByText('p0·5')).toBeInTheDocument()
+    expect(screen.getByText('k')).toBeInTheDocument() // header key visible -> expanded
+
+    const scroller = screen.getByTestId('timeline-scroll')
+    // Far enough down that row 5 (near the top) is well outside the
+    // virtualizer's rendered range (estimateSize 40px * 200 rows = 8000px;
+    // overscan is only 10 rows either side of the viewport).
+    fireEvent.scroll(scroller, { target: { scrollTop: 7000 } })
+    expect(screen.queryByText('p0·5')).not.toBeInTheDocument() // unmounted
+
+    fireEvent.scroll(scroller, { target: { scrollTop: 0 } })
+    expect(screen.getByText('p0·5')).toBeInTheDocument()
+    expect(screen.getByText('k')).toBeInTheDocument() // still expanded, no re-click
   })
 
   // Owner-reported regression (2026-08-16): expanding a row and then

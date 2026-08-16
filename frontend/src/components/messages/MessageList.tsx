@@ -3,6 +3,18 @@ import { useVirtualizer } from '@tanstack/react-virtual'
 import type { MessageOut } from '../../api/types'
 import { MessageRow } from './MessageRow'
 
+// (partition, offset) is a unique row identity — the store dedupes on it
+// (timelineStore.ts's `seen` set), the virtualizer's measurement cache keys
+// on it (`getItemKey` below), and expansion ownership (Timeline's
+// `expandedKeysRef`) keys on it too. One helper, used everywhere that
+// identity is needed, so the three never drift out of the same format.
+function rowKey(partition: number, offset: number): string {
+  return `${partition}-${offset}`
+}
+
+const NO_EXPANDED_KEYS: ReadonlySet<string> = new Set()
+const noopToggleExpand = () => {}
+
 export interface MessageListHandle {
   // Jumps reposition the viewport, not just the data: 'now' lands looking
   // at the top of the new window; 'beginning'/'offset'/'timestamp' land at
@@ -57,14 +69,19 @@ export const MessageList = forwardRef<
     // window's own jump, never a stale one from a window already left.
     // `null`/`undefined` (no jump, or a non-offset jump) marks nothing.
     jumpTarget?: { partition: number; offset: number } | null
-    // Design spec v1.7 "Inspection pause": passed straight through to every
-    // row, unwrapped — Timeline only ever needs a raw open/close count, never
-    // which row (message-row identity keying, see `getItemKey` below,
-    // already keeps each row's own `open` state correct across prepends/
-    // trims on its own).
-    onExpandChange?: (open: boolean) => void
+    // Fix: expansion state survives virtualization, owned by identity —
+    // Timeline is the single owner of which (partition, offset) identities
+    // are expanded; MessageList only reflects `expandedKeys` back onto each
+    // row's `expanded` prop and reports clicks with that row's own identity
+    // (never a bare open/close bool — Timeline needs to know WHICH row).
+    // See MessageRow's own doc comment for why it's a controlled component.
+    expandedKeys?: ReadonlySet<string>
+    onToggleExpand?: (partition: number, offset: number) => void
   }
->(function MessageList({ messages, onScroll, jumpTarget, onExpandChange }, ref) {
+>(function MessageList(
+  { messages, onScroll, jumpTarget, expandedKeys = NO_EXPANDED_KEYS, onToggleExpand = noopToggleExpand },
+  ref,
+) {
   const parentRef = useRef<HTMLDivElement>(null)
   const virtualizer = useVirtualizer({
     count: messages.length,
@@ -85,7 +102,7 @@ export const MessageList = forwardRef<
     // (partition, offset) is the same identity the React key below and the
     // store's own dedupe use, so a measurement now travels with its message
     // exactly as its expanded/collapsed state already does.
-    getItemKey: (index) => `${messages[index].partition}-${messages[index].offset}`,
+    getItemKey: (index) => rowKey(messages[index].partition, messages[index].offset),
   })
   useImperativeHandle(
     ref,
@@ -145,6 +162,7 @@ export const MessageList = forwardRef<
             m.timestamp_ms > prev.timestamp_ms
           const isJumpTarget =
             jumpTarget != null && m.partition === jumpTarget.partition && m.offset === jumpTarget.offset
+          const key = rowKey(m.partition, m.offset)
           return (
             <div
               // (partition, offset) is a unique row identity — the store
@@ -153,15 +171,21 @@ export const MessageList = forwardRef<
               // shifts for every existing row whenever a forward page
               // prepends. Keying on the volatile index used to force a full
               // remount (and re-measurement) of every row on every prepend
-              // and every live insert, silently resetting each row's own
-              // `open` state and re-triggering ResizeObserver for rows that
-              // never actually moved.
-              key={`${m.partition}-${m.offset}`}
+              // and every live insert, and (now that expansion is owned by
+              // Timeline rather than local state) would also have re-fired
+              // ResizeObserver for rows that never actually moved.
+              key={key}
               ref={typeof ResizeObserver !== 'undefined' ? virtualizer.measureElement : undefined}
               data-index={item.index}
               style={{ position: 'absolute', top: 0, left: 0, width: '100%', transform: `translateY(${item.start}px)` }}
             >
-              <MessageRow message={m} tsInverted={tsInverted} isJumpTarget={isJumpTarget} onExpandChange={onExpandChange} />
+              <MessageRow
+                message={m}
+                tsInverted={tsInverted}
+                isJumpTarget={isJumpTarget}
+                expanded={expandedKeys.has(key)}
+                onToggle={() => onToggleExpand(m.partition, m.offset)}
+              />
             </div>
           )
         })}

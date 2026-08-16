@@ -812,6 +812,162 @@ describe('Timeline', () => {
       expect(screen.getByText('▲ 1 new')).toBeInTheDocument()
       expect(screen.queryByText('p0·9')).not.toBeInTheDocument()
     })
+
+    // Fix (follow-up round on ada2ad1): MessageRow's expansion used to be
+    // local `useState`, which a virtualized row unmounting (scrolled far
+    // enough away — routine, not exotic) silently loses. Expansion is now
+    // owned by Timeline's `expandedKeysRef`, keyed by (partition, offset)
+    // identity, so a remounted row simply re-derives the same answer.
+    describe('expansion survives virtualization (identity-owned, not local component state)', () => {
+      async function loadManyRows(count: number) {
+        for (let i = count; i >= 1; i--) await emit(0, 'match', mk(i))
+        await emit(0, 'page_end', { cursor: null, exhausted: true })
+      }
+
+      it('an expanded row scrolled far away and back into view stays expanded', async () => {
+        mockTail()
+        const user = userEvent.setup()
+        render(<Timeline cluster="prod" topic="orders" />)
+        await loadManyRows(60) // newest-first: p0·60 (top) .. p0·1 (bottom)
+
+        await user.click(screen.getByText('p0·60')) // expand the topmost row
+        expect(screen.getByText('no headers')).toBeInTheDocument()
+
+        // Scroll far down: p0·60 scrolls out of the virtualizer's rendered
+        // range entirely (its DOM unmounts).
+        const restoreA = [stubScrollHeight(60 * 40), stubClientHeight(600)]
+        fireEvent.scroll(screen.getByTestId('timeline-scroll'), { target: { scrollTop: 60 * 40 - 600 } })
+        restoreA.forEach((r) => r())
+        expect(screen.queryByText('p0·60')).not.toBeInTheDocument() // unmounted
+
+        // Scroll back to the top — the row remounts. With the OLD local-
+        // state design this would come back collapsed; expansion owned by
+        // identity survives with no re-click.
+        const restoreB = [stubScrollHeight(60 * 40), stubClientHeight(600)]
+        fireEvent.scroll(screen.getByTestId('timeline-scroll'), { target: { scrollTop: 0 } })
+        restoreB.forEach((r) => r())
+        expect(screen.getByText('p0·60')).toBeInTheDocument()
+        expect(screen.getByText('no headers')).toBeInTheDocument()
+      })
+
+      it('scrolling an expanded row out of view and back does not change the inspection count (no leak on remount)', async () => {
+        const tail = mockTail()
+        const user = userEvent.setup()
+        render(<Timeline cluster="prod" topic="orders" />)
+        await loadManyRows(60)
+
+        await user.click(screen.getByText('p0·60')) // expand the topmost row
+
+        // Scroll away and back — the row's DOM unmounts and remounts.
+        const restoreA = [stubScrollHeight(60 * 40), stubClientHeight(600)]
+        fireEvent.scroll(screen.getByTestId('timeline-scroll'), { target: { scrollTop: 60 * 40 - 600 } })
+        restoreA.forEach((r) => r())
+        const restoreB = [stubScrollHeight(60 * 40), stubClientHeight(600)]
+        fireEvent.scroll(screen.getByTestId('timeline-scroll'), { target: { scrollTop: 0 } })
+        restoreB.forEach((r) => r())
+
+        // A live message still buffers (still inspecting) — the count is
+        // genuinely 1, not leaked to 2+ by the remount.
+        await act(async () => tail.handlers().onMessage(mk(9999)))
+        expect(screen.getByText('▲ 1 new')).toBeInTheDocument()
+
+        // Collapsing the SAME (only) inspection while pinned at top resumes
+        // immediately — a leaked/stuck count from the remount would never
+        // reach zero here, and the pill would stay stuck forever.
+        await user.click(screen.getByText('p0·60'))
+        expect(screen.queryByTestId('live-pill')).not.toBeInTheDocument()
+      })
+
+      it('a top-eviction (loadOlder overflow) prunes the expanded row\'s key — it genuinely detaches, per existing rules, rather than leaving a leaked count', async () => {
+        const user = userEvent.setup()
+        render(<Timeline cluster="prod" topic="orders" windowCap={3} />)
+        await emit(0, 'match', mk(3))
+        await emit(0, 'match', mk(2))
+        await emit(0, 'match', mk(1))
+        await emit(0, 'page_end', { cursor: cur({ 0: 1 }), exhausted: false })
+        // Loaded, newest-first: p0·3 (top), p0·2, p0·1 (bottom) — exactly at cap(3).
+
+        await user.click(screen.getByText('p0·3')) // expand the TOP (newest) row
+        expect(screen.getByText('no headers')).toBeInTheDocument()
+
+        // Scroll to the bottom to trigger loadOlder — a 'back' page appends
+        // an older row; over cap(3), this trims exactly one row off the TOP:
+        // p0·3, the expanded one. A top trim always detaches the window
+        // (existing v1.3 rule, unrelated to inspection) — pinned-top-resume
+        // is not reachable from here in the same gesture, so this test only
+        // proves the key was pruned (the row is gone from `rows()`), not a
+        // resume.
+        scrollToBottom()
+        const idx = FakeEventSource.instances.length - 1
+        await emit(idx, 'match', mk(0))
+        await emit(idx, 'page_end', { cursor: cur({ 0: 0 }), exhausted: false })
+        expect(screen.queryByText('p0·3')).not.toBeInTheDocument() // evicted — pruned, not just off-screen
+      })
+
+      it('a forward-page trim of an expanded bottom row (evicted while genuinely pinned at top, no detach) prunes and resumes immediately', async () => {
+        const tail = mockTail()
+        render(<Timeline cluster="prod" topic="orders" windowCap={3} />)
+
+        // Jump to beginning: opens a forward-direction window (a historical,
+        // detached window whose TOP edge has a real forward cursor).
+        fireEvent.click(screen.getByTestId('jump-beginning'))
+        const beginIdx = FakeEventSource.instances.length - 1
+        await emit(beginIdx, 'match', mk(3))
+        await emit(beginIdx, 'match', mk(2))
+        await emit(beginIdx, 'match', mk(1))
+        await emit(beginIdx, 'page_end', { cursor: cur({ 0: 4 }), exhausted: false })
+        // Loaded, newest-first: p0·3 (top), p0·2, p0·1 (bottom = jump target) — at cap(3).
+        consumeLandingEcho() // close out the jump's own landing-settle cascade first
+
+        await userEvent.click(screen.getByText('p0·1')) // expand the BOTTOM (oldest) row
+
+        // Scroll to a pinned top: with an open forward cursor, this triggers
+        // loadNewer — a 'forward' page trims from the BOTTOM on overflow,
+        // which is exactly the expanded row, WHILE genuinely pinned at top.
+        // scrollHeight/clientHeight stubbed far apart (mirrors
+        // scrollToTopFarFromBottom) so the bottom sentinel doesn't ALSO fire
+        // in the same event and confuse which request is which.
+        const restoreScrollHeight = stubScrollHeight(2000)
+        const restoreClientHeight = stubClientHeight(600)
+        try {
+          fireEvent.scroll(screen.getByTestId('timeline-scroll'), { target: { scrollTop: 0 } })
+        } finally {
+          restoreScrollHeight()
+          restoreClientHeight()
+        }
+        const idx = FakeEventSource.instances.length - 1
+        await emit(idx, 'match', mk(4))
+        // Reports the tail reached (exhausted:true) — this page BOTH trims
+        // the expanded bottom row AND re-attaches the window in the same
+        // commit (the only way a forward-direction trim's own pinned-top
+        // moment ever coincides with attached — see this test block's own
+        // structural note below). Re-attachment's existing 'reattached'
+        // pauseMachine event resumes `pauseReason` unconditionally (unless
+        // explicitly paused) — what THIS fix is responsible for, and what
+        // this assertion actually isolates, is that pruning cleared
+        // `inspectingRef` in the SAME commit: without it, the live message
+        // below would still buffer (routing's `!inspecting` clause would
+        // fail) even after `pauseReason` correctly resumed to 'none'.
+        await emit(idx, 'page_end', { cursor: null, exhausted: true })
+        expect(screen.queryByText('p0·1')).not.toBeInTheDocument() // evicted
+
+        await act(async () => tail.handlers().onMessage(mk(99)))
+        expect(screen.getByText('p0·99')).toBeInTheDocument()
+        expect(screen.queryByTestId('live-pill')).not.toBeInTheDocument()
+      })
+
+      // Structural note: a page-based trim of an expanded row is either a
+      // TOP trim (loadOlder, which always detaches — see the sibling test
+      // above) or a BOTTOM trim (loadNewer), which can only ever fire while
+      // ALREADY detached (a forward cursor only exists while detached) — so
+      // the "resume while pinned top" branch inside `noteOutcome`'s pruning
+      // can only become externally observable together with a reattach, as
+      // exercised above. It still exists as its own code path (mirroring
+      // handleToggleExpand's identical check) for the one case that reaches
+      // it on its own: closing the LAST inspection by hand (covered by the
+      // pre-existing "collapse last while pinned ⇒ resumes" test elsewhere
+      // in this describe block).
+    })
   })
 
   describe('scroll-triggered pagination', () => {

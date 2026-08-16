@@ -243,18 +243,22 @@ export function Timeline({
   const pauseReasonRef = useRef<PauseReason>('none')
   const liveBufferRef = useRef(createLiveBuffer(BUFFER_CAP))
 
-  // Inspection pause (design spec v1.7): count of currently-expanded rows,
-  // independent of WHICH rows — message-row identity keying (MessageList's
-  // own `getItemKey` comment) already keeps each row's own `open` state
-  // correct across prepends/trims on its own, so Timeline only ever needs a
-  // running total. A ref (not state), paired with `bump()` like
-  // `pauseReasonRef` above: the tail routing (useLiveTail's `inspectingRef`
-  // dep) reads it from inside a mount-once effect, which needs the CURRENT
-  // value at message-arrival time, not whatever it was at mount.
-  const inspectionCountRef = useRef(0)
-  // Derived boolean companion (inspectionCountRef.current > 0), kept in sync
-  // wherever the count changes: useLiveTail's `UseLiveTailDeps` wants a
-  // ready-made boolean ref, not a number one it would have to compare itself.
+  // Inspection pause (design spec v1.7) + expansion identity ownership (fix:
+  // expansion state survives virtualization, owned by identity): Timeline is
+  // the single owner of which (partition, offset) identities are currently
+  // expanded — MessageRow is a controlled component with no local state of
+  // its own to lose when a virtualized row unmounts (scrolled out of the
+  // renderer's overscan, routine, not exotic — see MessageRow's own doc
+  // comment for the bug this replaced). A ref (not state), paired with
+  // `bump()` like `pauseReasonRef` above: the tail routing (useLiveTail's
+  // `inspectingRef` dep) reads it from inside a mount-once effect, which
+  // needs the CURRENT value at message-arrival time, not whatever it was at
+  // mount. Keys are the same "partition-offset" format MessageList's own
+  // `rowKey` helper and the store's dedupe use.
+  const expandedKeysRef = useRef<Set<string>>(new Set())
+  // Derived boolean companion (expandedKeysRef.current.size > 0), kept in
+  // sync wherever the set changes: useLiveTail's `UseLiveTailDeps` wants a
+  // ready-made boolean ref, not a set one it would have to inspect itself.
   const inspectingRef = useRef(false)
   // Whether the viewport is CURRENTLY pinned at top, as of the last scroll
   // classification (handleScroll below) — closing the last inspection is a
@@ -280,6 +284,24 @@ export function Timeline({
   // the window includes the tail, and a top trim just made that false. Both
   // trim kinds also update the "since a fresh page landed" tracking used to
   // override a stale exhausted flag (see the refs' own comment above).
+  // Fix: expansion state survives virtualization, owned by identity — a row
+  // trimmed OFF the window entirely (not merely scrolled out of the
+  // virtualizer's rendered range) is gone from `rows()` for good, so its key
+  // must be dropped from `expandedKeysRef` too: left in place, it would
+  // count against `inspecting` forever with nothing able to ever close it
+  // (the row's own `onToggle` can no longer fire — it doesn't exist).
+  // `InsertOutcome` only reports trim COUNTS, never row identities, so the
+  // store's own current `rows()` is the simplest source of truth for "is
+  // this key still here". Pruning to empty while pinned at top follows the
+  // exact same resume rule as the last inspection closing by an explicit
+  // click (`handleToggleExpand` below) — mirrors auto-pause via
+  // pauseMachine's 'lastInspectionClosed'. `noteOutcome` calls itself
+  // (rather than going through the memoized `flushBuffer`) to sidestep a
+  // real circular dependency: `flushBuffer` already depends on
+  // `noteOutcome`, so `noteOutcome` depending on `flushBuffer` in turn would
+  // make neither declarable before the other. A self-call is safe here — by
+  // the time this body actually RUNS (never at the `useCallback` line
+  // itself), `noteOutcome` is already fully bound in this render's closure.
   const noteOutcome = useCallback(
     (outcome: InsertOutcome) => {
       if (outcome.trimmedTop > 0) {
@@ -287,6 +309,25 @@ export function Timeline({
         if (attachedRef.current) setAttached(false)
       }
       if (outcome.trimmedBottom > 0) bottomTrimmedSinceRef.current = true
+
+      if ((outcome.trimmedTop > 0 || outcome.trimmedBottom > 0) && expandedKeysRef.current.size > 0) {
+        const liveKeys = new Set(storeRef.current.rows().map((r) => `${r.partition}-${r.offset}`))
+        for (const key of expandedKeysRef.current) {
+          if (!liveKeys.has(key)) expandedKeysRef.current.delete(key)
+        }
+        inspectingRef.current = expandedKeysRef.current.size > 0
+        if (expandedKeysRef.current.size === 0 && pinnedTopRef.current) {
+          const decision = nextPause(
+            { pauseReason: pauseReasonRef.current, attached: attachedRef.current, inspecting: false },
+            'lastInspectionClosed',
+          )
+          if (decision.flush) {
+            const drained = liveBufferRef.current.drain()
+            if (drained.length > 0) noteOutcome(storeRef.current.insertLive(drained))
+          }
+          pauseReasonRef.current = decision.pause
+        }
+      }
     },
     [setAttached],
   )
@@ -298,35 +339,35 @@ export function Timeline({
     }
   }, [noteOutcome])
 
-  // Inspection pause (design spec v1.7): MessageList reports every row's own
-  // open/close through this one callback — Timeline only ever needs a raw
-  // count (see inspectionCountRef's own comment), never which row. Closing
-  // the LAST open inspection while pinned at top resumes live automatically,
-  // mirroring auto-pause's own top-pin resume rule — the decision itself
-  // lives in pauseMachine ('lastInspectionClosed'); every other transition
-  // (opening any row, closing one that isn't the last, or closing the last
-  // while NOT pinned at top — "auto rules take over") just updates the count.
-  const handleExpandChange = useCallback(
-    (open: boolean) => {
-      const next = inspectionCountRef.current + (open ? 1 : -1)
-      inspectionCountRef.current = next
-      inspectingRef.current = next > 0
-      if (open || next > 0 || !pinnedTopRef.current) return
+  // Fix: expansion state survives virtualization, owned by identity —
+  // MessageList reports every row's own click through this one callback,
+  // identified by (partition, offset) (never a bare open/close bool:
+  // Timeline needs to know WHICH row, both to toggle its OWN membership in
+  // `expandedKeysRef` and — via `noteOutcome` above — to prune it later if
+  // it's ever trimmed off the window). Closing the LAST open inspection
+  // while pinned at top resumes live automatically, mirroring auto-pause's
+  // own top-pin resume rule — the decision itself lives in pauseMachine
+  // ('lastInspectionClosed'); every other transition (opening any row,
+  // closing one that isn't the last, or closing the last while NOT pinned
+  // at top — "auto rules take over") just updates the set.
+  const handleToggleExpand = useCallback(
+    (partition: number, offset: number) => {
+      const key = `${partition}-${offset}`
+      const keys = expandedKeysRef.current
+      if (keys.has(key)) keys.delete(key)
+      else keys.add(key)
+      inspectingRef.current = keys.size > 0
+      if (keys.size > 0 || !pinnedTopRef.current) {
+        bump()
+        return
+      }
       const decision = nextPause(
         { pauseReason: pauseReasonRef.current, attached: attachedRef.current, inspecting: false },
         'lastInspectionClosed',
       )
-      // Unlike the scrollPinnedTop branch elsewhere in this file, `flush` can
-      // be true here even when `pause` itself doesn't change (pauseReason
-      // stayed 'none' throughout — buffering was driven purely by
-      // `inspecting`, see useLiveTail's routing) — so flush and the pause
-      // reassignment are each gated on their own condition, not bundled
-      // behind one "did pause change" check.
       if (decision.flush) flushBuffer()
-      if (decision.pause !== pauseReasonRef.current || decision.flush) {
-        pauseReasonRef.current = decision.pause
-        bump()
-      }
+      pauseReasonRef.current = decision.pause
+      bump()
     },
     [flushBuffer],
   )
@@ -885,8 +926,9 @@ export function Timeline({
     }
     const { pinnedTop, nearBottom } = classifyScroll({ scrollTop, scrollHeight, clientHeight })
     // Inspection pause (design spec v1.7): closing the LAST inspection is a
-    // click, not a scroll event — handleExpandChange consults this to know
-    // whether the viewport happens to be pinned at top right now.
+    // click, not a scroll event — handleToggleExpand (and noteOutcome's own
+    // eviction pruning) consult this to know whether the viewport happens to
+    // be pinned at top right now.
     pinnedTopRef.current = pinnedTop
     if (pinnedTop) {
       const decision = nextPause(
@@ -1015,7 +1057,8 @@ export function Timeline({
           messages={rows}
           onScroll={handleScroll}
           jumpTarget={jumpTarget}
-          onExpandChange={handleExpandChange}
+          expandedKeys={expandedKeysRef.current}
+          onToggleExpand={handleToggleExpand}
         />
       </Panel>
       {continueDirection === 'back' ? (
