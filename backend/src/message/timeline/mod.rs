@@ -23,11 +23,13 @@
 //! them, and emits `TimelineEvent`s over an mpsc channel — the SSE handler
 //! just maps those to wire events.
 //!
-//! The contract these modules implement is in the design spec
-//! (`docs/superpowers/specs/2026-08-09-betrachtung-kafka-ui-design.md`); the
-//! reasoning that produced this shape is in
-//! `docs/superpowers/plans/2026-08-13-messages-timeline.md` and its
-//! `-followups` companion.
+//! The contract these modules implement is
+//! `docs/superpowers/specs/2026-08-13-messages-timeline-design.md` — every
+//! "spec v1.x" reference below points into it, by the version-tagged
+//! section that settled that rule. How the implementation arrived at this
+//! shape is in `docs/superpowers/plans/2026-08-13-messages-timeline.md` and
+//! its `-followups` companion; that history deliberately does not live in
+//! these files.
 
 mod anchor;
 mod cursor;
