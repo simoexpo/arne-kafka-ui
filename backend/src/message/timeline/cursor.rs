@@ -31,37 +31,35 @@ impl Default for Direction {
 /// base64 of the compact JSON `{"positions":[[partition,offset],...]
 /// ,"direction":"back"|"forward"}` — `positions` is an array of 2-element
 /// `[i32, i64]` pairs, one per partition, in no particular guaranteed
-/// order; `direction` is OPTIONAL (see below — omitting it decodes fine).
-/// This is deliberately client-constructible: the sliding-window frontend
-/// mints its own cursors from row offsets it already tracks (rather than
-/// only ever replaying a cursor the backend handed back), so the format is
-/// a contract, not an implementation detail — see `tests/api.rs`'s
+/// order; `direction` is OPTIONAL (omitting it decodes fine, see below).
+/// The format is deliberately client-constructible, and therefore a
+/// contract rather than an implementation detail: the sliding-window
+/// frontend mints its own cursors from row offsets it already tracks
+/// instead of only ever replaying one the backend handed back. `tests/api.rs`'s
 /// `timeline_accepts_a_client_constructed_cursor` and
-/// `timeline_accepts_a_client_cursor_without_direction_field` for cursors
-/// built without this Rust type at all.
+/// `timeline_accepts_a_client_cursor_without_direction_field` exercise
+/// cursors built without this Rust type at all.
 ///
-/// **`direction` is informational only, and optional in the wire format**
-/// (`#[serde(default)]` — a missing field decodes as `Direction::default()`,
-/// an arbitrary placeholder, never a decode error). It records which
-/// direction the cursor was minted in (useful for debugging/logging), but
-/// the backend never enforces it against a request: the REQUEST's own
-/// `direction` query param is authoritative for how `positions` are read
-/// (see `api::messages::timeline_sse`, where the decoded `direction` field
-/// is intentionally unused). Per the design's bound-semantics ruling, this
-/// is exact, not a loose convention: a `Back` request treats `positions` as
-/// exclusive uppers; a `Forward` request treats the identical numbers as
-/// inclusive lowers (see `Direction`'s doc comment, and `page_windows`,
-/// whose arithmetic is where this is actually implemented) — so following a
-/// back-minted cursor with `direction=forward` is a well-defined re-read of
-/// the region just below that cursor, not a version mismatch. Making the
-/// field optional matches this: a client-constructed cursor built purely
-/// from `positions` (the only part that ever matters) must not be forced to
-/// invent a meaningless `direction` just to satisfy the codec.
+/// **`direction` is informational only.** It records which direction the
+/// cursor was minted in (useful for debugging/logging); the backend never
+/// enforces it against a request. The REQUEST's own `direction` query param
+/// decides how `positions` are read (`api::messages::timeline_sse` leaves
+/// the decoded field unused on purpose). That reading is exact, not a loose
+/// convention: a `Back` request treats every position as an exclusive upper
+/// bound, a `Forward` request treats the identical numbers as inclusive
+/// lower bounds (see `Direction`, and `page_windows` for the arithmetic
+/// that implements it) — so following a back-minted cursor with
+/// `direction=forward` is a well-defined re-read of the region just below
+/// it, not a version mismatch. The field being optional follows from that:
+/// `#[serde(default)]` makes a missing key decode as `Direction::default()`
+/// (an arbitrary placeholder) rather than an error, so a client cursor
+/// built purely from `positions` — the only part that ever matters — need
+/// not invent a meaningless `direction` to satisfy the codec.
 ///
-/// Every decoded cursor is treated as untrusted input regardless of origin:
-/// positions are clamped into each partition's *current* watermark range
-/// before use (`clamp_positions`), and any partition id absent from today's
-/// watermarks is dropped.
+/// Every decoded cursor is untrusted input regardless of origin: positions
+/// are clamped into each partition's *current* watermark range before use,
+/// and any partition id absent from today's watermarks is dropped (see
+/// `clamp_positions`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Cursor {
     #[serde(default)]
@@ -97,10 +95,10 @@ mod tests {
         assert!(Cursor::decode("garbage!").is_err());
     }
 
-    /// M1 fix: `direction` is optional in the wire format
-    /// (`#[serde(default)]`) — a client-constructed cursor built purely
-    /// from `positions`, with no `direction` key at all, must decode
-    /// cleanly rather than 400 on a missing required field.
+    /// Pins the optional `direction` half of the wire contract: a
+    /// client-constructed cursor built purely from `positions`, with no
+    /// `direction` key at all, decodes cleanly (to `Direction::default()`)
+    /// instead of failing on a missing required field.
     #[test]
     fn cursor_decodes_without_direction_field() {
         let json = r#"{"positions":[[0,5],[1,3]]}"#;
