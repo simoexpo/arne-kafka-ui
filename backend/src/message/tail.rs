@@ -163,7 +163,7 @@ pub async fn run(
         let topic = topic.clone();
         tokio::task::spawn_blocking(move || fetch::watermarks_blocking(&handle, &topic))
             .await
-            .map_err(|e| ApiError::internal(format!("task join: {e}")))??
+            .map_err(ApiError::task_join)??
     };
 
     let (tx, rx) = mpsc::channel::<TailEvent>(256);

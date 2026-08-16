@@ -230,7 +230,7 @@ pub async fn timeline_sse(
                 }
             };
             Ok((positions, wm))
-        }).await.map_err(|e| ApiError::internal(format!("task join: {e}")))?
+        }).await.map_err(ApiError::task_join)?
     };
 
     // Both branches below feed the SAME `mpsc::Receiver<TimelineEvent>` ->

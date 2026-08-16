@@ -46,6 +46,12 @@ impl ApiError {
         Self { status: StatusCode::INTERNAL_SERVER_ERROR, code: "internal",
                message: message.into(), cluster: None, retriable: false }
     }
+    /// A `spawn_blocking`/`JoinHandle` failed to join (the blocking task
+    /// panicked or was cancelled) — never a Kafka-side failure, so this is
+    /// always `internal`, not `kafka`.
+    pub fn task_join(e: tokio::task::JoinError) -> Self {
+        Self::internal(format!("task join: {e}"))
+    }
 }
 
 pub fn from_kafka(cluster: &str, what: &str, err: &KafkaError) -> ApiError {

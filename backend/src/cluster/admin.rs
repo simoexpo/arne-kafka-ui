@@ -81,7 +81,7 @@ pub async fn list_topics(handle: Arc<ClusterHandle>) -> Result<TopicList, ApiErr
         Ok(TopicList { topics, as_of: now_ms() })
     })
     .await
-    .map_err(|e| ApiError::internal(format!("task join: {e}")))?
+    .map_err(ApiError::task_join)?
 }
 
 #[derive(Debug, Serialize)]
@@ -157,7 +157,7 @@ pub async fn topic_detail(handle: Arc<ClusterHandle>, topic: String) -> Result<T
 
     let (configs, partitions) = tokio::join!(configs_fut, partitions_fut);
     // partition errors (incl. topic_not_found) take precedence over config errors
-    let partitions = partitions.map_err(|e| ApiError::internal(format!("task join: {e}")))??;
+    let partitions = partitions.map_err(ApiError::task_join)??;
     let configs = configs?;
     Ok(TopicDetail { name: topic, partitions, configs, as_of: now_ms() })
 }
@@ -271,7 +271,7 @@ pub async fn list_groups(handle: Arc<ClusterHandle>) -> Result<GroupList, ApiErr
         Ok(GroupList { groups, as_of: now_ms() })
     })
     .await
-    .map_err(|e| ApiError::internal(format!("task join: {e}")))?
+    .map_err(ApiError::task_join)?
 }
 
 pub async fn group_detail(handle: Arc<ClusterHandle>, group: String) -> Result<GroupDetail, ApiError> {
@@ -302,7 +302,7 @@ pub async fn group_detail(handle: Arc<ClusterHandle>, group: String) -> Result<G
         })
     })
     .await
-    .map_err(|e| ApiError::internal(format!("task join: {e}")))?
+    .map_err(ApiError::task_join)?
 }
 
 #[derive(Debug, Serialize)]
@@ -340,7 +340,7 @@ pub async fn topic_consumers(handle: Arc<ClusterHandle>, topic: String) -> Resul
         Ok(TopicConsumers { topic, groups, as_of: now_ms() })
     })
     .await
-    .map_err(|e| ApiError::internal(format!("task join: {e}")))?
+    .map_err(ApiError::task_join)?
 }
 
 #[derive(Debug, Serialize)]
@@ -380,7 +380,7 @@ pub async fn overview(handle: Arc<ClusterHandle>) -> Result<Overview, ApiError> 
         })
     })
     .await
-    .map_err(|e| ApiError::internal(format!("task join: {e}")))?
+    .map_err(ApiError::task_join)?
 }
 
 #[cfg(test)]

@@ -686,7 +686,7 @@ pub fn run_page(
                     let outcome = fetch::fetch_ranges_blocking(&cfg, &topic, &windows, cap, &cancelled)?;
                     Ok((outcome, windows))
                 }).await
-                .unwrap_or_else(|join_err| Err(ApiError::internal(format!("task join: {join_err}"))))
+                .unwrap_or_else(|join_err| Err(ApiError::task_join(join_err)))
             };
 
             let (outcome, windows) = match result {
