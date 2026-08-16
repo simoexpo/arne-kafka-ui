@@ -70,47 +70,50 @@ enum PositionSource {
     FromAnchor(TimelineAnchorInput),
 }
 
+fn parse_direction(params: &TimelineParams) -> Result<timeline::Direction, ApiError> {
+    match params.direction.as_str() {
+        "back" => Ok(timeline::Direction::Back),
+        "forward" => Ok(timeline::Direction::Forward),
+        other => Err(ApiError::bad_request(format!("unknown direction '{other}'"))),
+    }
+}
+
+/// A page's own hard ceiling, independent of the caller's request: v1 does
+/// not offer unbounded pages.
+const MAX_LIMIT: u64 = 500;
+
+fn parse_limit(params: &TimelineParams) -> Result<usize, ApiError> {
+    let limit = params.limit.unwrap_or(100);
+    if limit == 0 {
+        return Err(ApiError::bad_request("limit must be >= 1"));
+    }
+    Ok(limit.min(MAX_LIMIT) as usize)
+}
+
+fn parse_filter(params: &TimelineParams) -> Result<Option<Filter>, ApiError> {
+    match &params.filter {
+        Some(kind) => {
+            let q = params.q.as_deref().ok_or_else(|| ApiError::bad_request("filter requires q"))?;
+            Ok(Some(Filter::parse(kind, q, params.path.as_deref()).map_err(ApiError::bad_request)?))
+        }
+        None => Ok(None),
+    }
+}
+
 pub async fn timeline_sse(
     State(state): State<AppState>,
     Path((cluster, topic)): Path<(String, String)>,
     Query(params): Query<TimelineParams>,
 ) -> Result<Sse<impl Stream<Item = Result<Event, std::convert::Infallible>>>, ApiError> {
-    // Fix round 1, M3: every param is validated — direction, limit, the
-    // cursor/anchor xor, and the anchor's own shape — strictly before
-    // `registry.get`, so a bad request against an *unknown* cluster is
-    // still 400, never a 404 that masks the real problem. (I1's old check,
-    // rejecting a cursor whose own `direction` field disagreed with the
-    // request's `direction` param, was removed in spec v1.6 — see the
-    // `source` match below.)
-    let direction = match params.direction.as_str() {
-        "back" => timeline::Direction::Back,
-        "forward" => timeline::Direction::Forward,
-        other => return Err(ApiError::bad_request(format!("unknown direction '{other}'"))),
-    };
-
-    // M2: 0 is nonsensical (an empty page forever); M1: cap restored to 500
-    // — 1000 was never intentional, just not yet reviewed.
-    let limit = params.limit.unwrap_or(100);
-    if limit == 0 {
-        return Err(ApiError::bad_request("limit must be >= 1"));
-    }
-    let limit = limit.min(500) as usize;
-
+    // Every param is validated strictly before `registry.get`, so a bad
+    // request against an unknown cluster stays a 400, never a 404 that
+    // masks the real problem.
+    let direction = parse_direction(&params)?;
+    let limit = parse_limit(&params)?;
     if params.cursor.is_some() == params.anchor.is_some() {
         return Err(ApiError::bad_request("exactly one of cursor or anchor is required"));
     }
-
-    // Filter params validated up front too — same rationale as direction/
-    // limit/cursor above: a bad filter kind, a missing `q`, or a `json_eq`
-    // missing its `path` must 400 before any Kafka round trip, even against
-    // an unknown cluster.
-    let filter = match &params.filter {
-        Some(kind) => {
-            let q = params.q.as_deref().ok_or_else(|| ApiError::bad_request("filter requires q"))?;
-            Some(Filter::parse(kind, q, params.path.as_deref()).map_err(ApiError::bad_request)?)
-        }
-        None => None,
-    };
+    let filter = parse_filter(&params)?;
 
     let source = match &params.cursor {
         Some(cursor) => {
@@ -132,24 +135,19 @@ pub async fn timeline_sse(
 
     let handle = state.registry.get(&cluster)?;
 
-    // M4: exactly one watermarks round trip per page request, whether this
-    // is an anchor page (which needs watermarks to resolve positions) or a
-    // cursor page (which needs them anyway, for `run_page`'s own windowing
-    // and exhaustion check) — never two for the same request.
+    // One watermarks round trip per page request either way: an anchor page
+    // needs them to resolve positions, a cursor page needs them anyway for
+    // `run_page`'s own windowing and exhaustion check.
     //
-    // Review fix (M1+M2, 2026-08-15): this whole block's `Result` used to be
-    // propagated straight out of the handler via `?` — turning e.g. the
-    // honest "no message at that offset" anchor failure into a plain HTTP
-    // 400 *before* the SSE stream ever opens. `EventSource` discards a
-    // non-200 response body wholesale, so the frontend saw generic
-    // "connection lost" instead of the real reason. `resolved` is now kept
-    // as a `Result` (not `?`-unwrapped here) specifically so its `Err` case
-    // can be emitted as an IN-STREAM `TimelineEvent::Error` below, the same
-    // envelope a mid-scan failure already uses — the one exception is a
-    // `spawn_blocking` `JoinError` (the task itself panicked): that's a
-    // genuine internal-server fault, not an honest rejection of anything
-    // the user did, so it still short-circuits as a pre-stream 500 via the
-    // `?` on the `spawn_blocking` join itself.
+    // `resolved` is kept as a `Result` rather than `?`-unwrapped here so an
+    // anchor resolution failure (e.g. "no message at that offset") becomes
+    // an IN-STREAM `TimelineEvent::Error` below instead of a pre-stream HTTP
+    // error: `EventSource` discards a non-200 response body wholesale, so
+    // the frontend would otherwise see generic "connection lost" instead of
+    // the real reason. The one exception is a `spawn_blocking` `JoinError`
+    // (the task itself panicked) — a genuine internal fault, not a
+    // rejection of anything the user did — which still short-circuits as a
+    // pre-stream 500 via the `?` on the join itself.
     type PositionsAndWatermarks = (Vec<(i32, i64)>, Vec<(i32, i64, i64)>);
     let resolved: Result<PositionsAndWatermarks, ApiError> = {
         let handle = handle.clone();
@@ -166,15 +164,13 @@ pub async fn timeline_sse(
         }).await.map_err(ApiError::task_join)?
     };
 
-    // Both branches below feed the SAME `mpsc::Receiver<TimelineEvent>` ->
-    // `ReceiverStream` -> `.map(...)` shape, so `Sse<impl Stream<...>>`'s
-    // single concrete return type is satisfied either way, and the success
-    // path's `CancelOnDrop` guard keeps its ORIGINAL semantics exactly:
-    // tied to the stream's own `.map()` closure lifetime, so a client
-    // disconnect flips `cancel` (run_page's own internal flag) INSTANTLY —
-    // not only once some in-flight send happens to fail — preserving the
-    // "no zombie scans" guarantee. The error path never started a scan at
-    // all, so its own guard wraps a fresh, inert flag: nothing to cancel.
+    // Both branches feed the same `mpsc::Receiver<TimelineEvent>` shape, so
+    // `Sse<impl Stream<...>>`'s single concrete return type is satisfied
+    // either way. `CancelOnDrop` is tied to the stream's own `.map()`
+    // closure lifetime, so a client disconnect flips `cancel` the instant
+    // the stream is dropped, not only once some in-flight send happens to
+    // fail — the "no zombie scans" guarantee. The error path never started a
+    // scan, so its guard wraps a fresh, inert flag: nothing to cancel.
     let (rx, guard): (mpsc::Receiver<TimelineEvent>, CancelOnDrop) = match resolved {
         Ok((positions, watermarks)) => {
             let budget = state.limits.timeline_scan_budget;
@@ -212,4 +208,69 @@ pub async fn tail_sse(
         Ok(Event::default().event(event.name()).data(serde_json::to_string(&event).unwrap_or_default()))
     });
     Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn params() -> TimelineParams {
+        TimelineParams {
+            direction: "forward".into(),
+            limit: None,
+            anchor: None,
+            cursor: None,
+            partition: None,
+            offset: None,
+            ts_ms: None,
+            filter: None,
+            q: None,
+            path: None,
+        }
+    }
+
+    #[test]
+    fn parse_direction_accepts_back_and_forward() {
+        assert_eq!(parse_direction(&TimelineParams { direction: "back".into(), ..params() }).unwrap(), timeline::Direction::Back);
+        assert_eq!(parse_direction(&TimelineParams { direction: "forward".into(), ..params() }).unwrap(), timeline::Direction::Forward);
+    }
+
+    #[test]
+    fn parse_direction_rejects_anything_else() {
+        let err = parse_direction(&TimelineParams { direction: "sideways".into(), ..params() }).unwrap_err();
+        assert_eq!(err.code, "bad_request");
+    }
+
+    #[test]
+    fn parse_limit_defaults_to_100() {
+        assert_eq!(parse_limit(&params()).unwrap(), 100);
+    }
+
+    #[test]
+    fn parse_limit_rejects_zero() {
+        let err = parse_limit(&TimelineParams { limit: Some(0), ..params() }).unwrap_err();
+        assert_eq!(err.code, "bad_request");
+    }
+
+    #[test]
+    fn parse_limit_caps_at_500() {
+        assert_eq!(parse_limit(&TimelineParams { limit: Some(10_000), ..params() }).unwrap(), 500);
+    }
+
+    #[test]
+    fn parse_filter_none_when_absent() {
+        assert!(parse_filter(&params()).unwrap().is_none());
+    }
+
+    #[test]
+    fn parse_filter_requires_q() {
+        let err = parse_filter(&TimelineParams { filter: Some("contains".into()), ..params() }).unwrap_err();
+        assert_eq!(err.code, "bad_request");
+    }
+
+    #[test]
+    fn parse_filter_builds_a_real_filter() {
+        let parsed = parse_filter(&TimelineParams { filter: Some("contains".into()), q: Some("needle".into()), ..params() }).unwrap();
+        assert!(parsed.is_some());
+    }
 }
