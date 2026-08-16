@@ -1,13 +1,10 @@
 import { useState } from 'react'
 import { DateTimePicker } from '../../components/DateTimePicker'
 import { formatTimestamp } from '../../lib/format'
+import type { JumpTarget } from '../../lib/timeline/jumpPlan'
 import { useTimeDisplayMode } from '../../lib/timeDisplayMode'
 
-export type JumpTarget =
-  | { kind: 'now' }
-  | { kind: 'beginning' }
-  | { kind: 'offset'; partition: number; offset: number }
-  | { kind: 'timestamp'; ts_ms: number }
+export type { JumpTarget }
 
 type Expanded = 'none' | 'offset' | 'timestamp'
 

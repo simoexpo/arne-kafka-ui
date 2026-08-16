@@ -15,6 +15,8 @@ import { decodeCursor } from '../../lib/timelineCursor'
 import { createSlidingWindowStore, type InsertOutcome } from '../../lib/timelineStore'
 import { useTimeDisplayMode } from '../../lib/timeDisplayMode'
 import { createLiveBuffer } from '../../lib/timeline/liveBuffer'
+import { planJump } from '../../lib/timeline/jumpPlan'
+import type { AnchorContext, PauseReason } from '../../lib/timeline/model'
 import { classifyScroll } from '../../lib/timeline/scrollZones'
 import { stepSettling, type SettlingState } from '../../lib/timeline/settling'
 import { useFallingEdge } from './useFallingEdge'
@@ -48,18 +50,6 @@ const MAX_SETTLE_ATTEMPTS = 10
 const PROGRESS_SHOW_DELAY_MS = 400
 
 type Direction = TimelineDirection
-// 'none': live inserts straight into the store (only takes effect while
-// ATTACHED — see `attached` below). 'auto': paused by scrolling off the top
-// — returning to the top resumes, but only while attached. 'explicit':
-// paused via the play/pause pill — overrides top-pinning, only the pill
-// itself resumes it.
-type PauseReason = 'none' | 'auto' | 'explicit'
-
-// Which anchor context the currently loaded window was bootstrapped from —
-// only ever consulted as beginning-vs-not: a settled filter change re-reads
-// from 'beginning' when that's the current context, and falls back to
-// back/latest for every other jump kind (including offset/timestamp jumps).
-type AnchorContext = 'default' | 'beginning'
 
 export function Timeline({
   cluster,
@@ -830,80 +820,16 @@ export function Timeline({
     bump()
   }
 
-  // A jump repositions the viewport: the current window is no longer
-  // meaningful, so the store and any buffered live messages are dropped
-  // outright (not flushed — they belong to the OLD viewport). Every jump
-  // sets `attached` false immediately here (matching the store's own
-  // immediate `clear()` — see `attached`'s own comment for why even 'now'
-  // does this, deferring the actual re-attach to the page-end effect once
-  // its fresh anchor page confirms the store itself is attached). Detached
-  // windows enter paused-auto (the pill counts; while detached, top-pinning
-  // does NOT resume live — only re-attaching does).
+  // resetWindow drops buffered live messages outright (they belong to the OLD viewport, never flushed); `attached`
+  // is set false immediately here (matching the store's own clear()) and only re-confirmed true by the page-end
+  // effect once the fresh anchor page actually lands — see `attached`'s own comment for why never optimistically.
   const handleJump = (target: JumpTarget) => {
-    // Every jump belongs to a fresh window — the previous jump's own
-    // highlight (if any) never carries forward. Only the 'offset' case
-    // sets a new one; every other kind passes null.
-    resetWindow(target.kind === 'offset' ? { partition: target.partition, offset: target.offset } : null)
-    // Owner ruling 2026-08-15: 'beginning', 'offset', and 'timestamp' ALL
-    // land reading forward, the target as the OLDEST row of the loaded
-    // window — the bottom (oldest-visible) edge is the meaningful anchor
-    // for all three. Only 'now' lands looking at the top of its new window.
-    pendingScrollEdgeRef.current = target.kind === 'now' ? 'top' : 'bottom'
-    switch (target.kind) {
-      case 'now':
-        anchorContextRef.current = 'default'
-        // Forced to 'none' regardless of any prior explicit pause — jumping
-        // to now is an intentional resume-live action (v1.3). The store
-        // isn't confirmed attached yet (fresh clear()), so this alone can't
-        // cause a live insert — see `attached`'s own comment.
-        pauseReasonRef.current = 'none'
-        runPage('back', withFilter({ direction: 'back', limit: PAGE_LIMIT, anchor: 'latest' }), {
-          resetIteration: true,
-          attach: true,
-        })
-        break
-      case 'beginning':
-        anchorContextRef.current = 'beginning'
-        pauseReasonRef.current = 'auto'
-        // attach: false is a no-op here (opts.attach only ever matters on a
-        // back-direction anchor page — see insertPage's own doc comment) —
-        // passed anyway so every call site states its intent explicitly.
-        runPage('forward', withFilter({ direction: 'forward', limit: PAGE_LIMIT, anchor: 'beginning' }), {
-          resetIteration: true,
-          attach: false,
-        })
-        break
-      case 'offset':
-        // Owner ruling 2026-08-15 (was 'back'): reads forward from the
-        // target, landing it as the oldest loaded row — the backend aligns
-        // every OTHER partition at the target's own timestamp instead of
-        // pinning them at their high watermark (see
-        // `Anchor::OffsetForwardAligned` in `backend/src/message/
-        // timeline.rs`), so this is no longer the "reads as broken" jump it
-        // used to be.
-        anchorContextRef.current = 'default'
-        pauseReasonRef.current = 'auto'
-        // attach: false is a no-op here — see the 'beginning' case above.
-        runPage(
-          'forward',
-          withFilter({ direction: 'forward', limit: PAGE_LIMIT, anchor: 'offset', partition: target.partition, offset: target.offset }),
-          { resetIteration: true, attach: false },
-        )
-        break
-      case 'timestamp':
-        // Owner ruling 2026-08-15 (was 'back'): same forward-landing change
-        // as 'offset' above — the backend's timestamp anchor already
-        // resolves every partition's starting position independent of
-        // direction, so no backend change was needed here.
-        anchorContextRef.current = 'default'
-        pauseReasonRef.current = 'auto'
-        // attach: false is a no-op here — see the 'beginning' case above.
-        runPage('forward', withFilter({ direction: 'forward', limit: PAGE_LIMIT, anchor: 'timestamp', ts_ms: target.ts_ms }), {
-          resetIteration: true,
-          attach: false,
-        })
-        break
-    }
+    const plan = planJump(target, PAGE_LIMIT)
+    resetWindow(plan.highlight)
+    pendingScrollEdgeRef.current = plan.scrollEdge
+    anchorContextRef.current = plan.anchorContext
+    pauseReasonRef.current = plan.pauseReason
+    runPage(plan.params.direction, withFilter(plan.params), { resetIteration: true, attach: plan.attach })
     bump()
   }
 
