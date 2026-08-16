@@ -562,17 +562,27 @@ export function Timeline({
   )
 
   const [filterText, setFilterText] = useState('')
-  // Skip the very first run: the mount effect below already loads the
-  // initial (unfiltered) page — without this guard, filterText's initial
-  // '' value would debounce into a redundant clear+reload 500ms after every
-  // mount.
-  const isFirstFilterEffectRef = useRef(true)
+  // The filter text the loaded window was actually built with — starts at ''
+  // because the mount effect below loads the initial page unfiltered. The
+  // debounce only ever arms for text that DIFFERS from it, which is what
+  // keeps a mount from re-loading the window it just loaded.
+  //
+  // Owner-reported regression (2026-08-16): this used to be an
+  // `isFirstFilterEffectRef` "skip the very first run" flag, which the app's
+  // own <StrictMode> (main.tsx) defeats — StrictMode mounts every component
+  // twice (setup, cleanup, setup) and the first setup spends the flag, so the
+  // second one armed a 500ms debounce for the initial empty text and
+  // re-applied it. A jump issued inside that window was silently undone by
+  // the back/latest reload landing on top of it. Comparing against the
+  // applied text instead is idempotent: re-running this effect any number of
+  // times for the same text does nothing at all.
+  const appliedFilterRef = useRef('')
   useEffect(() => {
-    if (isFirstFilterEffectRef.current) {
-      isFirstFilterEffectRef.current = false
-      return
-    }
-    const id = setTimeout(() => applyFilter(filterText), 500)
+    if (filterText === appliedFilterRef.current) return
+    const id = setTimeout(() => {
+      appliedFilterRef.current = filterText
+      applyFilter(filterText)
+    }, 500)
     return () => clearTimeout(id)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [filterText])

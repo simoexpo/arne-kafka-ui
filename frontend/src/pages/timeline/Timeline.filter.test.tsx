@@ -1,4 +1,5 @@
 import { act, fireEvent, render, screen } from '@testing-library/react'
+import { StrictMode } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { FakeEventSource } from '../../test/fake-event-source'
 import * as sse from '../../api/sse'
@@ -130,6 +131,45 @@ describe('Timeline filter box', () => {
     mockTail()
     await mountAndSettleInitial()
     expect(screen.getByLabelText('filter messages')).toHaveAttribute('placeholder', 'filter messages…')
+  })
+
+  // Owner-reported regression (2026-08-16): an offset jump issued within the
+  // first half-second of opening the Messages tab was silently undone — a
+  // back/latest reload landed on top of it, wiping the jumped-to window, its
+  // highlight and its scroll position. The app mounts under <StrictMode>
+  // (main.tsx), which mounts every component TWICE (setup, cleanup, setup).
+  // A "skip the very first run" guard that a ref consumes on that first setup
+  // is already spent by the second one, so the debounce armed itself for the
+  // initial (empty) filter text and re-applied it 500ms later.
+  it('never reloads the window on its own after mount, even under StrictMode double-mounting', async () => {
+    mockTail()
+    render(
+      <StrictMode>
+        <Timeline cluster="prod" topic="orders" />
+      </StrictMode>,
+    )
+    await emit(FakeEventSource.instances.length - 1, 'page_end', { cursor: null, exhausted: true })
+    const before = FakeEventSource.instances.length
+
+    await settle(600)
+    expect(FakeEventSource.instances).toHaveLength(before)
+  })
+
+  // The flip side of the guard above: clearing a filter back to the text it
+  // was last APPLIED with is a real change and must still reload.
+  it('clearing an applied filter back to empty reloads the unfiltered window', async () => {
+    mockTail()
+    await mountAndSettleInitial()
+
+    typeFilter('key:foo')
+    await settle()
+    expect(FakeEventSource.instances.at(-1)!.url).toContain('q=foo')
+
+    typeFilter('')
+    await settle()
+    expect(FakeEventSource.instances.at(-1)!.url).toBe(
+      '/api/clusters/prod/topics/orders/timeline?direction=back&limit=100&anchor=latest',
+    )
   })
 
   it('debounces: no request is issued until 500ms of no further edits pass', async () => {
