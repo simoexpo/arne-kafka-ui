@@ -1,4 +1,4 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -15,57 +15,35 @@ use super::event::TimelineEvent;
 use super::merge::{chunk_display_order, merge_prefers};
 use super::window::{adjacent_offset, at_edge, cap_windows_to_budget, clamp_positions, page_windows};
 
-/// A chunk "made no progress" only when nothing was taken, the scan wasn't
-/// cancelled, *and* at least one window belonged to a partition that was
-/// **not** scanned to completion — a genuine short read (fetch's internal
-/// deadline or `cap`), not a legitimate Kafka hole. That case leaves a
-/// partition's data genuinely unknown, and must never be reported as
-/// "nothing here" nor as an unadvanced, non-exhausted `page_end` (the first
-/// loses data, the second loops the client forever): `run_page` turns it
-/// into a terminal `error` instead.
-///
-/// The two narrowing conditions are what keep healthy topics quiet, and
-/// both are load-bearing:
-///
-/// - **Nothing taken, by itself, is not an error.** A window that is
-///   entirely legitimate holes (say, only a transaction control record) is
-///   scanned to completion, contributes zero taken records, and is correct
-///   — its position still advances to the window boundary in `run_page`,
-///   because nothing was missed: the range was confirmed to hold no
-///   messages. Firing here on that case would turn ordinary hole-only
-///   chunks into spurious errors.
-/// - **Cancellation is carved out.** A client disconnect mid-scan can
-///   legitimately leave nothing taken; that's not a broker anomaly.
+/// A chunk made genuinely no progress only when nothing was taken, the scan
+/// wasn't cancelled, and some window was left incomplete by
+/// `fetch_ranges_blocking`'s own deadline/cap — never when every window was
+/// merely complete-and-holes (a confirmed-empty range is not an error) or
+/// the scan was cancelled (a client disconnect is not a broker anomaly).
 fn page_made_no_progress(taken_is_empty: bool, any_incomplete_window: bool, cancelled: bool) -> bool {
     taken_is_empty && any_incomplete_window && !cancelled
 }
 
 /// Per-partition span of one scan iteration ("chunk"): used by every chunk
 /// of a filtered page, and by every chunk after the first on an unfiltered
-/// one (whose first chunk uses `limit` instead — see `run_page`).
-/// Deliberately much larger than a typical `limit` (100-500), because those
-/// are exactly the cases that must keep looking past one window's worth of
-/// records: hunting a sparse filter match, or crossing a hole-dominated
-/// region. A chunk's job is to make real progress without round-tripping to
-/// the broker for every few records.
+/// one (whose first chunk uses `limit` instead — see `chunk_span`).
+/// Deliberately much larger than a typical `limit` (100-500), so a chunk
+/// hunting a sparse filter match or crossing a hole-dominated region makes
+/// real progress without round-tripping to the broker for every few
+/// records.
 const CHUNK_SPAN: u64 = 5_000;
 
 /// How often (in records popped) a mid-chunk `progress` event goes out —
 /// see `mid_chunk_progress`.
 const PROGRESS_INTERVAL: u64 = 2_000;
 
-/// Whether the `records_popped_this_chunk`-th record popped in the current
-/// chunk is due a mid-chunk `progress` emission, and if so, the `scanned`
-/// value to report: every `PROGRESS_INTERVAL` records, reporting
-/// `total_scanned` (every earlier chunk's already-committed, offset-based
-/// charge) plus how far *this* chunk has gotten so far.
-///
-/// Invariant: consecutive emissions within one chunk are strictly
-/// increasing. That depends on `records_popped_this_chunk` being a running
-/// count for the whole chunk (1-indexed, reset only when a new chunk
-/// starts) — a counter reset after each emission would report
-/// `total_scanned + PROGRESS_INTERVAL` every time, i.e. a progress bar that
-/// freezes mid-chunk and jumps only at chunk boundaries.
+/// The `scanned` value due on a mid-chunk `Progress` emission, every
+/// `PROGRESS_INTERVAL` records popped in the current chunk: `total_scanned`
+/// (every earlier chunk's already-committed charge) plus how far *this*
+/// chunk has gotten so far; `None` in between. `records_popped_this_chunk`
+/// must be a running count for the whole chunk (reset only when a new
+/// chunk starts), or consecutive emissions within one chunk would report
+/// the same number — a progress bar that freezes mid-chunk.
 fn mid_chunk_progress(total_scanned: u64, records_popped_this_chunk: u64) -> Option<u64> {
     (records_popped_this_chunk > 0 && records_popped_this_chunk.is_multiple_of(PROGRESS_INTERVAL))
         .then_some(total_scanned + records_popped_this_chunk)
@@ -84,123 +62,326 @@ pub struct PageRequest {
     pub budget: u64,
 }
 
+/// The record span this chunk may request per partition: `limit` for an
+/// unfiltered page's very first chunk (so an ordinary "give me the latest
+/// 100" costs one small fetch instead of `CHUNK_SPAN` records per partition
+/// on the off chance a hole is nearby), `CHUNK_SPAN` otherwise — capped to
+/// this chunk's share of the remaining budget, split only among partitions
+/// still active in `direction` (a partition already at its edge contributes
+/// no window and must not dilute everyone else's share).
+fn chunk_span(
+    filter: &Option<Filter>,
+    chunk_index: u64,
+    limit_u64: u64,
+    remaining_budget: u64,
+    positions: &[(i32, i64)],
+    watermarks: &[(i32, i64, i64)],
+    direction: Direction,
+) -> u64 {
+    let active_partitions = positions
+        .iter()
+        .filter(|&&(p, pos)| watermarks.iter().find(|(wp, _, _)| *wp == p).is_some_and(|&(_, lo, hi)| !at_edge(pos, lo, hi, direction)))
+        .count() as u64;
+    let per_partition_share = (remaining_budget / active_partitions.max(1)).max(1);
+    let base_span = if filter.is_none() && chunk_index == 0 { limit_u64 } else { CHUNK_SPAN };
+    base_span.min(per_partition_share).max(1)
+}
+
+/// This chunk's windows: `span`-sized per still-active partition, then
+/// capped as a *set* to `remaining_budget` outright — belt-and-braces
+/// against `chunk_span`'s own `.max(1)` floor letting several partitions'
+/// floored spans add up to more than what's actually left (see
+/// `cap_windows_to_budget`'s doc comment). An empty result means no
+/// partition has anything left in `direction`: the true topic edge,
+/// independent of the budget.
+fn plan_chunk_windows(
+    positions: &[(i32, i64)],
+    watermarks: &[(i32, i64, i64)],
+    direction: Direction,
+    span: u64,
+    remaining_budget: u64,
+) -> Vec<PartitionRange> {
+    let windows = page_windows(positions, watermarks, direction, span);
+    cap_windows_to_budget(windows, remaining_budget)
+}
+
+/// Runs one chunk's blocking Kafka scan over `windows` on the blocking
+/// pool. `run_page`'s own `cancelled` flag (set by `CancelOnDrop` on client
+/// disconnect) reaches the blocking scan loop, so a dropped SSE stream
+/// stops the in-flight Kafka poll loop instead of only ever toggling a flag
+/// nothing reads. A `spawn_blocking` join failure surfaces as an `ApiError`
+/// like any other fetch failure.
+async fn scan_chunk(
+    handle: &ClusterHandle,
+    topic: &str,
+    windows: Vec<PartitionRange>,
+    cancelled: &Arc<AtomicBool>,
+) -> Result<(fetch::FetchOutcome, Vec<PartitionRange>), ApiError> {
+    let cfg = handle.config.clone();
+    let topic = topic.to_string();
+    let task_windows = windows.clone();
+    let task_cancelled = cancelled.clone();
+    let outcome = tokio::task::spawn_blocking(move || -> Result<fetch::FetchOutcome, ApiError> {
+        let cap = range::total(&task_windows) as usize;
+        fetch::fetch_ranges_blocking(&cfg, &topic, &task_windows, cap, &task_cancelled)
+    })
+    .await
+    .unwrap_or_else(|join_err| Err(ApiError::task_join(join_err)))?;
+    Ok((outcome, windows))
+}
+
+/// Builds each partition's adjacent-first, trust-gated record stream from
+/// one chunk's raw fetch. Adjacent-first: nearest-to-position first (`Back`
+/// descending by offset — the position is the window's exclusive upper
+/// bound — `Forward` ascending), so that the merge below, which always pops
+/// from the front, can only ever consume a *contiguous prefix* of a
+/// partition's window, walked strictly outward from the position.
+/// Trust-gated: a **complete** partition's records are trusted as-is, holes
+/// and all — the whole range was scanned, so a gap is a confirmed hole
+/// (transaction markers, compacted tombstones), not suspicious. An
+/// **incomplete** partition's hole is indistinguishable from data that
+/// simply hasn't arrived, so its window is trusted only if its records
+/// include the position-adjacent offset (`adjacent_offset`); otherwise the
+/// entire window is discarded for this chunk. Streams and completeness are
+/// indexed in parallel with `windows` (a plain `Vec`, not a partition-keyed
+/// map, so the merge loop never needs a lookup-then-`.expect()` chain).
+fn select_partition_streams(
+    records: Vec<RawRecord>,
+    windows: &[PartitionRange],
+    complete: &HashSet<i32>,
+    direction: Direction,
+) -> (Vec<VecDeque<RawRecord>>, Vec<bool>) {
+    // Group by partition, ascending by offset (their natural fetch order —
+    // `fetch_ranges_blocking` scans low-to-high regardless of `direction`;
+    // sorting explicitly here is a cheap defensive guarantee, not a
+    // load-bearing assumption).
+    let mut by_partition: HashMap<i32, Vec<RawRecord>> = HashMap::new();
+    for r in records {
+        by_partition.entry(r.partition).or_default().push(r);
+    }
+    for v in by_partition.values_mut() {
+        v.sort_by_key(|r| r.offset);
+    }
+
+    let is_complete: Vec<bool> = windows.iter().map(|w| complete.contains(&w.partition)).collect();
+    let mut streams: Vec<VecDeque<RawRecord>> = Vec::with_capacity(windows.len());
+    for (w, &partition_complete) in windows.iter().zip(&is_complete) {
+        let fetched = by_partition.remove(&w.partition).unwrap_or_default();
+        let trust_as_is = partition_complete || fetched.iter().any(|r| r.offset == adjacent_offset(w, direction));
+        let ordered: VecDeque<RawRecord> = if trust_as_is {
+            match direction {
+                Direction::Back => fetched.into_iter().rev().collect(),
+                Direction::Forward => fetched.into_iter().collect(),
+            }
+        } else {
+            VecDeque::new()
+        };
+        streams.push(ordered);
+    }
+    (streams, is_complete)
+}
+
+/// One chunk's k-way merge outcome: decoded `matches` (already ≤ the
+/// remaining `limit`, loss-free and overlap-free by construction), and each
+/// partition's extreme offset actually taken (`None` if nothing was), which
+/// `advance_positions` turns into the next cursor.
+struct ChunkTaken {
+    matches: Vec<MessageOut>,
+    taken_min: Vec<Option<i64>>,
+    taken_max: Vec<Option<i64>>,
+    any_taken: bool,
+}
+
+/// `merge_chunk_records`'s parameters, bundled so the function takes one
+/// named struct instead of a long positional list (the same rationale as
+/// `PageRequest`): everything here is the page's running state at the
+/// start of this chunk, not per-record state.
+struct MergeChunkArgs<'a> {
+    direction: Direction,
+    filter: &'a Option<Filter>,
+    handle: &'a ClusterHandle,
+    limit_u64: u64,
+    total_matches: u64,
+    total_scanned: u64,
+    budget: u64,
+}
+
+/// Repeatedly takes the head record `merge_prefers` picks across every
+/// still-nonempty stream — best timestamp for the direction, ties broken by
+/// partition then offset, see `merge_prefers`'s own doc comment — decoding
+/// and filtering it immediately, so the stopping condition can depend on
+/// the filter's verdict rather than waiting for a whole batch to decode.
+/// Every popped record advances that partition's taken-offset bookkeeping
+/// whether it matched or not; only matches are kept for emission. Sends a
+/// mid-chunk `Progress` event every `PROGRESS_INTERVAL` records so a scan
+/// hunting a sparse filter match doesn't go quiet for the length of a whole
+/// chunk. Returns `None` the moment a send fails — the client is gone, and
+/// the caller must stop scanning right there rather than continue against a
+/// stream nobody is reading.
+async fn merge_chunk_records(
+    streams: &mut [VecDeque<RawRecord>],
+    args: MergeChunkArgs<'_>,
+    tx: &mpsc::Sender<TimelineEvent>,
+) -> Option<ChunkTaken> {
+    let MergeChunkArgs { direction, filter, handle, limit_u64, total_matches, total_scanned, budget } = args;
+    let mut taken_min: Vec<Option<i64>> = vec![None; streams.len()];
+    let mut taken_max: Vec<Option<i64>> = vec![None; streams.len()];
+    let mut any_taken = false;
+    let mut chunk_matches: Vec<MessageOut> = Vec::new();
+    let mut records_popped_this_chunk: u64 = 0;
+
+    loop {
+        if total_matches + chunk_matches.len() as u64 >= limit_u64 {
+            break;
+        }
+        let mut best: Option<(usize, &RawRecord)> = None;
+        for (i, stream) in streams.iter().enumerate() {
+            let Some(candidate) = stream.front() else { continue };
+            best = match best {
+                None => Some((i, candidate)),
+                Some((bi, current_best)) => {
+                    if merge_prefers(direction, candidate, current_best) { Some((i, candidate)) } else { Some((bi, current_best)) }
+                }
+            };
+        }
+        let Some((i, _)) = best else { break };
+        let rec = streams[i].pop_front().expect("index i was just selected from a non-empty front() above");
+        let offset = rec.offset;
+        taken_min[i] = Some(taken_min[i].map_or(offset, |m| m.min(offset)));
+        taken_max[i] = Some(taken_max[i].map_or(offset, |m| m.max(offset)));
+        any_taken = true;
+
+        let decoded = fetch::to_one_message_out(rec, handle.schema_registry.as_deref()).await;
+        let is_match = filter.as_ref().is_none_or(|f| filter::matches(f, &decoded));
+        if is_match {
+            chunk_matches.push(decoded);
+        }
+
+        records_popped_this_chunk += 1;
+        if let Some(scanned) = mid_chunk_progress(total_scanned, records_popped_this_chunk)
+            && tx.send(TimelineEvent::Progress {
+                scanned,
+                matches: total_matches + chunk_matches.len() as u64,
+                budget,
+            }).await.is_err()
+        {
+            return None;
+        }
+    }
+
+    Some(ChunkTaken { matches: chunk_matches, taken_min, taken_max, any_taken })
+}
+
+/// Offset-exact cursor advance per partition — never a record count, which
+/// would break on holes: "4 records taken" can span 5 offsets, landing the
+/// cursor 1 short of where the scan really got and re-serving already-taken
+/// records next page. A **complete** partition whose stream ended this
+/// chunk fully drained jumps straight to the window boundary (`w.start` for
+/// `Back`, `w.end` for `Forward`): completeness confirms the entire range
+/// is accounted for, including any trailing hole past the last real
+/// record. A complete partition that still has records left in its stream
+/// (the merge hit the match target first) must NOT take that shortcut, or
+/// it would skip pending data. Otherwise, a partition with records taken
+/// this chunk advances to `min(taken)` for `Back` (the position is an
+/// exclusive upper bound) or `max(taken) + 1` for `Forward` (an inclusive
+/// lower bound). A partition with nothing taken and not complete-and-
+/// drained keeps its old position — the safe default, whether it lost
+/// every merge comparison or was incomplete (unknown state).
+fn advance_positions(
+    cur_positions: &[(i32, i64)],
+    windows: &[PartitionRange],
+    is_complete: &[bool],
+    streams: &[VecDeque<RawRecord>],
+    taken_min: &[Option<i64>],
+    taken_max: &[Option<i64>],
+    direction: Direction,
+) -> Vec<(i32, i64)> {
+    cur_positions
+        .iter()
+        .map(|&(p, pos)| {
+            let Some(i) = windows.iter().position(|w| w.partition == p) else { return (p, pos) };
+            let w = &windows[i];
+            if is_complete[i] && streams[i].is_empty() {
+                return (p, match direction { Direction::Back => w.start, Direction::Forward => w.end });
+            }
+            match direction {
+                Direction::Back => match taken_min[i] {
+                    Some(min_offset) => (p, min_offset),
+                    None => (p, pos),
+                },
+                Direction::Forward => match taken_max[i] {
+                    Some(max_offset) => (p, max_offset + 1),
+                    None => (p, pos),
+                },
+            }
+        })
+        .collect()
+}
+
+/// Budget charge for one chunk: the exact offset span each partition's
+/// position advanced — holes included — never matches or delivered
+/// records, so a chunk whose window is all holes still spends budget
+/// proportional to the ground it covered (otherwise an unfiltered page
+/// could cross an unbounded hole region for free).
+fn charge_budget(old_positions: &[(i32, i64)], new_positions: &[(i32, i64)]) -> u64 {
+    old_positions.iter().zip(new_positions).map(|(&(_, old), &(_, new))| old.abs_diff(new)).sum()
+}
+
+/// A page is exhausted only once every tracked partition has truly reached
+/// its low/high watermark edge in `direction` — the sole end-of-data
+/// signal; hitting `limit` or spending the budget ends the page with a
+/// resume cursor instead.
+fn all_partitions_at_edge(positions: &[(i32, i64)], watermarks: &[(i32, i64, i64)], direction: Direction) -> bool {
+    positions.iter().all(|&(p, pos)| {
+        watermarks.iter().find(|(wp, _, _)| *wp == p).is_some_and(|&(_, lo, hi)| at_edge(pos, lo, hi, direction))
+    })
+}
+
+/// Sends one chunk's matches in display order (spec v1.2's Out-of-order
+/// policy: offset order within a partition always, timestamp order across
+/// partitions — see `chunk_display_order`), then the chunk's own `Progress`
+/// event. Returns `false` the moment a send fails, so the caller stops
+/// scanning immediately rather than continuing against a stream nobody is
+/// reading.
+async fn emit_chunk(
+    tx: &mpsc::Sender<TimelineEvent>,
+    matches: Vec<MessageOut>,
+    direction: Direction,
+    total_scanned: u64,
+    total_matches: u64,
+    budget: u64,
+) -> bool {
+    for m in chunk_display_order(matches, direction) {
+        if tx.send(TimelineEvent::Match(Box::new(m))).await.is_err() {
+            return false;
+        }
+    }
+    tx.send(TimelineEvent::Progress { scanned: total_scanned, matches: total_matches, budget }).await.is_ok()
+}
+
 /// Runs one timeline page — filtered or not, `filter: None` behaving as
 /// match-everything (the design's "filter-off = match-all, same code
 /// path"). Scans and decodes windows of `topic` starting from `positions`,
 /// emitting `TimelineEvent`s over an mpsc channel until `limit` matches are
-/// found, the topic edge is truly reached, or the per-request scan `budget`
-/// is spent. `watermarks` and `positions` are resolved by the caller
-/// (`api::messages`); nothing here re-reads them mid-page.
+/// found, the topic edge is truly reached, or the per-request scan
+/// `budget` is spent. `watermarks` and `positions` are resolved by the
+/// caller (`api::messages`); nothing here re-reads them mid-page.
 ///
-/// A page is a loop of **chunks**. One chunk scans one window of up to
-/// `CHUNK_SPAN` records per still-active partition — except the first chunk
-/// of an *unfiltered* page, which uses at most `limit`, so an ordinary
-/// "give me the latest 100" costs one small fetch instead of 5,000 records
-/// per partition on the off chance a hole is nearby. Every span is
-/// additionally capped by that partition's share of the remaining budget,
-/// and the chunk's windows as a set are capped to the remaining budget
-/// outright (`cap_windows_to_budget`), so a chunk can never overspend it.
-/// One chunk does the following.
-///
-/// 1. **Adjacent-first ordering.** Each partition's fetched records are
-///    ordered nearest-to-position first: `Back` descending by offset (the
-///    position is the window's exclusive upper bound), `Forward` ascending
-///    (the position is its inclusive lower bound — also the records'
-///    natural fetch order). Because the merge below always pops from the
-///    front, a partition can only ever contribute a *contiguous prefix* of
-///    its delivered records, walked strictly outward from the position.
-///    That is what keeps a partition's own progress and "how much of its
-///    window got used" from coming apart, which the cursor math in step 4
-///    relies on.
-/// 2. **Completeness, not adjacency, gates trust.** Kafka ranges
-///    legitimately contain offsets carrying no message at all: a committed
-///    transaction's commit marker consumes a real offset (typically the one
-///    just below the high watermark), as do aborted-transaction ranges and
-///    compacted tombstones. So a missing offset is only meaningful together
-///    with how far the fetch actually got. `fetch_ranges_blocking` reports
-///    (`FetchOutcome::complete`) which partitions it scanned to the *end of
-///    their requested range* (`PartitionEOF` or offset ≥ end) rather than
-///    stopping early for its own deadline, `cap`, or cancellation. A
-///    **complete** partition's records are trusted as-is, holes and all —
-///    the whole range was scanned, so a gap is confirmed, not suspicious.
-///    For an **incomplete** partition a hole is indistinguishable from data
-///    that simply hasn't arrived, so the short-read guard applies: unless
-///    its records include the position-adjacent offset (`adjacent_offset`),
-///    the entire window is discarded for this chunk — it contributes
-///    nothing and its position does not move.
-/// 3. **k-way merge, decode as you go.** Repeatedly compare the head (next
-///    unconsumed, adjacent-most record) of every partition's stream and take
-///    the one `merge_prefers` picks — best timestamp for the direction, see
-///    its doc comment for the tie-break — decoding and filtering that record
-///    immediately. Decoding record-by-record rather than batch-at-the-end is
-///    what lets the loop's stopping condition depend on the filter's
-///    verdict. Every popped record advances that partition's cursor
-///    bookkeeping whether it matched or not; only matches are queued for
-///    emission. The loop stops once accumulated matches (this chunk's plus
-///    every earlier chunk's in this request) reach `limit`, or every stream
-///    is empty.
-/// 4. **Cursor advance is offset-exact, never a record count.** A
-///    *complete* partition whose stream ends the chunk fully drained —
-///    every delivered record taken, or it started empty because the window
-///    was nothing but holes — jumps straight to the **window boundary**
-///    (`w.start` for `Back`, `w.end` for `Forward`): completeness confirms
-///    the entire range is accounted for, real records and holes alike, so
-///    there is nothing left to wait for, including a trailing hole past the
-///    last real record. A partition that is complete but still has records
-///    left in its stream (the merge hit the match target first) must NOT
-///    take that shortcut — it would skip pending data. Otherwise, a
-///    partition with records taken this chunk advances to
-///    `min(taken offsets)` for `Back` (the position is an exclusive upper
-///    bound, so the lowest offset actually taken *is* the new bound) or
-///    `max(taken offsets) + 1` for `Forward` (inclusive lower bound, so one
-///    past the highest). Counting records instead of using offsets would
-///    break on holes: "4 records taken" can span 5 offsets, and the cursor
-///    would land 1 offset short of where the scan really got — reporting
-///    `exhausted: false` on a fully drained window and re-serving
-///    already-taken records on the next page. A partition with nothing
-///    taken and not complete-and-drained keeps its old position: the safe
-///    default, whether it lost every merge comparison (real data still
-///    pending) or was incomplete (unknown state).
-///
-///    The **scan budget** is charged by the exact offset span each
-///    partition's position advanced this chunk (`old.abs_diff(new)`,
-///    summed) — not by matches, not even by delivered records — so that a
-///    chunk whose window is all holes (zero records delivered) still spends
-///    budget proportional to the ground it covered. Otherwise an unfiltered
-///    page could cross an unbounded hole region for free, defeating the
-///    point of a *scan* budget.
-/// 5. **Display order, then emit.** Each chunk's matches (already ≤ the
-///    remaining `limit`, already loss-free and overlap-free by steps 1-4)
-///    go through `chunk_display_order` before being sent: a k-way merge per
-///    spec v1.2's Out-of-order policy — within one partition, offset order
-///    ALWAYS; across partitions, merge by timestamp (ties: smaller
-///    partition id; null ts = `i64::MIN`). Unlike a pure-timestamp sort,
-///    this cannot invert a partition's own offset order under non-monotonic
-///    producer timestamps. Ordering holds *within* a chunk only; across
-///    chunks it is as good as each chunk's own merge — the same
-///    page-boundary "fuzz" the design doc licenses, applying equally to one
-///    request's chunks.
-/// 6. **Progress guarantee** (`page_made_no_progress`): a chunk that took
-///    nothing, wasn't cancelled, and had at least one genuinely *incomplete*
-///    window reports a terminal `error` instead of an unadvanced,
-///    non-exhausted `page_end`. Taking nothing because every window was
-///    complete-and-holes is not an error — the positions advance past the
-///    holes and the outer loop tries another chunk.
-///
-/// The **outer loop** keeps running chunks until accumulated matches reach
-/// `limit`; the scan budget is spent; or every partition has truly reached
-/// its low/high watermark edge in `direction`. Only that last case ends the
-/// page with `exhausted: true` and no cursor — it is the sole end-of-data
-/// signal. The other two end with `exhausted: false` and a cursor to resume
-/// from, and a page ending that way may legitimately carry ZERO matches
-/// (budget spent crossing holes or non-matching records): an empty page is
-/// never a silent stop, and the client continues from the returned cursor.
-/// Chunking is what lets a hole-dominated or match-sparse region — filtered
-/// or not — be crossed within one request instead of one near-empty page
-/// per `limit` offsets.
+/// A page is a loop of chunks, each built from `chunk_span` (how much to
+/// request), `plan_chunk_windows` (where), `scan_chunk` (the Kafka round
+/// trip), `select_partition_streams` (which fetched records can be
+/// trusted), `merge_chunk_records` (the k-way merge, decode, and filter),
+/// `advance_positions` + `charge_budget` (committing the chunk), and
+/// `emit_chunk` (sending it) — read in that order for the full mechanics of
+/// one chunk. Only `all_partitions_at_edge` ends the page with
+/// `exhausted: true` and no cursor, the sole end-of-data signal; the other
+/// two loop exits (`limit` reached, budget spent) end with
+/// `exhausted: false` and a resume cursor, and may legitimately carry ZERO
+/// matches (budget spent crossing holes or non-matching records) — an
+/// empty page is never a silent stop.
 ///
 /// Failures never leave the page half-reported: a fetch error, a
-/// `spawn_blocking` join failure, or the no-progress condition all go out as
+/// `spawn_blocking` join failure, or `page_made_no_progress` all go out as
 /// a terminal `TimelineEvent::Error` and end the stream *without* a
 /// `page_end`, so a client can tell "this page finished" from "this page
 /// broke". A client disconnect ends the task silently instead — there is
@@ -228,8 +409,6 @@ pub fn run_page(
         let mut chunk_index: u64 = 0;
         let mut exhausted = false;
 
-        type ScanResult = Result<(fetch::FetchOutcome, Vec<PartitionRange>), ApiError>;
-
         'chunks: loop {
             if total_matches >= limit_u64 || total_scanned >= budget {
                 break;
@@ -245,196 +424,35 @@ pub fn run_page(
             }
 
             let remaining_budget = budget - total_scanned;
-            // Only partitions that would actually get a window this chunk
-            // (not already sitting at their edge in `direction`) compete
-            // for a share of the remaining budget — an edge partition
-            // contributes nothing and must not dilute everyone else's
-            // share.
-            let active_partitions = cur_positions
-                .iter()
-                .filter(|&&(p, pos)| {
-                    watermarks.iter().find(|(wp, _, _)| *wp == p).is_some_and(|&(_, lo, hi)| !at_edge(pos, lo, hi, direction))
-                })
-                .count() as u64;
-            let active_partitions = active_partitions.max(1);
-            let per_partition_share = (remaining_budget / active_partitions).max(1);
-            let base_span = if filter.is_none() && chunk_index == 0 { limit_u64 } else { CHUNK_SPAN };
-            let span = base_span.min(per_partition_share).max(1);
-
-            let windows = page_windows(&cur_positions, &watermarks, direction, span);
-            // Belt-and-braces against `per_partition_share`'s `.max(1)`
-            // floor: even after the per-partition span cap above, several
-            // partitions each getting a floored span of 1 can still add up
-            // to more than what's actually left — cap the chunk's total
-            // charge to the hard budget ceiling directly (see doc comment
-            // on `cap_windows_to_budget`).
-            let windows = cap_windows_to_budget(windows, remaining_budget);
+            let span = chunk_span(&filter, chunk_index, limit_u64, remaining_budget, &cur_positions, &watermarks, direction);
+            let windows = plan_chunk_windows(&cur_positions, &watermarks, direction, span, remaining_budget);
             if windows.is_empty() {
-                // No partition has anything left in `direction`: the true
-                // topic edge, independent of the budget.
                 exhausted = true;
                 break;
             }
 
-            let result: ScanResult = {
-                let cfg = handle.config.clone();
-                let topic = topic.clone();
-                let windows = windows.clone();
-                // `run_page`'s own `cancelled` flag (checked by
-                // `CancelOnDrop` on client disconnect) reaches the blocking
-                // scan loop, so a dropped SSE stream stops the in-flight
-                // Kafka poll loop instead of only ever toggling a flag
-                // nothing reads.
-                let cancelled = cancelled.clone();
-                tokio::task::spawn_blocking(move || -> ScanResult {
-                    let cap = range::total(&windows) as usize;
-                    let outcome = fetch::fetch_ranges_blocking(&cfg, &topic, &windows, cap, &cancelled)?;
-                    Ok((outcome, windows))
-                }).await
-                .unwrap_or_else(|join_err| Err(ApiError::task_join(join_err)))
-            };
-
-            let (outcome, windows) = match result {
+            let (outcome, windows) = match scan_chunk(&handle, &topic, windows, &cancelled).await {
                 Ok(pair) => pair,
                 Err(e) => {
                     let _ = tx.send(e.into()).await;
                     return;
                 }
             };
-            let complete = outcome.complete;
 
-            // Group fetched records by partition, ascending by offset
-            // (their natural fetch order — `fetch_ranges_blocking` scans
-            // low-to-high per partition regardless of `direction`; sorting
-            // explicitly here is a cheap defensive guarantee, not a
-            // load-bearing assumption).
-            let mut by_partition: HashMap<i32, Vec<RawRecord>> = HashMap::new();
-            for r in outcome.records {
-                by_partition.entry(r.partition).or_default().push(r);
-            }
-            for v in by_partition.values_mut() {
-                v.sort_by_key(|r| r.offset);
-            }
+            let (mut streams, is_complete) = select_partition_streams(outcome.records, &windows, &outcome.complete, direction);
 
-            // Step 1 + 2: build each partition's adjacent-first stream.
-            // `streams` and `is_complete` are indexed in parallel with
-            // `windows` (minor: a plain `Vec` here, not a `HashMap<i32, _>`
-            // keyed by partition, avoids a lookup-then-`.expect()` chain in
-            // the merge loop below — indices are always in-bounds by
-            // construction).
-            let is_complete: Vec<bool> = windows.iter().map(|w| complete.contains(&w.partition)).collect();
-            let mut streams: Vec<VecDeque<RawRecord>> = Vec::with_capacity(windows.len());
-            for (w, &partition_complete) in windows.iter().zip(&is_complete) {
-                let fetched = by_partition.remove(&w.partition).unwrap_or_default();
-                // A complete partition's holes (if any) are confirmed
-                // legitimate — trust its delivered records as-is. Only an
-                // incomplete partition needs the short-read guard: without
-                // the position-adjacent offset, a real hole is
-                // indistinguishable from data that hasn't arrived yet.
-                let trust_as_is = partition_complete || fetched.iter().any(|r| r.offset == adjacent_offset(w, direction));
-                let ordered: VecDeque<RawRecord> = if trust_as_is {
-                    match direction {
-                        Direction::Back => fetched.into_iter().rev().collect(),
-                        Direction::Forward => fetched.into_iter().collect(),
-                    }
-                } else {
-                    VecDeque::new()
-                };
-                streams.push(ordered);
-            }
+            let merge_args = MergeChunkArgs { direction, filter: &filter, handle: &handle, limit_u64, total_matches, total_scanned, budget };
+            let Some(taken) = merge_chunk_records(&mut streams, merge_args, &tx).await else {
+                return; // client gone mid-chunk
+            };
 
-            // Step 3: k-way merge with per-record decode+filter, taking
-            // until this chunk's contribution plus every earlier chunk's
-            // matches reach `limit`, or every stream is empty.
-            let mut taken_min: Vec<Option<i64>> = vec![None; windows.len()];
-            let mut taken_max: Vec<Option<i64>> = vec![None; windows.len()];
-            let mut any_taken = false;
-            let mut chunk_matches: Vec<MessageOut> = Vec::new();
-            let mut records_popped_this_chunk: u64 = 0;
-            loop {
-                if total_matches + chunk_matches.len() as u64 >= limit_u64 {
-                    break;
-                }
-                let mut best: Option<(usize, &RawRecord)> = None;
-                for (i, stream) in streams.iter().enumerate() {
-                    let Some(candidate) = stream.front() else { continue };
-                    best = match best {
-                        None => Some((i, candidate)),
-                        Some((bi, current_best)) => {
-                            if merge_prefers(direction, candidate, current_best) { Some((i, candidate)) } else { Some((bi, current_best)) }
-                        }
-                    };
-                }
-                let Some((i, _)) = best else { break };
-                let rec = streams[i].pop_front().expect("index i was just selected from a non-empty front() above");
-                let offset = rec.offset;
-                taken_min[i] = Some(taken_min[i].map_or(offset, |m| m.min(offset)));
-                taken_max[i] = Some(taken_max[i].map_or(offset, |m| m.max(offset)));
-                any_taken = true;
+            let new_positions = advance_positions(&cur_positions, &windows, &is_complete, &streams, &taken.taken_min, &taken.taken_max, direction);
 
-                let decoded = fetch::to_one_message_out(rec, handle.schema_registry.as_deref()).await;
-                let is_match = filter.as_ref().is_none_or(|f| filter::matches(f, &decoded));
-                if is_match {
-                    chunk_matches.push(decoded);
-                }
-
-                // Progress guarantee (design doc): at least every
-                // PROGRESS_INTERVAL scanned, a `progress` event goes out
-                // mid-chunk, not just at chunk boundaries — a single chunk
-                // can span thousands of records (`CHUNK_SPAN`), and a
-                // filtered scan hunting a sparse needle must not go quiet
-                // for that long. `mid_chunk_progress` reports a running
-                // total (see its own doc comment) so consecutive emissions
-                // within one chunk are never the same number.
-                records_popped_this_chunk += 1;
-                if let Some(scanned) = mid_chunk_progress(total_scanned, records_popped_this_chunk) {
-                    // A failed send means the client is gone — stop right
-                    // here rather than ignoring the error and scanning on;
-                    // this is the mid-chunk half of the disconnect
-                    // handling, alongside the top-of-loop flag check.
-                    if tx.send(TimelineEvent::Progress {
-                        scanned,
-                        matches: total_matches + chunk_matches.len() as u64,
-                        budget,
-                    }).await.is_err() {
-                        return;
-                    }
-                }
-            }
-
-            // Step 4: exact offset-based cursor math — window boundary for
-            // a complete-and-drained partition, otherwise the extreme
-            // offset actually taken, otherwise unchanged. Each branch's
-            // reasoning is in `run_page`'s doc comment, step 4; the trap to
-            // remember while editing here is that `is_complete[i] &&
-            // streams[i].is_empty()` is the ONLY case allowed to skip past
-            // offsets no record was taken from.
-            let new_positions: Vec<(i32, i64)> = cur_positions
-                .iter()
-                .map(|&(p, pos)| {
-                    let Some(i) = windows.iter().position(|w| w.partition == p) else { return (p, pos) };
-                    let w = &windows[i];
-                    if is_complete[i] && streams[i].is_empty() {
-                        return (p, match direction { Direction::Back => w.start, Direction::Forward => w.end });
-                    }
-                    match direction {
-                        Direction::Back => match taken_min[i] {
-                            Some(min_offset) => (p, min_offset),
-                            None => (p, pos),
-                        },
-                        Direction::Forward => match taken_max[i] {
-                            Some(max_offset) => (p, max_offset + 1),
-                            None => (p, pos),
-                        },
-                    }
-                })
-                .collect();
-
-            // Step 6: progress guarantee — before committing this chunk's
-            // results, so a stalled chunk never reaches the normal
-            // page_end path.
+            // Progress guarantee, checked before committing this chunk's
+            // results, so a stalled chunk never reaches the normal page_end
+            // path.
             let any_incomplete_window = is_complete.iter().any(|&c| !c);
-            if page_made_no_progress(!any_taken, any_incomplete_window, cancelled.load(Ordering::SeqCst)) {
+            if page_made_no_progress(!taken.any_taken, any_incomplete_window, cancelled.load(Ordering::SeqCst)) {
                 let _ = tx.send(ApiError::kafka(
                     &handle.name,
                     "page made no progress: broker returned no records for non-empty windows",
@@ -442,31 +460,14 @@ pub fn run_page(
                 return;
             }
 
-            // Charge the budget by the exact offset span each partition
-            // advanced this chunk — holes included (see doc comment above).
-            let chunk_scanned: u64 = cur_positions
-                .iter()
-                .zip(&new_positions)
-                .map(|(&(_, old), &(_, new))| old.abs_diff(new))
-                .sum();
-            total_scanned += chunk_scanned;
-            total_matches += chunk_matches.len() as u64;
-
-            exhausted = new_positions.iter().all(|&(p, pos)| {
-                watermarks.iter().find(|(wp, _, _)| *wp == p).is_some_and(|&(_, lo, hi)| at_edge(pos, lo, hi, direction))
-            });
+            total_scanned += charge_budget(&cur_positions, &new_positions);
+            total_matches += taken.matches.len() as u64;
+            exhausted = all_partitions_at_edge(&new_positions, &watermarks, direction);
             cur_positions = new_positions;
             chunk_index += 1;
 
-            // Step 5: display order, then emit — one chunk at a time.
-            let chunk_matches = chunk_display_order(chunk_matches, direction);
-            for m in chunk_matches {
-                if tx.send(TimelineEvent::Match(Box::new(m))).await.is_err() {
-                    return; // client disconnected: no point sending more
-                }
-            }
-            if tx.send(TimelineEvent::Progress { scanned: total_scanned, matches: total_matches, budget }).await.is_err() {
-                return; // client disconnected — stop, don't scan on regardless
+            if !emit_chunk(&tx, taken.matches, direction, total_scanned, total_matches, budget).await {
+                return;
             }
 
             if exhausted {
