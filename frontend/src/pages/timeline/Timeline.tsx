@@ -874,6 +874,14 @@ export function Timeline({
   // resetWindow drops buffered live messages outright (they belong to the OLD viewport, never flushed); `attached`
   // is set false immediately here (matching the store's own clear()) and only re-confirmed true by the page-end
   // effect once the fresh anchor page actually lands — see `attached`'s own comment for why never optimistically.
+  //
+  // H2: every OTHER pause transition in this component routes through
+  // `nextPause` — this one used to assign `plan.pauseIntent` straight to
+  // `pauseReasonRef`, the only place that could silently overwrite a user's
+  // EXPLICIT pause (planJump has no input for the CURRENT pause reason to
+  // even consult). Routed through the 'jump' event instead: `pauseMachine`
+  // decides, using the plan's own static intent only as one input among
+  // others (see pauseMachine.ts).
   const handleJump = (target: JumpTarget) => {
     const plan = planJump(target, PAGE_LIMIT)
     resetWindow(plan.highlight)
@@ -886,7 +894,11 @@ export function Timeline({
     }
     pendingScrollEdgeRef.current = plan.scrollEdge
     anchorContextRef.current = plan.anchorContext
-    pauseReasonRef.current = plan.pauseReason
+    const decision = nextPause(
+      { pauseReason: pauseReasonRef.current, attached: attachedRef.current, inspecting: inspectingRef.current, intent: plan.pauseIntent },
+      'jump',
+    )
+    pauseReasonRef.current = decision.pause
     runPage(plan.params.direction, withFilter(plan.params), { resetIteration: true, attach: plan.attach })
     bump()
   }

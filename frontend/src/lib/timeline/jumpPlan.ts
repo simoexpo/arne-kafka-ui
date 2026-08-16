@@ -9,7 +9,12 @@ export type JumpTarget =
 
 export interface JumpPlan {
   anchorContext: AnchorContext
-  pauseReason: PauseReason
+  // H2: this is the jump's own STATIC intent only — never assigned directly
+  // to the live pause state. Every jump routes through pauseMachine's
+  // 'jump' event (as `intent`), which is the one place that decides what
+  // actually happens to the CURRENT pause reason (e.g. an explicit pause
+  // survives any jump — planJump has no input for that and must not decide it).
+  pauseIntent: PauseReason
   scrollEdge: 'top' | 'bottom'
   attach: boolean
   highlight: { partition: number; offset: number } | null
@@ -24,7 +29,7 @@ export function planJump(target: JumpTarget, pageLimit: number): JumpPlan {
     case 'now':
       return {
         anchorContext: 'default',
-        pauseReason: 'none',
+        pauseIntent: 'none',
         scrollEdge: 'top',
         attach: true,
         highlight: null,
@@ -33,7 +38,7 @@ export function planJump(target: JumpTarget, pageLimit: number): JumpPlan {
     case 'beginning':
       return {
         anchorContext: 'beginning',
-        pauseReason: 'auto',
+        pauseIntent: 'auto',
         scrollEdge: 'bottom',
         attach: false,
         highlight: null,
@@ -42,7 +47,7 @@ export function planJump(target: JumpTarget, pageLimit: number): JumpPlan {
     case 'offset':
       return {
         anchorContext: 'default',
-        pauseReason: 'auto',
+        pauseIntent: 'auto',
         scrollEdge: 'bottom',
         attach: false,
         highlight: { partition: target.partition, offset: target.offset },
@@ -57,7 +62,7 @@ export function planJump(target: JumpTarget, pageLimit: number): JumpPlan {
     case 'timestamp':
       return {
         anchorContext: 'default',
-        pauseReason: 'auto',
+        pauseIntent: 'auto',
         scrollEdge: 'bottom',
         attach: false,
         highlight: null,

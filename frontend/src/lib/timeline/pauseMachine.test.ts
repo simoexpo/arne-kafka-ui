@@ -195,10 +195,85 @@ describe('nextPause', () => {
       })
     })
 
-    it('preserves an explicit pause across reattach', () => {
+    // M2: this branch used to flush unconditionally, draining the buffer and
+    // zeroing the pill count while the UI still said paused — the exact
+    // "implicitly lifted" behavior `lastInspectionClosed` below refuses for
+    // the same pauseReason. An explicit pause is never implicitly lifted, so
+    // reattaching must leave it alone: no flush, same as scrollPinnedTop and
+    // lastInspectionClosed already do.
+    it('preserves an explicit pause across reattach WITHOUT flushing (an explicit pause is never implicitly lifted)', () => {
       expect(nextPause({ pauseReason: 'explicit', attached: false, inspecting: false }, 'reattached')).toEqual({
         pause: 'explicit',
-        flush: true,
+        flush: false,
+        jumpToNow: false,
+        scrollTop: false,
+      })
+    })
+
+    // M1: inspection dominance (design spec v1.7) applies here exactly like
+    // it does to scrollPinnedTop — catching the tail while a row is expanded
+    // must never flush/merge the buffer into the list out from under the
+    // reader's open inspection. Nothing about the pause reason changes
+    // either; the whole decision is a no-op until the inspection closes.
+    it('does NOT flush/merge while inspecting, even though the store just reattached (auto pause)', () => {
+      expect(nextPause({ pauseReason: 'auto', attached: false, inspecting: true }, 'reattached')).toEqual({
+        pause: 'auto',
+        flush: false,
+        jumpToNow: false,
+        scrollTop: false,
+      })
+    })
+
+    it('does NOT flush/merge while inspecting, starting from no prior pause', () => {
+      expect(nextPause({ pauseReason: 'none', attached: false, inspecting: true }, 'reattached')).toEqual({
+        pause: 'none',
+        flush: false,
+        jumpToNow: false,
+        scrollTop: false,
+      })
+    })
+
+    it('leaves an explicit pause untouched while inspecting too', () => {
+      expect(nextPause({ pauseReason: 'explicit', attached: false, inspecting: true }, 'reattached')).toEqual({
+        pause: 'explicit',
+        flush: false,
+        jumpToNow: false,
+        scrollTop: false,
+      })
+    })
+  })
+
+  // H2: every OTHER pause transition in the component routes through this
+  // table — handleJump used to be the one caller that kept its own inline
+  // table (assigning planJump's static `pauseIntent` straight to
+  // `pauseReasonRef`), which meant a jump was the only transition that could
+  // silently overwrite a user's EXPLICIT pause. `intent` is the jump's own
+  // static plan (see jumpPlan.ts) — purely descriptive, never a fact about
+  // the CURRENT pause state — so the table, not the plan, decides what
+  // actually happens to an existing explicit pause.
+  describe('jump', () => {
+    it('an explicit pause survives any jump, regardless of the jump\'s own intent', () => {
+      expect(
+        nextPause({ pauseReason: 'explicit', attached: true, inspecting: false, intent: 'none' }, 'jump'),
+      ).toEqual({ pause: 'explicit', flush: false, jumpToNow: false, scrollTop: false })
+      expect(
+        nextPause({ pauseReason: 'explicit', attached: false, inspecting: false, intent: 'auto' }, 'jump'),
+      ).toEqual({ pause: 'explicit', flush: false, jumpToNow: false, scrollTop: false })
+    })
+
+    it('an auto-pause defers entirely to the jump\'s own intent', () => {
+      expect(nextPause({ pauseReason: 'auto', attached: false, inspecting: false, intent: 'none' }, 'jump')).toEqual({
+        pause: 'none',
+        flush: false,
+        jumpToNow: false,
+        scrollTop: false,
+      })
+    })
+
+    it('no prior pause takes the jump\'s own intent (e.g. beginning/offset/timestamp auto-pause)', () => {
+      expect(nextPause({ pauseReason: 'none', attached: true, inspecting: false, intent: 'auto' }, 'jump')).toEqual({
+        pause: 'auto',
+        flush: false,
         jumpToNow: false,
         scrollTop: false,
       })

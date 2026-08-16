@@ -1342,6 +1342,46 @@ describe('Timeline', () => {
   })
 
   describe('jump control', () => {
+    // H2: `handleJump` used to assign `planJump`'s static intent straight to
+    // `pauseReasonRef`, bypassing `pauseMachine` entirely — the one caller
+    // that could silently overwrite a user's EXPLICIT pause. A beginning
+    // jump's own intent is 'auto', not 'explicit'; if the jump routes
+    // through the machine (which lets an explicit pause survive any jump),
+    // the later reattach must still leave it paused and buffered — an 'auto'
+    // pause dropped by the same jump would instead flush on reattach (see
+    // pauseMachine's 'reattached' branch).
+    it('an explicit pause survives a jump — the jump\'s own intent never overwrites it (H2)', async () => {
+      const tail = mockTail()
+      const user = userEvent.setup()
+      render(<Timeline cluster="prod" topic="orders" />)
+      await settleWithOneRow()
+
+      await user.click(screen.getByTestId('play-pause-toggle')) // explicit pause
+      expect(screen.getByTestId('play-pause-toggle')).toHaveAttribute('aria-pressed', 'true')
+
+      await user.click(screen.getByTestId('jump-beginning')) // this jump's OWN intent is 'auto'
+      await emit(1, 'match', mk(2))
+      await emit(1, 'page_end', { cursor: cur({ 0: 3 }), exhausted: false }) // forward cursor open, not exhausted yet
+      consumeLandingEcho()
+
+      await act(async () => tail.handlers().onMessage(mk(50)))
+      expect(screen.getByText('▲ 1 new')).toBeInTheDocument()
+
+      // Forward-paginate to the tail — this reattaches the window.
+      scrollToTopFarFromBottom()
+      const idx = FakeEventSource.instances.length - 1
+      await emit(idx, 'match', mk(3))
+      await emit(idx, 'page_end', { cursor: null, exhausted: true }) // caught the tail: reattached
+
+      // An explicit pause is never implicitly lifted by reattaching — unlike
+      // the jump's own 'auto' intent, which WOULD have been dropped here.
+      // The buffered message stays buffered; live stays off.
+      expect(screen.getByText('▲ 1 new')).toBeInTheDocument()
+      expect(screen.queryByText('p0·50')).not.toBeInTheDocument()
+      expect(screen.queryByText('● live')).not.toBeInTheDocument()
+      expect(screen.getByTestId('play-pause-toggle')).toHaveAttribute('aria-pressed', 'true')
+    })
+
     it('jump to beginning clears the store, loads a forward/beginning page, and pauses (auto)', async () => {
       const tail = mockTail()
       const user = userEvent.setup()

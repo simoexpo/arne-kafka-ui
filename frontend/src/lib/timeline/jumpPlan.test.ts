@@ -7,7 +7,7 @@ describe('planJump', () => {
   it('now: lands top, attached, resumes live, no highlight', () => {
     expect(planJump({ kind: 'now' }, PAGE_LIMIT)).toEqual({
       anchorContext: 'default',
-      pauseReason: 'none',
+      pauseIntent: 'none',
       scrollEdge: 'top',
       attach: true,
       highlight: null,
@@ -18,7 +18,7 @@ describe('planJump', () => {
   it('beginning: lands bottom, detached, auto-paused, reads forward from the topic start', () => {
     expect(planJump({ kind: 'beginning' }, PAGE_LIMIT)).toEqual({
       anchorContext: 'beginning',
-      pauseReason: 'auto',
+      pauseIntent: 'auto',
       scrollEdge: 'bottom',
       attach: false,
       highlight: null,
@@ -29,7 +29,7 @@ describe('planJump', () => {
   it('offset: lands bottom, detached, highlights the target row, reads forward from it', () => {
     expect(planJump({ kind: 'offset', partition: 2, offset: 42 }, PAGE_LIMIT)).toEqual({
       anchorContext: 'default',
-      pauseReason: 'auto',
+      pauseIntent: 'auto',
       scrollEdge: 'bottom',
       attach: false,
       highlight: { partition: 2, offset: 42 },
@@ -40,7 +40,7 @@ describe('planJump', () => {
   it('timestamp: lands bottom, detached, no highlight, reads forward from the resolved instant', () => {
     expect(planJump({ kind: 'timestamp', ts_ms: 12345 }, PAGE_LIMIT)).toEqual({
       anchorContext: 'default',
-      pauseReason: 'auto',
+      pauseIntent: 'auto',
       scrollEdge: 'bottom',
       attach: false,
       highlight: null,
