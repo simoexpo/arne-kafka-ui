@@ -21,6 +21,7 @@ import { ContinueScanButton } from './ContinueScanButton'
 import { FilterBar } from './FilterBar'
 import { JumpControl } from './JumpControl'
 import { useLiveTail } from './useLiveTail'
+import { useShowDelay } from './useShowDelay'
 import { useTimelinePage } from './useTimelinePage'
 import { TimelineHeader } from './TimelineHeader'
 
@@ -880,27 +881,12 @@ export function Timeline({
     ? `scanned ${progressScanned} records · ${progressMatches} matches — continue`
     : 'scanned far, nothing found here — continue'
 
-  // Show-delay the progress row (see PROGRESS_SHOW_DELAY_MS above): starts a
-  // timer the moment a filtered GESTURE begins, cleared (and the flag
-  // reset) the instant it stops — whether that's a genuine page_end, an
-  // error, or an explicit cancel (see `gestureRunning`'s own comment). B-2
-  // fix: this must gate on the GESTURE, not on any single page's own
-  // `state.loading` — an auto-continued page flips `state.loading` false
-  // then true again at every page boundary, which previously reset this
-  // timer on every boundary too, so a scan made of quick pages could run
-  // indefinitely without ever rendering anything. A gesture that never runs
-  // this long never flips the flag at all, so a fast scan renders nothing
-  // extra — not even for one frame.
+  // B-2 fix: gates on the GESTURE (a user-issued page plus every auto-continued empty page that follows it), not on
+  // any single page's own `state.loading` — an auto-continued page flips `state.loading` false then true again at
+  // every page boundary, which previously reset the show-delay on every boundary too, letting a scan made of quick
+  // pages run indefinitely without ever rendering anything.
   const scanRunning = filterActive && gestureRunning
-  const [progressVisible, setProgressVisible] = useState(false)
-  useEffect(() => {
-    if (!scanRunning) {
-      setProgressVisible(false)
-      return
-    }
-    const id = setTimeout(() => setProgressVisible(true), PROGRESS_SHOW_DELAY_MS)
-    return () => clearTimeout(id)
-  }, [scanRunning])
+  const progressVisible = useShowDelay(scanRunning, PROGRESS_SHOW_DELAY_MS)
 
   return (
     // Flex column filling whatever height TopicDetailPage's tab-body slot
