@@ -41,13 +41,15 @@ export function wheelScrollTopForIndex(
 // Standard "3× list, silently re-center near an edge" infinite-scroll
 // technique: one block-height is `count * rowHeight`; while `scrollTop`
 // stays within half a block-height of the MIDDLE block's own boundaries
-// (i.e. in `[0.5, 1.5) * blockHeight`), do nothing. Once it drifts past
-// either threshold (meaning the reader is approaching the start/end of the
-// tripled DOM list), jump the scroll position by exactly one block-height in
-// the opposite direction. Every block is an identical copy of the same
-// values, so the jump is invisible to the reader — the value under the
-// centerline doesn't change, only which copy is now "current". Returns null
-// when no rewrap is needed yet.
+// (i.e. in `[0.5, 1.5] * blockHeight`, closed at both ends — the checks
+// below are strict `<`/`>`, so landing on EXACTLY either boundary is itself
+// still a no-op), do nothing. Once it drifts past either threshold (meaning
+// the reader is approaching the start/end of the tripled DOM list), jump
+// the scroll position by exactly one block-height in the opposite
+// direction. Every block is an identical copy of the same values, so the
+// jump is invisible to the reader — the value under the centerline doesn't
+// change, only which copy is now "current". Returns null when no rewrap is
+// needed yet.
 export function wheelRewrapScrollTop(
   scrollTop: number,
   count: number,

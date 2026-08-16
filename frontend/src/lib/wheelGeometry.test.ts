@@ -30,6 +30,14 @@ describe('wheel geometry', () => {
     expect(wheelRewrapScrollTop(blockHeight * 2 - 50, count, rowHeight)).toBe(blockHeight * 2 - 50 - blockHeight)
   })
 
+  it('the no-op zone is closed at both ends: exactly 0.5x or 1.5x blockHeight is itself still a no-op', () => {
+    const count = 60
+    const rowHeight = 24
+    const blockHeight = count * rowHeight
+    expect(wheelRewrapScrollTop(blockHeight * 0.5, count, rowHeight)).toBeNull()
+    expect(wheelRewrapScrollTop(blockHeight * 1.5, count, rowHeight)).toBeNull()
+  })
+
   it('wheelIndexForScrollTop is the exact inverse of wheelScrollTopForIndex', () => {
     expect(wheelIndexForScrollTop(wheelScrollTopForIndex(33))).toBe(33)
     expect(wheelIndexForScrollTop(wheelScrollTopForIndex(0))).toBe(0)
