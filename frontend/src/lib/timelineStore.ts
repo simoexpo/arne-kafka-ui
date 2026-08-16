@@ -516,8 +516,10 @@ export function createSlidingWindowStore(cap = 2000): SlidingWindowStore {
 
   // Loop-based min/max — NOT a spread into `Math.min`/`Math.max` (`Math.min(...xs)`),
   // which blows the call stack (`RangeError`) somewhere past ~65k arguments.
-  // `xs` here is bounded by a single trim/insert's size, which has no
-  // built-in ceiling, so this must hold for arbitrarily large inputs.
+  // The only call sites pass a single trim's per-partition offsets, bounded
+  // by `excess` (i.e. by `cap`) — safely under that limit today — but the
+  // loop form costs nothing and stays correct even if a future caller feeds
+  // it something larger.
   function minOf(xs: number[]): number {
     let m = Infinity
     for (const x of xs) if (x < m) m = x
