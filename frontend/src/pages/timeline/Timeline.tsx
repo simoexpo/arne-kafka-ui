@@ -18,6 +18,7 @@ import { createLiveBuffer } from '../../lib/timeline/liveBuffer'
 import { planJump } from '../../lib/timeline/jumpPlan'
 import type { AnchorContext, PauseReason } from '../../lib/timeline/model'
 import { nextPause } from '../../lib/timeline/pauseMachine'
+import { decidePostPage } from '../../lib/timeline/postPage'
 import { classifyScroll } from '../../lib/timeline/scrollZones'
 import { stepSettling, type SettlingState } from '../../lib/timeline/settling'
 import { useFallingEdge } from './useFallingEdge'
@@ -595,33 +596,30 @@ export function Timeline({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  // Auto-continue / iteration-cap / partial-match-affordance decision (task
-  // 3): fires on the loading:true -> false edge of a page we ourselves
-  // issued (tracked via pendingDirectionRef). Unlike v1.3/v1.4, this effect
-  // no longer commits anything to the store itself — that already happened
-  // SYNCHRONOUSLY, in `runPage`'s `onPageEnd` callback (see its own comment
-  // for why: this effect runs a render later, which is fine for a decision
-  // that only ever starts ANOTHER async request, but was NOT fine for the
-  // store commit itself — a ref-based DOM handle, e.g. the scroll-viewport
-  // reposition effect below, would otherwise read stale content for exactly
-  // one render). This effect purely decides whether an empty (or partial,
-  // filtered) page should auto-continue, hit the iteration cap, or land
-  // normally — reading `state.exhausted`/`state.progress` fresh (unlike the
-  // synchronous callback, which must avoid stale-closure reads of `state`)
-  // and `storeRef.current.edges()` for the next cursor (already up to date,
-  // since the synchronous commit ran before this effect ever could).
+  // Fires on state.loading's true->false edge for a page we issued (pendingDirectionRef). The store commit
+  // itself already happened synchronously in runPage's onPageEnd (see its own comment) — this effect, a render
+  // later, only decides whether to auto-continue, offer a continue affordance, or stop.
   const autoContinueFallingEdge = useFallingEdge(state.loading)
   useEffect(() => {
     if (!autoContinueFallingEdge) return
     const direction = pendingDirectionRef.current
     if (direction === null) return
     pendingDirectionRef.current = null
-    if (state.error) {
-      // Fix round 1, M2: the page errored — nothing landed, `onPageEnd`
-      // never ran, and whatever it had accumulated so far was never
-      // committed. Drop the display overlay too (honest: the store's own
-      // edges never advanced for this page, so leaving its uncommitted
-      // matches on screen would misrepresent what's actually loaded).
+
+    const decision = decidePostPage({
+      error: state.error !== null,
+      exhausted: state.exhausted[direction],
+      matched: matchedRef.current,
+      filterActive: activeFilterApiRef.current !== null,
+      pageMatches: pageMatchesRef.current,
+      pageLimit: PAGE_LIMIT,
+      nextCursor: edgeCursorFor(direction),
+      iteration: iterationRef.current,
+      iterationCap: ITERATION_CAP,
+    })
+
+    if (decision === 'error-drop-overlay') {
+      // Nothing landed for this page — onPageEnd never ran — so drop its uncommitted overlay too.
       if (pageRowsRef.current.length > 0) {
         pageRowsRef.current = []
         bump()
@@ -629,40 +627,21 @@ export function Timeline({
       setGestureRunning(false)
       return
     }
-
-    if (state.exhausted[direction]) {
+    if (!state.exhausted[direction]) {
+      gestureScannedRef.current += state.progress?.scanned ?? 0
+      gestureMatchesRef.current += state.progress?.matches ?? 0
+    }
+    if (decision === 'stop') {
       setGestureRunning(false)
       return
     }
-    gestureScannedRef.current += state.progress?.scanned ?? 0
-    gestureMatchesRef.current += state.progress?.matches ?? 0
-    if (matchedRef.current) {
-      // A page that filled all the way to PAGE_LIMIT is a normal, complete
-      // page — the scroll sentinels already cover continuing from there.
-      // One that matched *something* but stopped short of a full page (the
-      // scan budget ran out before finding PAGE_LIMIT matches, cursor
-      // non-null, not exhausted) must say so and offer to continue rather
-      // than end quietly (spec: no silent stops) — but must NOT
-      // auto-continue on its own, since the user already has real matches
-      // to look at.
-      if (activeFilterApiRef.current !== null && pageMatchesRef.current < PAGE_LIMIT) {
-        setContinueDirection(direction)
-      }
-      setGestureRunning(false)
-      return
-    }
-    const nextCursor = edgeCursorFor(direction)
-    if (nextCursor === null) {
-      setGestureRunning(false)
-      return
-    }
-    if (iterationRef.current >= ITERATION_CAP) {
+    if (decision === 'offer-continue') {
       setContinueDirection(direction)
       setGestureRunning(false)
       return
     }
     iterationRef.current += 1
-    runPage(direction, withFilter({ direction, limit: PAGE_LIMIT, cursor: nextCursor }), {
+    runPage(direction, withFilter({ direction, limit: PAGE_LIMIT, cursor: decision.cursor }), {
       resetIteration: false,
       attach: false,
     })
