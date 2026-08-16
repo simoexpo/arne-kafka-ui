@@ -1,11 +1,6 @@
-// Scroll offset below which the viewport counts as "pinned to top" —
-// roughly half a row, per the design spec's threshold.
+// Design spec threshold: roughly half a row.
 const TOP_PIN_THRESHOLD = 20
-// How close to the bottom (in px of unscrolled remaining distance) counts as
-// "reached the last row" for the bottom-sentinel scroll-triggered
-// pagination (spec: "scroll down -> next 100 older"). Same order of
-// magnitude as TOP_PIN_THRESHOLD, kept as its own named constant since it
-// guards a different feature (load-older, not live-pause).
+// Design spec: "scroll down -> next 100 older".
 const BOTTOM_PIN_THRESHOLD = 20
 
 export interface ScrollMetrics {

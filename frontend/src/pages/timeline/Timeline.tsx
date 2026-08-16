@@ -30,11 +30,7 @@ const PAGE_LIMIT = 100
 // topic can't spin forever. ~20 auto-continues (per the design spec) is the
 // safety cap; beyond it we stop and hand control back with an affordance.
 const ITERATION_CAP = 20
-// Auto-pause buffer cap (see design spec): once paused (auto or explicit),
-// live messages that pass the predicate accumulate here instead of the
-// store. Capped at 500 — beyond that we drop the OLDEST buffered entry per
-// arrival and switch the pill to an honest "500+ · older dropped" label
-// rather than a raw (and increasingly meaningless) count.
+// Live-buffer cap while paused/detached (design spec).
 const BUFFER_CAP = 500
 // Bounds a jump landing's settling re-snaps (see `settlingRef`'s own
 // comment on `Timeline`) — content that never genuinely stabilizes (a
@@ -269,14 +265,9 @@ export function Timeline({
     setAttachedState(value)
   }, [])
 
-  // Pause machinery: pauseReasonRef is the source of truth (read at render
-  // time, like storeRef), mutated directly and paired with `bump()` so a
-  // change is visible next render — same pattern as the store itself,
-  // avoiding stale closures in the tail effect (which only runs once, on
-  // [cluster, topic]). liveBufferRef holds the actual live messages held
-  // back while paused, plus the received/overflowed counters — see
-  // `createLiveBuffer`'s own doc comment for the buffering policy
-  // (capped at BUFFER_CAP, oldest dropped first).
+  // pauseReasonRef is a ref (not state), mutated directly and paired with
+  // `bump()`: the tail effect only runs once, on [cluster, topic], so state
+  // would close over a stale value there.
   const pauseReasonRef = useRef<PauseReason>('none')
   const liveBufferRef = useRef(createLiveBuffer(BUFFER_CAP))
 
