@@ -24,6 +24,16 @@ fn page_made_no_progress(taken_is_empty: bool, any_incomplete_window: bool, canc
     taken_is_empty && any_incomplete_window && !cancelled
 }
 
+/// The user-visible text for a stalled chunk. This is OUR OWN read
+/// deadline giving up (`fetch_ranges_blocking`'s wall-clock cap,
+/// `FETCH_DEADLINE` — see `fetch.rs`) leaving a window incomplete, not the
+/// broker going silent — attributing that to Kafka would blame it for a
+/// limit this service itself imposes. Product voice: still no
+/// "page"/"window"/"chunk" internals on the wire.
+fn no_progress_message() -> &'static str {
+    "the cluster didn't return new records within the fetch deadline"
+}
+
 /// Per-partition span of one scan iteration ("chunk"): used by every chunk
 /// of a filtered page, and by every chunk after the first on an unfiltered
 /// one (whose first chunk uses `limit` instead — see `chunk_span`).
@@ -453,13 +463,10 @@ pub fn run_page(
             // path.
             let any_incomplete_window = is_complete.iter().any(|&c| !c);
             if page_made_no_progress(!taken.any_taken, any_incomplete_window, cancelled.load(Ordering::SeqCst)) {
-                // Product voice: no "page"/"window"/"broker" internals on
-                // the wire — this is what a user would observe (Kafka went
-                // quiet mid-read), not how the scan loop tracks it.
-                let _ = tx.send(ApiError::kafka(
-                    &handle.name,
-                    "Kafka stopped returning messages while reading this topic",
-                ).into()).await;
+                // Truthful about WHOSE deadline this is (see
+                // `no_progress_message`'s own doc comment) — never blames
+                // Kafka for our own `fetch_ranges_blocking` cap.
+                let _ = tx.send(ApiError::kafka(&handle.name, no_progress_message()).into()).await;
                 return;
             }
 
@@ -539,5 +546,19 @@ mod tests {
         // A client disconnect mid-scan can legitimately leave nothing taken;
         // that's not a broker anomaly and must not be reported as one.
         assert!(!page_made_no_progress(true, true, true));
+    }
+
+    /// `page_made_no_progress` trips on OUR OWN `fetch_ranges_blocking`
+    /// deadline/cap leaving a window incomplete — the broker itself may be
+    /// perfectly healthy. The message must own that, never blame Kafka for
+    /// going silent.
+    #[test]
+    fn no_progress_message_blames_our_own_deadline_not_kafka() {
+        let msg = no_progress_message();
+        assert_eq!(msg, "the cluster didn't return new records within the fetch deadline");
+        assert!(
+            !msg.to_lowercase().contains("kafka"),
+            "must not attribute a stall under our own deadline to Kafka going quiet: {msg:?}"
+        );
     }
 }
