@@ -40,7 +40,7 @@ export function TimeZoneToggle() {
       onClick={() => setTimeDisplayMode(mode === 'utc' ? 'local' : 'utc')}
     >
       <span
-        className={`rounded-full px-2 py-0.5 ${
+        className={`rounded-full px-2 py-[3px] ${
           mode === 'utc'
             ? 'bg-sky-100 font-medium text-sky-700 dark:bg-sky-500/20 dark:text-sky-300'
             : 'text-zinc-400 dark:text-zinc-600'
@@ -50,7 +50,7 @@ export function TimeZoneToggle() {
       </span>
       <span
         title={`browser time — currently ${localOffset}`}
-        className={`rounded-full px-2 py-0.5 ${
+        className={`rounded-full px-2 py-[3px] ${
           mode === 'local'
             ? 'bg-sky-100 font-medium text-sky-700 dark:bg-sky-500/20 dark:text-sky-300'
             : 'text-zinc-400 dark:text-zinc-600'
