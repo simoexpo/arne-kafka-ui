@@ -1,3 +1,4 @@
+import type { TimelineDirection } from '../api/sse'
 import type { MessageOut } from '../api/types'
 import { decodeCursor, encodeCursor } from './timelineCursor'
 
@@ -102,7 +103,7 @@ export interface SlidingWindowStore {
    */
   insertPage(
     rows: MessageOut[],
-    direction: 'back' | 'forward',
+    direction: TimelineDirection,
     startPositions: Record<number, number> | null,
     contCursor: string | null,
     /**
@@ -570,7 +571,7 @@ export function createSlidingWindowStore(cap = 2000): SlidingWindowStore {
    * this page never asked about)? `null` startPositions (an anchor page)
    * is never stale — it has no prior request to be stale relative to.
    */
-  function isStale(direction: 'back' | 'forward', startPositions: Record<number, number> | null): boolean {
+  function isStale(direction: TimelineDirection, startPositions: Record<number, number> | null): boolean {
     if (startPositions === null) return false
     const map = direction === 'back' ? bottomMap : topMap
     for (const [pStr, startPos] of Object.entries(startPositions)) {

@@ -18,6 +18,8 @@
 // and real cursors handed back by the backend's `PageEnd` event (which do
 // carry `direction`, since the Rust `Cursor` struct always serializes it).
 
+import type { TimelineDirection } from '../api/sse'
+
 function bytesToBase64(bytes: Uint8Array): string {
   let binary = ''
   for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i])
@@ -42,7 +44,7 @@ interface DecodedWire {
   positions: [number, number][]
   // Present on real backend-minted cursors; never read, kept only so the
   // shape lines up with what `JSON.parse` actually returns.
-  direction?: 'back' | 'forward'
+  direction?: TimelineDirection
 }
 
 /**

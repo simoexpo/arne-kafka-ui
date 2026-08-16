@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useReducer, useRef, useState } from 'react'
 import { tailTopic } from '../../api/sse'
-import type { TimelinePageParams } from '../../api/sse'
+import type { TimelineDirection, TimelinePageParams } from '../../api/sse'
 import type { MessageOut } from '../../api/types'
 import { FilterInput } from '../../components/FilterInput'
 import { FilterHelp } from '../../components/FilterHelp'
@@ -62,7 +62,7 @@ const MAX_SETTLE_ATTEMPTS = 10
 // all, never what it shows once it does.
 const PROGRESS_SHOW_DELAY_MS = 400
 
-type Direction = 'back' | 'forward'
+type Direction = TimelineDirection
 // 'none': live inserts straight into the store (only takes effect while
 // ATTACHED — see `attached` below). 'auto': paused by scrolling off the top
 // — returning to the top resumes, but only while attached. 'explicit':
