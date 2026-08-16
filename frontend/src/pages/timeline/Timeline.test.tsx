@@ -68,6 +68,11 @@ async function emit(index: number, name: string, data: unknown) {
   })
 }
 
+async function settleWithOneRow(index = 0) {
+  await emit(index, 'match', mk(1))
+  await emit(index, 'page_end', { cursor: null, exhausted: true })
+}
+
 // Spies on every `el.scrollTop = ...` assignment across the DOM (not just
 // one element) — necessary because a jump always unmounts/remounts
 // MessageList in between (see the pause-machinery/jump-control describe
@@ -319,11 +324,6 @@ describe('Timeline', () => {
   // that appearing/disappearing volatile elements never change the relative
   // DOM order of play/pause and the zone toggle.
   describe('stable header controls (anchored right of the volatile ones)', () => {
-    async function settleWithOneRow(index = 0) {
-      await emit(index, 'match', mk(1))
-      await emit(index, 'page_end', { cursor: null, exhausted: true })
-    }
-
     it('orders play/pause immediately before the zone toggle, both after the pill/live-dot slot', async () => {
       mockTail()
       render(<Timeline cluster="prod" topic="orders" />)
@@ -545,11 +545,6 @@ describe('Timeline', () => {
   })
 
   describe('pause machinery', () => {
-    async function settleWithOneRow(index = 0) {
-      await emit(index, 'match', mk(1))
-      await emit(index, 'page_end', { cursor: null, exhausted: true })
-    }
-
     function scrollTo(scrollTop: number) {
       fireEvent.scroll(screen.getByTestId('timeline-scroll'), { target: { scrollTop } })
     }
