@@ -36,7 +36,7 @@ export function TimeZoneToggle() {
       type="button"
       aria-label="toggle time zone display"
       data-mode={mode}
-      className="flex items-center gap-1 rounded-full border border-zinc-300 p-1 text-sm dark:border-zinc-700"
+      className="flex items-center gap-1 rounded-full border border-zinc-300 p-1 text-xs dark:border-zinc-700"
       onClick={() => setTimeDisplayMode(mode === 'utc' ? 'local' : 'utc')}
     >
       <span

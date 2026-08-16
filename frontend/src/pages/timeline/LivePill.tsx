@@ -73,7 +73,7 @@ export function PlayPauseToggle({ paused, onClick }: { paused: boolean; onClick:
       aria-label={paused ? 'resume live updates' : 'pause live updates'}
       aria-pressed={paused}
       onClick={onClick}
-      className="flex items-center gap-1 rounded-full border border-zinc-300 p-1 text-sm dark:border-zinc-700"
+      className="flex items-center gap-1 rounded-full border border-zinc-300 p-1 text-xs dark:border-zinc-700"
     >
       <span className={`rounded-full p-1 ${!paused ? 'bg-emerald-100 dark:bg-emerald-500/20' : ''}`}>
         <PlayIcon active={!paused} />
