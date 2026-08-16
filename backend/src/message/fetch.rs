@@ -237,11 +237,3 @@ pub async fn to_one_message_out(r: RawRecord, sr: Option<&SchemaRegistry>) -> Me
         }).collect(),
     }
 }
-
-pub async fn to_message_out(records: Vec<RawRecord>, sr: Option<&SchemaRegistry>) -> Vec<MessageOut> {
-    let mut out = Vec::with_capacity(records.len());
-    for r in records {
-        out.push(to_one_message_out(r, sr).await);
-    }
-    out
-}
