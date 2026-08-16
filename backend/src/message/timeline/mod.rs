@@ -6,22 +6,26 @@
 //! - `cursor` — the `Direction`/`Cursor` wire contract: bound semantics and
 //!   the base64+JSON codec.
 //! - `anchor` — where a fresh (non-cursor) page starts: `Anchor` and
-//!   `initial_positions`.
+//!   `initial_positions`, plus resolving a validated `TimelineAnchorInput`
+//!   into positions (`resolve_positions_blocking`) — the only blocking Kafka
+//!   round trips outside `engine` (`OffsetsForTimes`, and for a forward
+//!   offset anchor, one single-record fetch).
 //! - `window` — per-partition window arithmetic and the hardening applied to
 //!   untrusted positions: `page_windows`, `at_edge`, `clamp_positions`,
 //!   `cap_windows_to_budget`.
 //! - `merge` — the cross-partition ordering rules: `merge_prefers` (merge
 //!   step) and `chunk_display_order` (emission order).
 //! - `event` — `TimelineEvent`, what a page emits.
-//! - `engine` — `run_page`, the only part that talks to a cluster.
+//! - `engine` — `run_page`, the async scan loop that reads and decodes pages.
 //!
-//! Everything outside `engine` is pure: no I/O, no Kafka client, nothing
-//! async, so it is unit-tested without a broker. `run_page` drives those
-//! pure pieces against a real cluster: watermarks and starting positions are
-//! resolved by the caller (`api::messages`, one watermarks round trip per
-//! request) and handed in; `run_page` computes windows, scans and decodes
-//! them, and emits `TimelineEvent`s over an mpsc channel — the SSE handler
-//! just maps those to wire events.
+//! Everything outside `engine` and `anchor`'s two `_blocking` functions is
+//! pure: no I/O, no Kafka client, nothing async, so it is unit-tested
+//! without a broker. `api::messages` fetches watermarks once per request,
+//! calls `resolve_positions_blocking` for a fresh page (a cursor page's
+//! positions are already known from decoding alone), then hands the
+//! resolved positions to `run_page`, which computes windows, scans and
+//! decodes them, and emits `TimelineEvent`s over an mpsc channel — the SSE
+//! handler just maps those to wire events.
 //!
 //! The contract these modules implement is
 //! `docs/superpowers/specs/2026-08-13-messages-timeline-design.md` — every
@@ -38,7 +42,7 @@ mod event;
 mod merge;
 mod window;
 
-pub use anchor::{initial_positions, Anchor};
+pub use anchor::{initial_positions, resolve_positions_blocking, Anchor, TimelineAnchorInput};
 pub use cursor::{Cursor, Direction};
 pub use engine::run_page;
 pub use event::TimelineEvent;

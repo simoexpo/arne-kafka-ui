@@ -1,3 +1,9 @@
+use crate::cluster::{ClusterHandle, ADMIN_TIMEOUT};
+use crate::error::{self, ApiError};
+use crate::message::fetch;
+
+use super::cursor::Direction;
+
 /// Where a fresh (non-cursor) page request starts from.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Anchor {
@@ -85,6 +91,95 @@ pub fn initial_positions(watermarks: &[(i32, i64, i64)], anchor: &Anchor) -> Vec
             })
             .collect(),
     }
+}
+
+/// A fresh (non-cursor) page request's anchor, already validated by the
+/// caller (`api::messages::TimelineParams` parsing) but not yet resolved
+/// against a cluster — resolving `Offset`/`Timestamp` into positions needs
+/// watermarks and, for a forward offset anchor, a single-record fetch, both
+/// of which are round trips `resolve_positions_blocking` below performs.
+pub enum TimelineAnchorInput {
+    Latest,
+    Beginning,
+    Offset { partition: i32, offset: i64 },
+    Timestamp { ts_ms: i64 },
+}
+
+/// Resolves a timestamp to each partition's first offset at-or-after it, one
+/// `OffsetsForTimes` round trip covering every partition in `watermarks`.
+/// `None` for a partition means no message at/after `ts_ms` there (the
+/// timestamp is past that partition's newest message).
+pub fn resolve_timestamp_offsets_blocking(
+    handle: &ClusterHandle,
+    topic: &str,
+    watermarks: &[(i32, i64, i64)],
+    ts_ms: i64,
+) -> Result<Vec<(i32, Option<i64>)>, ApiError> {
+    use rdkafka::consumer::Consumer;
+    use rdkafka::topic_partition_list::TopicPartitionList;
+    use rdkafka::Offset;
+    let mut tpl = TopicPartitionList::new();
+    for &(p, _, _) in watermarks {
+        tpl.add_partition_offset(topic, p, Offset::Offset(ts_ms))
+            .map_err(|e| error::from_kafka(&handle.name, "offsets_for_times", &e))?;
+    }
+    let resolved = handle.consumer()
+        .offsets_for_times(tpl, ADMIN_TIMEOUT)
+        .map_err(|e| error::from_kafka(&handle.name, "offsets_for_times", &e))?;
+    Ok(resolved.elements().iter().map(|e| {
+        let start = match e.offset() {
+            Offset::Offset(o) => Some(o),
+            _ => None, // no message at/after ts in this partition
+        };
+        (e.partition(), start)
+    }).collect())
+}
+
+/// Resolves a fresh page request's starting positions: builds the resolved
+/// `Anchor` from the validated `TimelineAnchorInput` (which may need its own
+/// Kafka round trips — a timestamp anchor resolves offsets-for-times, a
+/// forward offset anchor additionally fetches the anchored message's own
+/// timestamp first) and hands it to `initial_positions`. `watermarks` is the
+/// caller's already-fetched watermarks round trip — nothing here re-fetches
+/// them.
+pub fn resolve_positions_blocking(
+    handle: &ClusterHandle,
+    topic: &str,
+    watermarks: &[(i32, i64, i64)],
+    input: TimelineAnchorInput,
+    direction: Direction,
+) -> Result<Vec<(i32, i64)>, ApiError> {
+    let anchor = match input {
+        TimelineAnchorInput::Latest => Anchor::Latest,
+        TimelineAnchorInput::Beginning => Anchor::Beginning,
+        TimelineAnchorInput::Offset { partition, offset } => {
+            // Owner ruling 2026-08-15: `direction=back` keeps the original,
+            // deliberately simpler `Offset` behavior (pins every other
+            // partition at its high watermark — documented deferral, see
+            // `Anchor::Offset`'s own doc comment). Only a forward read gets
+            // the new alignment: resolve the anchored message's own
+            // timestamp (a bounded single-record fetch — same consumer
+            // discipline as everything else here) and align every other
+            // partition at that instant, the same way a timestamp anchor
+            // would.
+            if direction == Direction::Forward {
+                let anchor_ts = fetch::fetch_one_record_blocking(&handle.config, topic, partition, offset)?
+                    .and_then(|r| r.timestamp_ms)
+                    .ok_or_else(|| ApiError::bad_request(format!(
+                        "no message with a timestamp at partition {partition} offset {offset}"
+                    )))?;
+                let aligned = resolve_timestamp_offsets_blocking(handle, topic, watermarks, anchor_ts)?;
+                Anchor::OffsetForwardAligned { partition, offset, aligned }
+            } else {
+                Anchor::Offset { partition, offset }
+            }
+        }
+        TimelineAnchorInput::Timestamp { ts_ms } => {
+            let resolved = resolve_timestamp_offsets_blocking(handle, topic, watermarks, ts_ms)?;
+            Anchor::TimestampResolved(resolved)
+        }
+    };
+    Ok(initial_positions(watermarks, &anchor))
 }
 
 #[cfg(test)]

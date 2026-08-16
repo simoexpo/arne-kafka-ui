@@ -1,45 +1,18 @@
-use crate::cluster::{ClusterHandle, ADMIN_TIMEOUT};
-use crate::error::{self, ApiError};
+use crate::error::ApiError;
 use crate::message::fetch;
 use crate::message::filter::Filter;
 use crate::message::tail;
-use crate::message::timeline::{self, TimelineEvent};
+use crate::message::timeline::{self, TimelineAnchorInput, TimelineEvent};
 use crate::state::AppState;
 use axum::extract::{Path, Query, State};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use futures_util::stream::Stream;
-use rdkafka::consumer::Consumer;
 use serde::Deserialize;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::StreamExt as _;
-
-pub fn ts_starts_blocking(
-    handle: &ClusterHandle,
-    topic: &str,
-    watermarks: &[(i32, i64, i64)],
-    ts_ms: i64,
-) -> Result<Vec<(i32, Option<i64>)>, ApiError> {
-    use rdkafka::topic_partition_list::TopicPartitionList;
-    use rdkafka::Offset;
-    let mut tpl = TopicPartitionList::new();
-    for &(p, _, _) in watermarks {
-        tpl.add_partition_offset(topic, p, Offset::Offset(ts_ms))
-            .map_err(|e| error::from_kafka(&handle.name, "offsets_for_times", &e))?;
-    }
-    let resolved = handle.consumer()
-        .offsets_for_times(tpl, ADMIN_TIMEOUT)
-        .map_err(|e| error::from_kafka(&handle.name, "offsets_for_times", &e))?;
-    Ok(resolved.elements().iter().map(|e| {
-        let start = match e.offset() {
-            Offset::Offset(o) => Some(o),
-            _ => None, // no message at/after ts in this partition
-        };
-        (e.partition(), start)
-    }).collect())
-}
 
 /// Sets the cancel flag when the SSE stream is dropped (client disconnected),
 /// stopping every partition scanner at its next poll iteration — no zombie
@@ -67,32 +40,24 @@ pub struct TimelineParams {
 
 /// Validated before any Kafka round-trip: a malformed request must 400
 /// fast, even against a topic that doesn't exist and even on a request that
-/// would otherwise stream.
-enum TimelineAnchorInput {
-    Latest,
-    Beginning,
-    Offset { partition: i32, offset: i64 },
-    Timestamp { ts_ms: i64 },
-}
-
-impl TimelineAnchorInput {
-    fn parse(params: &TimelineParams) -> Result<Self, ApiError> {
-        match params.anchor.as_deref() {
-            Some("latest") => Ok(TimelineAnchorInput::Latest),
-            Some("beginning") => Ok(TimelineAnchorInput::Beginning),
-            Some("offset") => Ok(TimelineAnchorInput::Offset {
-                partition: params.partition
-                    .ok_or_else(|| ApiError::bad_request("anchor=offset requires partition"))?,
-                offset: params.offset
-                    .ok_or_else(|| ApiError::bad_request("anchor=offset requires offset"))?,
-            }),
-            Some("timestamp") => Ok(TimelineAnchorInput::Timestamp {
-                ts_ms: params.ts_ms
-                    .ok_or_else(|| ApiError::bad_request("anchor=timestamp requires ts_ms"))?,
-            }),
-            Some(other) => Err(ApiError::bad_request(format!("unknown anchor '{other}'"))),
-            None => unreachable!("cursor xor anchor already validated by the caller"),
-        }
+/// would otherwise stream. Parses into `timeline::TimelineAnchorInput`,
+/// which `timeline::resolve_positions_blocking` resolves into positions.
+fn parse_anchor_input(params: &TimelineParams) -> Result<TimelineAnchorInput, ApiError> {
+    match params.anchor.as_deref() {
+        Some("latest") => Ok(TimelineAnchorInput::Latest),
+        Some("beginning") => Ok(TimelineAnchorInput::Beginning),
+        Some("offset") => Ok(TimelineAnchorInput::Offset {
+            partition: params.partition
+                .ok_or_else(|| ApiError::bad_request("anchor=offset requires partition"))?,
+            offset: params.offset
+                .ok_or_else(|| ApiError::bad_request("anchor=offset requires offset"))?,
+        }),
+        Some("timestamp") => Ok(TimelineAnchorInput::Timestamp {
+            ts_ms: params.ts_ms
+                .ok_or_else(|| ApiError::bad_request("anchor=timestamp requires ts_ms"))?,
+        }),
+        Some(other) => Err(ApiError::bad_request(format!("unknown anchor '{other}'"))),
+        None => unreachable!("cursor xor anchor already validated by the caller"),
     }
 }
 
@@ -162,7 +127,7 @@ pub async fn timeline_sse(
             // request rather than a version mismatch to reject.
             PositionSource::FromCursor(decoded.positions)
         }
-        None => PositionSource::FromAnchor(TimelineAnchorInput::parse(&params)?),
+        None => PositionSource::FromAnchor(parse_anchor_input(&params)?),
     };
 
     let handle = state.registry.get(&cluster)?;
@@ -194,39 +159,7 @@ pub async fn timeline_sse(
             let positions = match source {
                 PositionSource::FromCursor(positions) => positions,
                 PositionSource::FromAnchor(input) => {
-                    let anchor = match input {
-                        TimelineAnchorInput::Latest => timeline::Anchor::Latest,
-                        TimelineAnchorInput::Beginning => timeline::Anchor::Beginning,
-                        TimelineAnchorInput::Offset { partition, offset } => {
-                            // Owner ruling 2026-08-15: `direction=back` keeps
-                            // the original, deliberately simpler `Offset`
-                            // behavior (pins every other partition at its
-                            // high watermark — documented deferral, see
-                            // `Anchor::Offset`'s own doc comment). Only a
-                            // forward read gets the new alignment: resolve
-                            // the anchored message's own timestamp (a
-                            // bounded single-record fetch — same consumer
-                            // discipline as everything else here) and align
-                            // every other partition at that instant, the
-                            // same way a timestamp anchor would.
-                            if direction == timeline::Direction::Forward {
-                                let anchor_ts = fetch::fetch_one_record_blocking(&handle.config, &topic, partition, offset)?
-                                    .and_then(|r| r.timestamp_ms)
-                                    .ok_or_else(|| ApiError::bad_request(format!(
-                                        "no message with a timestamp at partition {partition} offset {offset}"
-                                    )))?;
-                                let aligned = ts_starts_blocking(&handle, &topic, &wm, anchor_ts)?;
-                                timeline::Anchor::OffsetForwardAligned { partition, offset, aligned }
-                            } else {
-                                timeline::Anchor::Offset { partition, offset }
-                            }
-                        }
-                        TimelineAnchorInput::Timestamp { ts_ms } => {
-                            let resolved = ts_starts_blocking(&handle, &topic, &wm, ts_ms)?;
-                            timeline::Anchor::TimestampResolved(resolved)
-                        }
-                    };
-                    timeline::initial_positions(&wm, &anchor)
+                    timeline::resolve_positions_blocking(&handle, &topic, &wm, input, direction)?
                 }
             };
             Ok((positions, wm))
