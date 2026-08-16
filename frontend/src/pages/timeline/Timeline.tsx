@@ -1224,15 +1224,31 @@ export function Timeline({
             ? 'no messages loaded'
             : formatWindowRange(rows.at(-1)!.timestamp_ms, rows[0].timestamp_ms, timeDisplayMode)}
         </h2>
+        {/* Owner feedback (stability): the pill/live-dot are the VOLATILE
+            members of this cluster — they pop in and out with network
+            activity, which used to shove the clickable controls (play/pause,
+            the zone toggle) sideways underneath the reader's cursor. Fixed
+            by ANCHORING from the right rather than relying on ordering
+            alone: this row's parent is `justify-between` with exactly two
+            children (the `h2` and this div), so this div's own right edge
+            sits flush against the header line's right edge regardless of
+            its content width — and within it, plain flex-row order means
+            the LAST child is flush against THAT edge. Placing the zone
+            toggle last (rightmost/outermost) and the play/pause-or-staleness
+            slot immediately before it (second-to-last) pins both at a fixed
+            distance from that right edge no matter what the volatile
+            elements to their left do; the volatile pill/dot come FIRST
+            (closest to the free space between the two `h2`/controls
+            children), so their own appearing/disappearing only ever grows
+            or shrinks that free space, never the position of anything to
+            their right. See Timeline.test.tsx's "stable header controls"
+            suite for the pixel-stability assertion. */}
         <div className="flex items-center gap-2">
-          <TimeZoneToggle />
           <LivePill count={bufferReceivedRef.current} capped={bufferOverflowRef.current} attached={attached} onClick={handlePillClick} />
+          {live && attached && !paused && <span className="animate-pulse text-emerald-500">● live</span>}
           {live && attached ? (
-            // Attached: the normal live indicator/toggle cluster.
-            <>
-              {!paused && <span className="animate-pulse text-emerald-500">● live</span>}
-              <PlayPauseToggle paused={paused} onClick={handlePlayPauseToggle} />
-            </>
+            // Attached: the normal live play/pause toggle.
+            <PlayPauseToggle paused={paused} onClick={handlePlayPauseToggle} />
           ) : !attached ? (
             // Detached (design spec v1.3, owner ruling 2026-08-15): the
             // toggle IS the mode signal — always shown lit paused (live
@@ -1248,6 +1264,7 @@ export function Timeline({
             // is genuinely missing) — keep today's aging/alarm tiers.
             <StalenessChip asOf={rows[0]?.timestamp_ms ?? null} failed={false} />
           )}
+          <TimeZoneToggle />
         </div>
       </div>
       <div className="flex flex-wrap items-center gap-3">

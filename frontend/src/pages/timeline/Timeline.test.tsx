@@ -308,6 +308,54 @@ describe('Timeline', () => {
     expect(screen.getByRole('button', { name: /time zone/i })).toHaveAttribute('data-mode', 'utc')
   })
 
+  // Owner feedback 2026-08-16: the pill/live-dot are VOLATILE (they pop in
+  // and out with network activity) — they must never shove the STABLE,
+  // clickable controls (play/pause, the zone toggle) sideways. Fixed by
+  // anchoring those two rightmost/outermost in DOM order (see the render's
+  // own comment for why plain DOM order is enough, given the parent row's
+  // `justify-between`). jsdom does no real layout, so pixel positions can't
+  // be asserted here (see the Playwright rect-stability check run against
+  // the real app) — this suite instead pins the one thing jsdom CAN prove:
+  // that appearing/disappearing volatile elements never change the relative
+  // DOM order of play/pause and the zone toggle.
+  describe('stable header controls (anchored right of the volatile ones)', () => {
+    async function settleWithOneRow(index = 0) {
+      await emit(index, 'match', mk(1))
+      await emit(index, 'page_end', { cursor: null, exhausted: true })
+    }
+
+    it('orders play/pause immediately before the zone toggle, both after the pill/live-dot slot', async () => {
+      mockTail()
+      render(<Timeline cluster="prod" topic="orders" />)
+      await settleWithOneRow()
+
+      const playPause = screen.getByTestId('play-pause-toggle')
+      const zoneToggle = screen.getByRole('button', { name: /time zone/i })
+      // eslint-disable-next-line no-bitwise
+      expect(playPause.compareDocumentPosition(zoneToggle) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    })
+
+    it('the pill appearing does not reorder play/pause relative to the zone toggle', async () => {
+      const tail = mockTail()
+      render(<Timeline cluster="prod" topic="orders" />)
+      await settleWithOneRow()
+
+      const zoneToggle = screen.getByRole('button', { name: /time zone/i })
+      expect(screen.queryByTestId('live-pill')).not.toBeInTheDocument()
+
+      fireEvent.scroll(screen.getByTestId('timeline-scroll'), { target: { scrollTop: 100 } }) // auto-pause
+      await act(async () => tail.handlers().onMessage(mk(5)))
+      expect(screen.getByTestId('live-pill')).toBeInTheDocument()
+
+      const pill = screen.getByTestId('live-pill')
+      const playPause = screen.getByTestId('play-pause-toggle')
+      // eslint-disable-next-line no-bitwise
+      expect(pill.compareDocumentPosition(playPause) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+      // eslint-disable-next-line no-bitwise
+      expect(playPause.compareDocumentPosition(zoneToggle) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    })
+  })
+
   it('header reads gracefully before any row has loaded', () => {
     mockTail()
     render(<Timeline cluster="prod" topic="orders" />)
