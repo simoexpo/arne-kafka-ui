@@ -232,6 +232,15 @@ pub async fn timeline_sse(
     let (rx, guard): (mpsc::Receiver<TimelineEvent>, CancelOnDrop) = match validated {
         Err(e) => single_event_stream(e.into()),
         Ok((direction, limit, source, filter)) => {
+            // Residual pre-stream error, deliberately not folded into
+            // `resolved` below: an unknown cluster still short-circuits
+            // here as a pre-stream 404, same as any other handler — a
+            // client with an otherwise-valid request but a bad cluster name
+            // sees it as a generic "connection lost" from `EventSource`
+            // (no `text/event-stream` response body was ever produced to
+            // carry an in-stream event), unlike every OTHER validation
+            // failure in this handler, which surfaces as a structured
+            // in-stream error instead. Left as-is.
             let handle = state.registry.get(&cluster)?;
 
             // One watermarks round trip per page request either way: an anchor

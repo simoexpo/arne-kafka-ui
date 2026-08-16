@@ -129,12 +129,12 @@ fn run_consumer_blocking(
     out: mpsc::Sender<fetch::RawRecord>,
     stall_timeout: Duration,
 ) -> Result<(), String> {
-    let consumer: BaseConsumer = cc.create().map_err(|e| format!("create tail consumer: {e}"))?;
+    let consumer: BaseConsumer = cc.create().map_err(|e| format!("start reading live messages: {e}"))?;
     let mut tpl = TopicPartitionList::new();
     for &(p, _, _) in watermarks {
-        tpl.add_partition_offset(topic, p, Offset::End).map_err(|e| format!("build tail assignment: {e}"))?;
+        tpl.add_partition_offset(topic, p, Offset::End).map_err(|e| format!("prepare partitions to read: {e}"))?;
     }
-    consumer.assign(&tpl).map_err(|e| format!("assign tail consumer: {e}"))?;
+    consumer.assign(&tpl).map_err(|e| format!("begin reading live messages: {e}"))?;
 
     drive_tail_poll(
         || match consumer.poll(Duration::from_millis(200)) {
@@ -374,7 +374,8 @@ mod tests {
         let (tx, _rx) = mpsc::channel(8);
         let err = run_consumer_blocking(cc, "topic", &[], &cancel, tx, Duration::from_millis(50))
             .expect_err("consumer creation must fail loudly on invalid config, not be swallowed");
-        assert!(err.contains("create"), "got: {err}");
+        assert!(err.contains("start reading live messages"), "got: {err}");
+        assert!(!err.to_lowercase().contains("consumer"), "must not name the internal Kafka client type: {err}");
     }
 
     #[test]
@@ -384,7 +385,7 @@ mod tests {
         }));
         assert_eq!(msg_event.name(), "message");
 
-        let api_err = ApiError::kafka("prod", "assign tail consumer: boom");
+        let api_err = ApiError::kafka("prod", "begin reading live messages: boom");
         let err_event = TailEvent::from(&api_err);
         assert_eq!(err_event.name(), "app_error");
         let json = serde_json::to_value(&err_event).unwrap();

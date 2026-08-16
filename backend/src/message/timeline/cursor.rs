@@ -16,8 +16,9 @@ pub enum Direction {
 
 impl Default for Direction {
     /// Arbitrary. `Cursor.direction` is informational only (see `Cursor`'s
-    /// doc comment, `:44-46`) — the backend never enforces it against
-    /// anything; nothing reads it back at all — so this only exists to give
+    /// own "`direction` is informational only" doc comment section) — the
+    /// backend never enforces it against anything, and nothing reads it
+    /// back today — so this only exists to give
     /// `#[serde(default)]` something to produce when a client-constructed
     /// cursor omits the field entirely, which the documented wire format
     /// explicitly allows.
@@ -42,8 +43,9 @@ impl Default for Direction {
 /// cursors built without this Rust type at all.
 ///
 /// **`direction` is informational only.** It records which direction the
-/// cursor was minted in (useful for debugging/logging); the backend never
-/// enforces it against a request. The REQUEST's own `direction` query param
+/// cursor was minted in — potentially useful context if this ever gets
+/// logged, but nothing in this codebase reads it back today; the backend
+/// never enforces it against a request. The REQUEST's own `direction` query param
 /// decides how `positions` are read (`api::messages::timeline_sse` leaves
 /// the decoded field unused on purpose). That reading is exact, not a loose
 /// convention: a `Back` request treats every position as an exclusive upper

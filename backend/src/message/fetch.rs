@@ -166,7 +166,7 @@ pub fn fetch_ranges_blocking(
     let mut tpl = TopicPartitionList::new();
     for r in &ranges {
         tpl.add_partition_offset(topic, r.partition, Offset::Offset(r.start))
-            .map_err(|e| crate::error::from_kafka(&cfg.name, "assign offsets", &e))?;
+            .map_err(|e| crate::error::from_kafka(&cfg.name, "assign partition offsets", &e))?;
     }
     consumer.assign(&tpl).map_err(|e| crate::error::from_kafka(&cfg.name, "assign partitions", &e))?;
 
