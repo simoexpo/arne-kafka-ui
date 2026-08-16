@@ -110,11 +110,11 @@ pub fn decode_with_descriptor(fd: &FileDescriptor, payload_after_header: &[u8]) 
     protobuf_json_mapping::print_to_string(&*msg).map_err(|e| format!("proto to json: {e}"))
 }
 
-/// Parses `proto_src` and decodes `payload_after_header` in one call. Kept
-/// for callers that don't need to reuse the parsed descriptor across
-/// multiple decodes (and for tests); the schema registry decode path uses
+/// Parses `proto_src` and decodes `payload_after_header` in one call.
+/// Test-only convenience: the schema registry decode path uses
 /// `build_descriptor` + `decode_with_descriptor` separately so it can cache
 /// the descriptor per schema id.
+#[cfg(test)]
 pub fn decode(proto_src: &str, payload_after_header: &[u8]) -> Result<String, String> {
     let fd = build_descriptor(proto_src)?;
     decode_with_descriptor(&fd, payload_after_header)

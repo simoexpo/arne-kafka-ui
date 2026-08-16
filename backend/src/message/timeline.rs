@@ -1,7 +1,7 @@
 //! Cursor codec, window math, and the paging engine for the messages
 //! timeline.
 //!
-//! `Direction`/`Cursor`/`Anchor`/`initial_positions`/`page_windows`/`advance`
+//! `Direction`/`Cursor`/`Anchor`/`initial_positions`/`page_windows`/`at_edge`
 //! are pure functions: no I/O, no Kafka client, nothing async. `run_page`
 //! (this task) is the engine that drives them against a real cluster: it
 //! fetches fresh watermarks, computes windows, scans and decodes them, and
@@ -214,61 +214,15 @@ pub fn page_windows(
         .collect()
 }
 
-/// Advances `positions` past the given `windows` (the page just consumed),
-/// returning the new positions and whether every partition has reached the
-/// true topic edge in `direction`.
-///
-/// Amended during Task 1's own review round (see task-1-report.md's "Fix
-/// round 1" section — predating, and unrelated to, this file's *own* later
-/// Task 2 fix rounds referenced elsewhere in this module): the original
-/// 3-argument signature (`positions`, `windows`, `direction`) could not
-/// distinguish "clamped by the watermark" from "given a full `span`-sized
-/// page, more data beyond" using only the consumed windows — the shipped
-/// proxy for that was a tautology (`window.len() <= max(all window lens)`
-/// is true of every window, including the widest one, unconditionally), so
-/// it reported `exhausted: true` on every page. `watermarks` is now passed
-/// explicitly and the edge test is exact: for `Back`, a partition is at its
-/// edge once its new position equals that partition's low watermark; for
-/// `Forward`, once it equals the high watermark. A partition absent from
-/// `windows` (its window was empty — `page_windows` only omits a partition
-/// when its position is already sitting at that edge) is at its edge by
-/// definition, with its position left unchanged. `exhausted` is true iff
-/// every partition is at its edge.
-///
-/// Note: `run_page` (below) no longer calls this function directly as of
-/// Task 2 fix round 2 — its contiguous-selection cursor math (`pos ±
-/// taken_count`) is simple enough to compute inline, and doing so avoids
-/// re-deriving positions from a synthetic `windows` list. `advance` remains
-/// here as tested, independent public API (nothing about it was wrong; it
-/// just stopped being the right tool for `run_page`'s new algorithm).
-pub fn advance(
-    positions: &[(i32, i64)],
-    windows: &[range::PartitionRange],
-    watermarks: &[(i32, i64, i64)],
-    direction: Direction,
-) -> (Vec<(i32, i64)>, bool) {
-    let find_window = |p: i32| windows.iter().find(|w| w.partition == p);
-    let find_watermark = |p: i32| watermarks.iter().find(|(wp, _, _)| *wp == p);
-
-    let new_positions: Vec<(i32, i64)> = positions
-        .iter()
-        .map(|&(p, pos)| match find_window(p) {
-            Some(w) => (p, match direction { Direction::Back => w.start, Direction::Forward => w.end }),
-            None => (p, pos),
-        })
-        .collect();
-
-    let exhausted = new_positions.iter().all(|&(p, pos)| match find_watermark(p) {
-        Some(&(_, lo, hi)) => match direction {
-            Direction::Back => pos == lo,
-            Direction::Forward => pos == hi,
-        },
-        // No watermark on record for this partition: nothing to compare
-        // against, so it can't be asserted at an edge.
-        None => false,
-    });
-
-    (new_positions, exhausted)
+/// True if `pos` sits at the topic edge in `direction` for a partition whose
+/// watermarks are `[lo, hi]` — the low watermark for `Back`, the high
+/// watermark for `Forward`. Shared by `run_page`'s active-partition filter
+/// and its exhaustion check, so both agree on what "at the edge" means.
+fn at_edge(pos: i64, lo: i64, hi: i64, direction: Direction) -> bool {
+    match direction {
+        Direction::Back => pos == lo,
+        Direction::Forward => pos == hi,
+    }
 }
 
 /// One event of a `run_page` SSE stream. Serialized untagged: the SSE
@@ -694,10 +648,7 @@ pub fn run_page(
             let active_partitions = cur_positions
                 .iter()
                 .filter(|&&(p, pos)| {
-                    watermarks.iter().find(|(wp, _, _)| *wp == p).is_some_and(|&(_, lo, hi)| match direction {
-                        Direction::Back => pos != lo,
-                        Direction::Forward => pos != hi,
-                    })
+                    watermarks.iter().find(|(wp, _, _)| *wp == p).is_some_and(|&(_, lo, hi)| !at_edge(pos, lo, hi, direction))
                 })
                 .count() as u64;
             let active_partitions = active_partitions.max(1);
@@ -899,10 +850,7 @@ pub fn run_page(
             total_matches += chunk_matches.len() as u64;
 
             exhausted = new_positions.iter().all(|&(p, pos)| {
-                watermarks.iter().find(|(wp, _, _)| *wp == p).is_some_and(|&(_, lo, hi)| match direction {
-                    Direction::Back => pos == lo,
-                    Direction::Forward => pos == hi,
-                })
+                watermarks.iter().find(|(wp, _, _)| *wp == p).is_some_and(|&(_, lo, hi)| at_edge(pos, lo, hi, direction))
             });
             cur_positions = new_positions;
             chunk_index += 1;
@@ -1025,54 +973,61 @@ mod tests {
     }
 
     #[test]
-    fn advance_back_moves_down_and_detects_exhaustion() {
+    fn back_window_reaching_the_low_watermark_is_flagged_at_edge() {
         let w = page_windows(&[(0, 60), (1, 5)], WM, Direction::Back, 100);
-        let (p, exhausted) = advance(&[(0, 60), (1, 5)], &w, WM, Direction::Back);
-        assert_eq!(p, vec![(0, 10), (1, 0)]);
-        assert!(exhausted); // both hit low watermark
+        assert_eq!(w, vec![
+            range::PartitionRange { partition: 0, start: 10, end: 60 },
+            range::PartitionRange { partition: 1, start: 0, end: 5 },
+        ]);
+        // consuming each window fully lands exactly on its low watermark —
+        // this is the boundary `run_page`'s cursor math advances to.
+        assert!(at_edge(w[0].start, 10, 110, Direction::Back));
+        assert!(at_edge(w[1].start, 0, 5, Direction::Back));
     }
 
     #[test]
-    fn advance_forward_detects_edge_against_high() {
+    fn forward_window_reaching_the_high_watermark_is_flagged_at_edge() {
         let w = page_windows(&[(0, 100), (1, 5)], WM, Direction::Forward, 50);
-        let (p, exhausted) = advance(&[(0, 100), (1, 5)], &w, WM, Direction::Forward);
-        assert_eq!(p, vec![(0, 110), (1, 5)]);
-        assert!(exhausted);
+        // partition 1 is already at its high watermark: page_windows omits it entirely
+        assert_eq!(w, vec![range::PartitionRange { partition: 0, start: 100, end: 110 }]);
+        assert!(at_edge(w[0].end, 10, 110, Direction::Forward));
+        assert!(at_edge(5, 0, 5, Direction::Forward), "partition 1's untouched position is already at its edge");
     }
 
     #[test]
-    fn first_page_of_deep_partition_is_not_exhausted() {
+    fn first_page_of_deep_partition_leaves_its_window_short_of_the_low_watermark() {
         let wm: &[(i32, i64, i64)] = &[(0, 0, 1_000_000)];
         let positions = initial_positions(wm, &Anchor::Latest);
         let w = page_windows(&positions, wm, Direction::Back, 100);
-        let (p, exhausted) = advance(&positions, &w, wm, Direction::Back);
-        assert_eq!(p, vec![(0, 999_900)]);
-        assert!(!exhausted);
+        assert_eq!(w, vec![range::PartitionRange { partition: 0, start: 999_900, end: 1_000_000 }]);
+        assert!(!at_edge(w[0].start, 0, 1_000_000, Direction::Back), "plenty of room left below this window");
     }
 
     #[test]
-    fn imbalanced_partitions_exhaust_independently() {
+    fn imbalanced_partitions_reach_their_low_watermark_independently() {
         let wm: &[(i32, i64, i64)] = &[(0, 0, 1000), (1, 0, 5)];
         let positions = initial_positions(wm, &Anchor::Latest);
         let w = page_windows(&positions, wm, Direction::Back, 100);
-        let (p, exhausted) = advance(&positions, &w, wm, Direction::Back);
-        assert_eq!(p, vec![(0, 900), (1, 0)]);
-        assert!(!exhausted); // partition 0 still has plenty of room left
+        assert_eq!(w, vec![
+            range::PartitionRange { partition: 0, start: 900, end: 1000 },
+            range::PartitionRange { partition: 1, start: 0, end: 5 },
+        ]);
+        assert!(!at_edge(w[0].start, 0, 1000, Direction::Back), "partition 0 still has plenty of room left");
+        assert!(at_edge(w[1].start, 0, 5, Direction::Back), "partition 1's window already reaches its low watermark");
 
-        let w2 = page_windows(&p, wm, Direction::Back, 1000);
-        let (p2, exhausted2) = advance(&p, &w2, wm, Direction::Back);
-        assert_eq!(p2, vec![(0, 0), (1, 0)]);
-        assert!(exhausted2); // both partitions now at their low watermark
+        // continuing from partition 0's new position with a big-enough span reaches its edge too
+        let w2 = page_windows(&[(0, w[0].start)], wm, Direction::Back, 1000);
+        assert_eq!(w2, vec![range::PartitionRange { partition: 0, start: 0, end: 900 }]);
+        assert!(at_edge(w2[0].start, 0, 1000, Direction::Back));
     }
 
     /// Fix round 1, C4 (reviewer's exact construction): a forged or
     /// retention-raced cursor position (-5) on watermarks (0, 0, 10) must be
-    /// clamped before it drives `page_windows`/`advance` — otherwise
-    /// `advance`'s "no window for this partition" fallback hands back the
-    /// raw, unclamped -5 forever: `-5 == lo (0)` never holds, so `exhausted`
-    /// never becomes true and the identical cursor loops forever. Clamped to
-    /// 0 first, the partition is correctly recognized as already at its low
-    /// watermark: no window, and `exhausted` becomes true immediately.
+    /// clamped before it drives `page_windows` — otherwise a partition with
+    /// no window this page would keep the raw, unclamped -5 forever:
+    /// `-5 == lo (0)` never holds, so it's never recognized as being at the
+    /// edge and the identical cursor loops forever. Clamped to 0 first, the
+    /// partition is correctly recognized as already at its low watermark.
     #[test]
     fn clamped_position_reaches_exhaustion_instead_of_looping() {
         let wm: &[(i32, i64, i64)] = &[(0, 0, 10)];
@@ -1084,9 +1039,11 @@ mod tests {
         let windows = page_windows(&positions, wm, Direction::Back, 5);
         assert!(windows.is_empty(), "already at the low watermark: nothing to fetch");
 
-        let (new_positions, exhausted) = advance(&positions, &windows, wm, Direction::Back);
-        assert_eq!(new_positions, vec![(0, 0)]);
-        assert!(exhausted, "clamped position at the edge must report exhausted, not loop forever");
+        // a partition with no window keeps its (already-clamped) position
+        // unchanged, so that position itself must already be at the edge —
+        // otherwise the unchanged cursor would be re-encoded and handed back
+        // forever.
+        assert!(at_edge(positions[0].1, 0, 10, Direction::Back), "clamped position at the edge must report exhausted, not loop forever");
     }
 
     /// Anchor partition property (spec v1.6, binding acceptance test),
