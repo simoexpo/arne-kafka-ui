@@ -20,7 +20,7 @@ export function TopicDetailView({ cluster, topic }: { cluster: string; topic: st
   const [tab, setTab] = useState<Tab>('Messages')
   const detail = useQuery({
     queryKey: ['topic', cluster, topic],
-    queryFn: () => getTopicDetail(cluster, topic),
+    queryFn: ({ signal }) => getTopicDetail(cluster, topic, signal),
     refetchInterval: 10_000,
   })
 
@@ -111,12 +111,12 @@ export function TopicDetailView({ cluster, topic }: { cluster: string; topic: st
 export function ConsumersTab({ cluster, topic }: { cluster: string; topic: string }) {
   const throughput = useQuery({
     queryKey: ['throughput', cluster, topic],
-    queryFn: () => getThroughput(cluster, topic),
+    queryFn: ({ signal }) => getThroughput(cluster, topic, signal),
     refetchInterval: 10_000,
   })
   const consumers = useQuery({
     queryKey: ['consumers', cluster, topic],
-    queryFn: () => getTopicConsumers(cluster, topic),
+    queryFn: ({ signal }) => getTopicConsumers(cluster, topic, signal),
     refetchInterval: 10_000,
   })
   const allSamples = throughput.data?.samples ?? []

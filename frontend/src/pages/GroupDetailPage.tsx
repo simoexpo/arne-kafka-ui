@@ -7,7 +7,7 @@ import { StalenessChip } from '../components/StalenessChip'
 export function GroupDetailView({ cluster, group }: { cluster: string; group: string }) {
   const detail = useQuery({
     queryKey: ['group', cluster, group],
-    queryFn: () => getGroupDetail(cluster, group),
+    queryFn: ({ signal }) => getGroupDetail(cluster, group, signal),
     refetchInterval: 10_000,
   })
   return (

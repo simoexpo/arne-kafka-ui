@@ -14,7 +14,7 @@ export function TopicsView({ cluster }: { cluster: string }) {
   const [showInternal, setShowInternal] = useState(false)
   const topics = useQuery({
     queryKey: ['topics', cluster],
-    queryFn: () => getTopics(cluster),
+    queryFn: ({ signal }) => getTopics(cluster, signal),
     refetchInterval: 30_000,
   })
   const visible = useMemo(() => {

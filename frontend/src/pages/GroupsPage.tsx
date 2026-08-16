@@ -8,7 +8,7 @@ import { formatCount } from '../lib/format'
 export function GroupsView({ cluster }: { cluster: string }) {
   const groups = useQuery({
     queryKey: ['groups', cluster],
-    queryFn: () => getGroups(cluster),
+    queryFn: ({ signal }) => getGroups(cluster, signal),
     refetchInterval: 10_000,
   })
   return (

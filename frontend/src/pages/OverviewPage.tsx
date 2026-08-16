@@ -9,12 +9,12 @@ import { formatCount } from '../lib/format'
 export function OverviewView({ cluster }: { cluster: string }) {
   const overview = useQuery({
     queryKey: ['overview', cluster],
-    queryFn: () => getOverview(cluster),
+    queryFn: ({ signal }) => getOverview(cluster, signal),
     refetchInterval: 10_000,
   })
   const topics = useQuery({
     queryKey: ['topics', cluster],
-    queryFn: () => getTopics(cluster),
+    queryFn: ({ signal }) => getTopics(cluster, signal),
     refetchInterval: 30_000,
   })
   const top = (topics.data?.topics ?? [])
