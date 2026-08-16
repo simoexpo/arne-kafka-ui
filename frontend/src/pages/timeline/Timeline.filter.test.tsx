@@ -425,20 +425,21 @@ describe('Timeline filter box', () => {
     await settle()
 
     let totalScanned = 0
+    let totalBudget = 0
     for (let i = 0; i < 25; i++) {
       const idx = FakeEventSource.instances.length - 1
       totalScanned += 50
+      totalBudget += 250000
       await emit(idx, 'progress', { scanned: 50, matches: 0, budget: 250000 })
       await emit(idx, 'page_end', { cursor: cur({ 0: i + 1 }), exhausted: false })
       if (screen.queryByTestId('continue-scan')) break
     }
 
     const btn = screen.getByTestId('continue-scan')
-    // M6: the continue affordance's own label carries the known budget too —
-    // it retains the just-ended page's last `progress` values (see
-    // useTimelinePage: `state.progress` is only reset when the NEXT page
-    // starts loading).
-    expect(btn).toHaveTextContent(`scanned ${totalScanned} of 250000 records · 0 matches — continue`)
+    // M6, fixed for B1: the continue affordance's own label carries the
+    // known budget too — accumulated across every page of the gesture, same
+    // as scanned/matches (never a single page's own value — B1).
+    expect(btn).toHaveTextContent(`scanned ${totalScanned} of ${totalBudget} records · 0 matches — continue`)
   })
 
   it('a filtered page that finds some matches but stops short of a full page (budget spent) shows the continue affordance, not a silent load-older', async () => {
@@ -508,6 +509,31 @@ describe('Timeline filter box', () => {
     )
   })
 
+  it('a continued gesture accumulates budget alongside scanned/matches — the continue affordance never shows scanned exceeding budget (B1)', async () => {
+    mockTail()
+    await mountAndSettleInitial()
+
+    typeFilter('value:needle')
+    await settle()
+    const idx1 = FakeEventSource.instances.length - 1
+    await emit(idx1, 'match', mk(1))
+    await emit(idx1, 'progress', { scanned: 5000, matches: 1, budget: 5000 })
+    await emit(idx1, 'page_end', { cursor: cur({ 0: 1 }), exhausted: false })
+    expect(screen.getByTestId('continue-scan')).toHaveTextContent('scanned 5000 of 5000 records · 1 matches — continue')
+
+    fireEvent.click(screen.getByTestId('continue-scan'))
+    const idx2 = FakeEventSource.instances.length - 1
+    await emit(idx2, 'match', mk(2))
+    await emit(idx2, 'progress', { scanned: 5000, matches: 1, budget: 5000 })
+    await emit(idx2, 'page_end', { cursor: cur({ 0: 2 }), exhausted: false })
+
+    // Both scanned AND budget must accumulate across the gesture: never
+    // "scanned 10000 of 5000" (cumulative numerator against a single page's
+    // ceiling, which reads as having blown the known budget by 2x — B1).
+    const btn = screen.getByTestId('continue-scan')
+    expect(btn).toHaveTextContent('scanned 10000 of 10000 records · 2 matches — continue')
+  })
+
   it('clearing the filter (×) reloads unfiltered', async () => {
     mockTail()
     await mountAndSettleInitial()
@@ -532,29 +558,32 @@ describe('Timeline filter box', () => {
     await settle()
 
     let totalScanned = 0
+    let totalBudget = 0
     for (let i = 0; i < 25; i++) {
       const idx = FakeEventSource.instances.length - 1
       totalScanned += 50
+      totalBudget += 250000
       await emit(idx, 'progress', { scanned: 50, matches: 0, budget: 250000 })
       await emit(idx, 'page_end', { cursor: cur({ 0: i + 1 }), exhausted: false })
       if (screen.queryByTestId('continue-scan')) break
     }
     const btn = screen.getByTestId('continue-scan')
-    expect(btn).toHaveTextContent(`scanned ${totalScanned} of 250000 records · 0 matches — continue`)
+    expect(btn).toHaveTextContent(`scanned ${totalScanned} of ${totalBudget} records · 0 matches — continue`)
 
     fireEvent.click(btn)
     // Clicking continue starts a new in-flight page — past the show-delay,
     // the running total must still reflect everything scanned before the
     // click, NOT reset back to 0 (before any new progress event arrives).
-    // No budget yet either: `state.progress` (M6's source for it) is reset
-    // to null the instant the new page starts loading, before its own first
-    // `progress` event arrives.
+    // Budget, fixed for B1, is also already known at this point — it's the
+    // accumulated total from every prior page in the gesture, shown even
+    // before the new page's own first `progress` event arrives (which would
+    // only ADD to it, never replace it).
     await settle(PAST_SHOW_DELAY_MS)
-    expect(screen.getByText(`scanned ${totalScanned} · 0 matches`)).toBeInTheDocument()
+    expect(screen.getByText(`scanned ${totalScanned} of ${totalBudget} · 0 matches`)).toBeInTheDocument()
 
     const idx2 = FakeEventSource.instances.length - 1
     await emit(idx2, 'progress', { scanned: 30, matches: 0, budget: 250000 })
-    expect(screen.getByText(`scanned ${totalScanned + 30} of 250000 · 0 matches`)).toBeInTheDocument()
+    expect(screen.getByText(`scanned ${totalScanned + 30} of ${totalBudget + 250000} · 0 matches`)).toBeInTheDocument()
   })
 
   it('scrolling near the bottom while the continue affordance is showing continues the gesture (preserves totals), not a silent reset', async () => {
@@ -579,8 +608,9 @@ describe('Timeline filter box', () => {
     // gesture totals"). A naive scroll-triggered `loadOlder()` would instead
     // start a fresh gesture and reset the totals to 0. (Past the show-delay:
     // this new page is deliberately left running long enough to render.)
+    // Budget (fixed for B1) is likewise carried over, not reset to unknown.
     await settle(PAST_SHOW_DELAY_MS)
-    expect(screen.getByText('scanned 5000 · 1 matches')).toBeInTheDocument()
+    expect(screen.getByText('scanned 5000 of 5000 · 1 matches')).toBeInTheDocument()
   })
 
   it('withFilter merges the active filter onto scroll-triggered pagination and jumps, and drops it after clearing', async () => {

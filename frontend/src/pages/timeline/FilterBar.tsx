@@ -9,10 +9,11 @@ export function FilterBar({
 }: {
   value: string
   onChange: (value: string) => void
-  // M6 (charter: "real progress — known total up front"): `budget` is the
-  // wire's own known ceiling for the current scan request — null only in
-  // the brief window between a fresh page starting to load and its first
-  // `progress` event arriving (see Timeline.tsx's `state.progress`).
+  // M6 (charter: "real progress — known total up front"), fixed for B1:
+  // `budget` is the GESTURE's accumulated known ceiling — the sum of every
+  // page's budget in this scan so far, matching `scanned`/`matches` above
+  // (see Timeline.tsx's `gestureBudgetRef` and `knownBudget`) — null only
+  // until at least one page's budget has actually been observed.
   progress: { scanned: number; matches: number; budget: number | null } | null
   onCancel: () => void
 }) {
