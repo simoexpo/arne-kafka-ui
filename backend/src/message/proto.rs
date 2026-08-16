@@ -147,6 +147,15 @@ message User {
     }
 
     #[test]
+    fn message_index_count_above_the_max_is_error() {
+        // count=129 (zigzag 129*2=258, varint-encoded as [0x82, 0x02]) — one
+        // past MAX_MESSAGE_INDEX_COUNT (128), the upper-bound guard that
+        // count==0/negative-count coverage above doesn't exercise.
+        let err = read_message_indexes(&[0x82, 0x02]).unwrap_err();
+        assert!(err.contains("129") && err.contains("128"), "got: {err}");
+    }
+
+    #[test]
     fn explicit_indexes_are_parsed() {
         // count=1 (zigzag 1 = 0x02), index=1 (zigzag 1 = 0x02)
         let (idx, rest) = read_message_indexes(&[0x02, 0x02, 0xBB]).unwrap();
