@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { MessageList } from './MessageList'
+import { MessageList, type MessageListHandle } from './MessageList'
 import type { MessageOut } from '../../api/types'
 
 const mk = (offset: number): MessageOut => ({
@@ -85,5 +85,90 @@ describe('MessageList', () => {
     const rowC = msg({ partition: 0, offset: 10 })
     rerender(<MessageList messages={[rowC, rowA, rowB]} />)
     expect(screen.getByText('trace-id')).toBeInTheDocument()
+  })
+
+  // Owner-reported regression (2026-08-16): expanding a row and then
+  // receiving a live message drew the list jumbled — rows overlapping each
+  // other, with a hole where the expanded one used to be. The virtualizer
+  // caches each row's MEASURED height under `getItemKey(index)`, which
+  // defaults to the index itself; a live message prepends, every index shifts
+  // by one, and each row inherits its neighbour's cached height. Normally
+  // that is a few pixels of drift; with one row expanded to ~5-10x the
+  // others, the misattribution is the corruption the owner saw. Keying the
+  // cache by (partition, offset) — the same identity the React key and the
+  // store's dedupe already use — makes a measurement travel with its message.
+  describe('measured row heights (identity-keyed cache)', () => {
+    // The virtualizer measures via `element.offsetHeight`, which jsdom always
+    // reports as the flat stub from test/setup.ts. Deriving it from the
+    // element's own text gives rows of genuinely different heights, which is
+    // the only condition under which mis-keyed measurements are visible at
+    // all. ResizeObserver has to exist for MessageList to attach
+    // `measureElement` as a row ref in the first place (see the guard there).
+    function withMeasuredRows(tallText: string, tall: number, short: number) {
+      const originalOffsetHeight = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'offsetHeight')!
+      const originalRo = globalThis.ResizeObserver
+      Object.defineProperty(HTMLElement.prototype, 'offsetHeight', {
+        configurable: true,
+        get(this: HTMLElement) {
+          if (this.dataset.index === undefined) return 600
+          return this.textContent?.includes(tallText) ? tall : short
+        },
+      })
+      globalThis.ResizeObserver = class {
+        observe() {}
+        unobserve() {}
+        disconnect() {}
+      } as unknown as typeof ResizeObserver
+      return () => {
+        Object.defineProperty(HTMLElement.prototype, 'offsetHeight', originalOffsetHeight)
+        globalThis.ResizeObserver = originalRo
+      }
+    }
+
+    const topOf = (row: HTMLElement) => row.parentElement!.style.transform
+
+    it('a prepended row does not hand an existing row its neighbour’s measured height', () => {
+      const restore = withMeasuredRows('tall', 200, 40)
+      try {
+        const short = msg({ partition: 0, offset: 5 })
+        const tall = msg({
+          partition: 0,
+          offset: 3,
+          value: { encoding: 'utf8', text: 'tall', schema_id: null, error: null },
+        })
+        const { rerender } = render(<MessageList messages={[short, tall]} />)
+        expect(topOf(screen.getByText('p0·3').closest('[data-testid="message-row"]')!)).toBe('translateY(40px)')
+
+        // A live message prepends: every index shifts by one, no measured
+        // height changes. The tall row must still start right below the two
+        // 40px rows above it — not be pushed down by inheriting index 2's
+        // (nonexistent) measurement while the short row above it inherits the
+        // tall one's 200px.
+        const live = msg({ partition: 0, offset: 10 })
+        rerender(<MessageList messages={[live, short, tall]} />)
+        expect(topOf(screen.getByText('p0·3').closest('[data-testid="message-row"]')!)).toBe('translateY(80px)')
+      } finally {
+        restore()
+      }
+    })
+
+    it('rowOffsetAt still reports the offset of the row at a given index', () => {
+      const restore = withMeasuredRows('tall', 200, 40)
+      try {
+        const handle = { current: null } as { current: MessageListHandle | null }
+        const rows = [
+          msg({ partition: 0, offset: 5 }),
+          msg({ partition: 0, offset: 3, value: { encoding: 'utf8', text: 'tall', schema_id: null, error: null } }),
+          msg({ partition: 0, offset: 1 }),
+        ]
+        render(<MessageList ref={handle} messages={rows} />)
+        expect(handle.current!.rowOffsetAt(0)).toBe(0)
+        expect(handle.current!.rowOffsetAt(1)).toBe(40)
+        expect(handle.current!.rowOffsetAt(2)).toBe(240)
+        expect(handle.current!.rowOffsetAt(3)).toBeNull()
+      } finally {
+        restore()
+      }
+    })
   })
 })

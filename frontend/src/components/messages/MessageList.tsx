@@ -66,6 +66,20 @@ export const MessageList = forwardRef<
     estimateSize: () => 40,
     overscan: 10,
     initialRect: { width: 900, height: 600 },
+    // Owner-reported bug (2026-08-16): expanding a row and then receiving a
+    // live message drew the list jumbled — rows drawn on top of each other,
+    // with a hole where the expanded row had been. The virtualizer caches
+    // each row's MEASURED height (see `measureElement` on the row wrapper
+    // below) under `getItemKey(index)`, and the default `getItemKey` is the
+    // index itself. Every prepend — a live message, a forward page — shifts
+    // every index by one, so each row inherits the height measured for its
+    // neighbour. Rows are near-uniform normally, which hid this as a few
+    // pixels of drift; an expanded row is many times taller than its
+    // neighbours, and the misattribution becomes the corruption above.
+    // (partition, offset) is the same identity the React key below and the
+    // store's own dedupe use, so a measurement now travels with its message
+    // exactly as its expanded/collapsed state already does.
+    getItemKey: (index) => `${messages[index].partition}-${messages[index].offset}`,
   })
   useImperativeHandle(
     ref,
