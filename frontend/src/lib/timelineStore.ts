@@ -37,13 +37,9 @@ function findOffsetIndex(arr: MessageOut[], offset: number): number {
 // ===========================================================================
 // v1.6 sliding window store (spec: docs/superpowers/specs/2026-08-13-
 // messages-timeline-design.md, "Sliding window (v1.6 — owner ruling)").
-//
-// (Task 3: the v1.4-era `createTimelineStore` that used to live here —
-// merge-native `insert`/`origin`/`InsertResult`-with-booleans, no edge maps —
-// has been deleted. `Timeline.tsx` now drives `createSlidingWindowStore`
-// exclusively; `insertByOffsetAscending`/`partitionKey` above are the two
-// pieces of merge machinery this store still shares with that deleted code,
-// kept because they're still exactly right here too.)
+// `Timeline.tsx` drives `createSlidingWindowStore` exclusively — see
+// docs/superpowers/specs/timeline-design-decisions.md for this file's
+// predecessor.
 //
 // Design summary (see the doc comments below for the exact per-rule
 // reasoning): the store tracks two per-partition position maps — `bottomMap`
@@ -158,7 +154,7 @@ interface SlidingWindowStore {
    * update rule safe for a case that should never reach it.
    */
   insertLive(rows: MessageOut[]): InsertOutcome
-  /** Merged rows, newest-first (partition offset order within a partition, timestamp merge across partitions — same rule as the v1.4 store above). */
+  /** Merged rows, newest-first (partition offset order within a partition, timestamp merge across partitions). */
   rows(): readonly MessageOut[]
   /**
    * Fix round 1, M2: a READ-ONLY preview of what `rows()` would look like
