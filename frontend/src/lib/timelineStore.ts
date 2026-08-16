@@ -400,10 +400,12 @@ interface SlidingWindowStore {
  * limitation that those anchors never open a forward cursor in practice) or
  * when a forward page reports `exhausted` (`contCursor === null` — caught
  * back up to the tail); it becomes `false` on any top trim. `edges().top`
- * reports `null` exactly while `attached`, regardless of `topMap`'s stored
- * content — the map keeps tracking underneath so the moment a top trim
- * detaches the window, a correct boundary is already sitting there from
- * whichever rule last touched it. Crucially, a forward page only reports
+ * reports `null` while `attached` (and also, separately, while `topMap` is
+ * empty or incomplete — see `edges()`'s own doc comment for the C2
+ * completeness check) — the map keeps tracking underneath regardless, so the
+ * moment a top trim detaches the window, a correct boundary is already
+ * sitting there from whichever rule last touched it. Crucially, a forward
+ * page only reports
  * `exhausted` once EVERY partition in that request's own cursor has reached
  * its true high watermark — so `attached === true` really does mean every
  * tracked partition is caught up store-wide, not just the partitions that
