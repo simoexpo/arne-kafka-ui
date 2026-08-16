@@ -14,7 +14,18 @@ pub struct TopicSummary {
     pub name: String,
     pub partitions: i32,
     pub replication_factor: i32,
+    /// `null` whenever `estimate_error` is set — a failed watermark fetch
+    /// never produces a partial or misleading count (see
+    /// `assemble_topic_estimate`: one bad partition aborts the whole
+    /// topic's estimate, not just its own contribution). Also `null` for an
+    /// internal (`__`-prefixed) topic, whose estimate is never computed.
     pub message_estimate: Option<i64>,
+    /// Set (and serialized) exactly when `message_estimate` is `null`
+    /// because a partition's watermark fetch failed — the Kafka-side reason
+    /// a client should render next to the blank count, per "never show
+    /// stale data silently: every metric carries its sample timestamp [or,
+    /// on failure, why it's missing]". `null` for a healthy estimate and for
+    /// an internal topic (no estimate attempted at all).
     pub estimate_error: Option<String>,
     pub size_bytes: Option<u64>,
     pub internal: bool,
