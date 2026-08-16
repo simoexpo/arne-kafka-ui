@@ -1,0 +1,7 @@
+clusters:
+  - name: playground
+    bootstrap: host.docker.internal:9092
+    schema_registry: { url: http://host.docker.internal:8081 }
+  - name: playground-2
+    bootstrap: host.docker.internal:9093
+server: { port: 8080 }

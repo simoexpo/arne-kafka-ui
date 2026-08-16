@@ -355,7 +355,7 @@ interface SlidingWindowStore {
  *    1/2/3 last touched any given partition, or whether any of them ever
  *    did. (This is also the mutation-tested "only load-bearing path" case:
  *    a partition holding rows the CURRENT trim doesn't touch, whose
- *    `topMap` entry has no other source — see `timelineSlidingStore.test.ts`.)
+ *    `topMap` entry has no other source — see `timelineStore.test.ts`.)
  *
  * The one gap none of the three rules fill on their own: an **anchor page**
  * (no request cursor exists at all, `startPositions === null`) has no
@@ -567,7 +567,7 @@ export function createSlidingWindowStore(cap = 2000): SlidingWindowStore {
       for (const [p, offsets] of trimmedByPartition) topMap.set(p, minOf(offsets))
 
       // Completeness backfill (fix round 1, C1b; mutation-verified — see
-      // timelineSlidingStore.test.ts's N1 tests): a partition can be
+      // timelineStore.test.ts's N1 tests): a partition can be
       // holding rows in the window RIGHT NOW without ever having had its
       // own top boundary planted — e.g. it contributed zero rows to the
       // anchor page (so the anchor opposite-side seed skipped it), or was

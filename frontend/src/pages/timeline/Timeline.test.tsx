@@ -1690,7 +1690,7 @@ describe('Timeline', () => {
     // which partitions returned rows, so this exact scenario can no longer
     // arise from any jump. The underlying store mechanism (C2 completeness
     // masking) remains directly unit-tested, unchanged, in
-    // `timelineSlidingStore.test.ts`.
+    // `timelineStore.test.ts`.
   })
 
   // Window cap honesty (design spec v1.4, owner ruling 2026-08-15): the
@@ -1862,7 +1862,7 @@ describe('Timeline', () => {
     // reads `storeRef.current.edges()` at the moment it acts, never a
     // value captured earlier, and the store's own edge maps are always
     // exactly correct regardless of how many trims (page- or live-
-    // originated) have landed in between — see timelineSlidingStore.test.ts's
+    // originated) have landed in between — see timelineStore.test.ts's
     // property walk, which interleaves live inserts into paging for exactly
     // this reason.
   })
@@ -2033,7 +2033,7 @@ describe('Timeline', () => {
   // store's minted top-edge cursors (exact request URLs asserted) until
   // re-attach on exhausted-forward. Single partition, small integers —
   // exhaustive multi-partition/hole/tie adversarial coverage of the
-  // underlying invariant already lives in timelineSlidingStore.test.ts's own
+  // underlying invariant already lives in timelineStore.test.ts's own
   // property walk; this one proves the UI WIRING (real request URLs built
   // from `edges()`, DOM content persisting, re-attachment) drives that
   // store correctly end to end.
