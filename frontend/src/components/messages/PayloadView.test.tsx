@@ -1,4 +1,5 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
+import userEvent from '@testing-library/user-event'
 import { render, screen } from '@testing-library/react'
 import { PayloadView } from './PayloadView'
 
@@ -21,5 +22,25 @@ describe('PayloadView', () => {
   it('renders utf8 as preformatted text', () => {
     render(<PayloadView payload={{ encoding: 'utf8', text: 'hello', schema_id: null, error: null }} label="value" />)
     expect(screen.getByText('hello')).toBeInTheDocument()
+  })
+})
+
+describe('copy affordance', () => {
+  it('copies json-able values pretty-printed', async () => {
+    const user = userEvent.setup()
+    const writeText = vi.fn().mockResolvedValue(undefined)
+    Object.assign(navigator, { clipboard: { writeText } })
+    render(<PayloadView payload={{ encoding: 'json', text: '{"a":{"b":1}}', schema_id: null, error: null }} label="value" />)
+    await user.click(screen.getByLabelText('copy value'))
+    expect(writeText).toHaveBeenCalledWith('{\n  "a": {\n    "b": 1\n  }\n}')
+  })
+
+  it('copies non-json text verbatim', async () => {
+    const user = userEvent.setup()
+    const writeText = vi.fn().mockResolvedValue(undefined)
+    Object.assign(navigator, { clipboard: { writeText } })
+    render(<PayloadView payload={{ encoding: 'utf8', text: 'order-1', schema_id: null, error: null }} label="key" />)
+    await user.click(screen.getByLabelText('copy key'))
+    expect(writeText).toHaveBeenCalledWith('order-1')
   })
 })

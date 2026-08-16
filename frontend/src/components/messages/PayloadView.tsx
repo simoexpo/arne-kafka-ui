@@ -1,6 +1,18 @@
 import type { DecodedPayload } from '../../api/types'
+import { CopyButton } from '../CopyButton'
 import { EncodingBadge } from './EncodingBadge'
 import { JsonView } from './JsonView'
+
+function copyTextFor(payload: DecodedPayload): string {
+  if (payload.encoding === 'json' || payload.encoding === 'avro' || payload.encoding === 'protobuf') {
+    try {
+      return JSON.stringify(JSON.parse(payload.text), null, 2)
+    } catch {
+      return payload.text
+    }
+  }
+  return payload.text
+}
 
 export function PayloadView({ payload, label }: { payload: DecodedPayload | null; label: string }) {
   const heading = (
@@ -8,6 +20,7 @@ export function PayloadView({ payload, label }: { payload: DecodedPayload | null
       <span>{label}</span>
       {payload && <EncodingBadge encoding={payload.encoding} />}
       {payload && payload.schema_id !== null && <span className="text-xs">schema id {payload.schema_id}</span>}
+      {payload && <CopyButton text={copyTextFor(payload)} label={`copy ${label}`} />}
     </div>
   )
   if (payload === null) {
