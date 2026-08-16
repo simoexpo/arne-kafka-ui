@@ -428,13 +428,22 @@ async fn timeline_beginning_forward_reaches_exhaustion() {
     assert!(end["cursor"].is_null());
 }
 
+/// I4: a pre-stream validation failure reaches `EventSource` clients as
+/// generic "connection lost" (non-200 bodies are discarded wholesale), so
+/// every one of these must surface as an in-stream `app_error` event on a
+/// 200 SSE response — never a pre-stream 400 — exactly like an
+/// anchor-resolution failure already does.
 #[tokio::test]
-async fn timeline_bad_params_is_400_before_streaming() {
+async fn timeline_bad_direction_is_an_in_stream_error_not_a_400() {
     let bootstrap = start_kafka().await;
     let state = state_for(&bootstrap, vec![]);
-    let (status, body) = get_json(app(state), "/api/clusters/test/topics/x/timeline?direction=sideways&limit=10&anchor=latest").await;
-    assert_eq!(status, 400, "body: {body}");
-    assert_eq!(body["code"], "bad_request");
+    let events = collect_sse(
+        app(state),
+        "/api/clusters/test/topics/x/timeline?direction=sideways&limit=10&anchor=latest",
+        20,
+    ).await;
+    let (_, err) = events.iter().find(|(n, _)| n == "app_error").expect("an in-stream error event: {events:?}").clone();
+    assert_eq!(err["code"], "bad_request", "{err}");
 }
 
 /// Fix round 1, C1+C2 (reviewer's exact construction): p0 = [o0@100, o1@300,
@@ -934,29 +943,51 @@ async fn timeline_accepts_a_client_cursor_without_direction_field() {
 /// Fix round 1, M2: `limit=0` is nonsensical (an empty page forever) and
 /// must 400, not silently return zero records forever.
 #[tokio::test]
-async fn timeline_limit_zero_is_400() {
+async fn timeline_limit_zero_is_an_in_stream_error_not_a_400() {
     let bootstrap = start_kafka().await;
     let state = state_for(&bootstrap, vec![]);
-    let (status, body) = get_json(app(state), "/api/clusters/test/topics/x/timeline?direction=back&limit=0&anchor=latest").await;
-    assert_eq!(status, 400, "body: {body}");
-    assert_eq!(body["code"], "bad_request");
+    let events = collect_sse(
+        app(state),
+        "/api/clusters/test/topics/x/timeline?direction=back&limit=0&anchor=latest",
+        20,
+    ).await;
+    let (_, err) = events.iter().find(|(n, _)| n == "app_error").expect("an in-stream error event: {events:?}").clone();
+    assert_eq!(err["code"], "bad_request", "{err}");
 }
 
-/// Params must be validated before the cluster registry lookup, so a bad
-/// request against an *unknown* cluster is still 400 (not a 404 that masks
-/// the real problem): a client typo'ing both the cluster name and a param
-/// should see the param error, not a 404 that looks like the cluster itself
-/// is the problem.
+/// Params are still validated before the cluster registry lookup even now
+/// that a bad request surfaces in-stream: a client typo'ing both the
+/// cluster name and a param sees the param error, not `cluster_not_found` —
+/// proven here by using an unregistered cluster name and getting the
+/// *param* error back, not a failure that ever touched the registry.
 #[tokio::test]
-async fn timeline_bad_params_on_unknown_cluster_is_400_not_404() {
+async fn timeline_bad_params_on_unknown_cluster_reports_the_param_error() {
     let bootstrap = start_kafka().await;
     let state = state_for(&bootstrap, vec![]);
-    let (status, body) = get_json(
+    let events = collect_sse(
         app(state),
         "/api/clusters/ghost/topics/x/timeline?direction=sideways&limit=10&anchor=latest",
+        20,
     ).await;
-    assert_eq!(status, 400, "body: {body}");
-    assert_eq!(body["code"], "bad_request");
+    let (_, err) = events.iter().find(|(n, _)| n == "app_error").expect("an in-stream error event: {events:?}").clone();
+    assert_eq!(err["code"], "bad_request", "{err}");
+}
+
+/// A malformed cursor (not valid base64+JSON) must reach the client the
+/// same way every other pre-stream validation failure does: an in-stream
+/// `app_error`, never a pre-stream body `EventSource` would discard.
+#[tokio::test]
+async fn timeline_bad_cursor_is_an_in_stream_error() {
+    let bootstrap = start_kafka().await;
+    let state = state_for(&bootstrap, vec![]);
+    let events = collect_sse(
+        app(state),
+        "/api/clusters/test/topics/x/timeline?direction=back&limit=10&cursor=not-valid-base64-json",
+        20,
+    ).await;
+    let (_, err) = events.iter().find(|(n, _)| n == "app_error").expect("an in-stream error event: {events:?}").clone();
+    assert_eq!(err["code"], "bad_request", "{err}");
+    assert!(err["message"].as_str().unwrap().contains("bad cursor"), "{err}");
 }
 
 /// Fix round 3, N4 + N6 (reviewer's exact reproduction): a real Kafka
@@ -1035,34 +1066,38 @@ async fn timeline_cursor_with_unknown_partition_terminates_properly() {
 }
 
 /// Filter params are validated the same way direction/limit/cursor already
-/// are: 400 before any Kafka round trip (even against a topic/cluster that
-/// doesn't exist) — an unknown filter kind, a missing `q`, or `json_eq`
-/// missing its `path`.
+/// are — an unknown filter kind, a missing `q`, or `json_eq` missing its
+/// `path` — but now (I4) that validation failure is an in-stream
+/// `app_error` on a 200 SSE response, never a pre-stream body
+/// `EventSource` would discard.
 #[tokio::test]
-async fn timeline_bad_filter_params_are_400_before_streaming() {
+async fn timeline_bad_filter_params_are_an_in_stream_error() {
     let bootstrap = start_kafka().await;
     let state = state_for(&bootstrap, vec![]);
 
-    let (status, body) = get_json(
+    let events = collect_sse(
         app(state.clone()),
         "/api/clusters/test/topics/x/timeline?direction=back&limit=10&anchor=latest&filter=sideways&q=x",
+        20,
     ).await;
-    assert_eq!(status, 400, "unknown filter kind: {body}");
-    assert_eq!(body["code"], "bad_request");
+    let (_, err) = events.iter().find(|(n, _)| n == "app_error").expect("unknown filter kind: {events:?}").clone();
+    assert_eq!(err["code"], "bad_request", "{err}");
 
-    let (status, body) = get_json(
+    let events = collect_sse(
         app(state.clone()),
         "/api/clusters/test/topics/x/timeline?direction=back&limit=10&anchor=latest&filter=contains",
+        20,
     ).await;
-    assert_eq!(status, 400, "missing q: {body}");
-    assert_eq!(body["code"], "bad_request");
+    let (_, err) = events.iter().find(|(n, _)| n == "app_error").expect("missing q: {events:?}").clone();
+    assert_eq!(err["code"], "bad_request", "{err}");
 
-    let (status, body) = get_json(
+    let events = collect_sse(
         app(state),
         "/api/clusters/test/topics/x/timeline?direction=back&limit=10&anchor=latest&filter=json_eq&q=42",
+        20,
     ).await;
-    assert_eq!(status, 400, "json_eq missing path: {body}");
-    assert_eq!(body["code"], "bad_request");
+    let (_, err) = events.iter().find(|(n, _)| n == "app_error").expect("json_eq missing path: {events:?}").clone();
+    assert_eq!(err["code"], "bad_request", "{err}");
 }
 
 #[tokio::test]

@@ -100,93 +100,112 @@ fn parse_filter(params: &TimelineParams) -> Result<Option<Filter>, ApiError> {
     }
 }
 
+/// A fresh, single-purpose channel carrying exactly one event: for a
+/// request that can't stream (param validation or anchor resolution
+/// failed) but must still reach the client as a 200 SSE response — see
+/// `timeline_sse`'s own comment for why a pre-stream error body is
+/// invisible to `EventSource`. `try_send` on a brand-new, empty channel
+/// can't fail for capacity reasons, and there is nothing else to send
+/// after it — the sender drops at the end of this call, closing the
+/// channel once this one buffered event has been delivered. The guard
+/// wraps a fresh, inert flag: no scan ever started, so there's nothing to
+/// cancel.
+fn single_event_stream(event: TimelineEvent) -> (mpsc::Receiver<TimelineEvent>, CancelOnDrop) {
+    let (tx, rx) = mpsc::channel::<TimelineEvent>(1);
+    let _ = tx.try_send(event);
+    (rx, CancelOnDrop(Arc::new(AtomicBool::new(false))))
+}
+
 pub async fn timeline_sse(
     State(state): State<AppState>,
     Path((cluster, topic)): Path<(String, String)>,
     Query(params): Query<TimelineParams>,
 ) -> Result<Sse<impl Stream<Item = Result<Event, std::convert::Infallible>>>, ApiError> {
-    // Every param is validated strictly before `registry.get`, so a bad
-    // request against an unknown cluster stays a 400, never a 404 that
-    // masks the real problem.
-    let direction = parse_direction(&params)?;
-    let limit = parse_limit(&params)?;
-    if params.cursor.is_some() == params.anchor.is_some() {
-        return Err(ApiError::bad_request("exactly one of cursor or anchor is required"));
-    }
-    let filter = parse_filter(&params)?;
-
-    let source = match &params.cursor {
-        Some(cursor) => {
-            let decoded = timeline::Cursor::decode(cursor)
-                .map_err(|e| ApiError::bad_request(format!("bad cursor: {e}")))?;
-            // v1.6 owner ruling: direction belongs to the REQUEST, not the
-            // cursor blob. `decoded.direction` (the direction the cursor was
-            // *minted* in) is intentionally never compared against `direction`
-            // here — the request's own `direction` param is authoritative for
-            // how `decoded.positions` are read this time (see `Cursor`'s doc
-            // comment for the exact bound semantics). This is what makes the
-            // sliding window's "re-read a trimmed region by following an edge
-            // cursor in the opposite direction" a supported, well-defined
-            // request rather than a version mismatch to reject.
-            PositionSource::FromCursor(decoded.positions)
+    // I4: every one of these is a plain, synchronous validation — no I/O,
+    // no cluster handle needed — but the fix bundles them into one `Result`
+    // computed up front (rather than `?`-returning straight out of the
+    // handler) for the same reason `resolved` below is: a pre-stream HTTP
+    // error body is invisible to `EventSource` (it discards a non-200
+    // response wholesale), so the frontend would see generic "connection
+    // lost" instead of the real validation reason. Validated strictly
+    // before `registry.get` either way, so a bad request against an
+    // unknown cluster still reports the param error, never a
+    // `cluster_not_found` that masks it.
+    let validated: Result<(timeline::Direction, usize, PositionSource, Option<Filter>), ApiError> = (|| {
+        let direction = parse_direction(&params)?;
+        let limit = parse_limit(&params)?;
+        if params.cursor.is_some() == params.anchor.is_some() {
+            return Err(ApiError::bad_request("exactly one of cursor or anchor is required"));
         }
-        None => PositionSource::FromAnchor(parse_anchor_input(&params)?),
-    };
+        let filter = parse_filter(&params)?;
+        let source = match &params.cursor {
+            Some(cursor) => {
+                let decoded = timeline::Cursor::decode(cursor)
+                    .map_err(|e| ApiError::bad_request(format!("bad cursor: {e}")))?;
+                // v1.6 owner ruling: direction belongs to the REQUEST, not the
+                // cursor blob. `decoded.direction` (the direction the cursor was
+                // *minted* in) is intentionally never compared against `direction`
+                // here — the request's own `direction` param is authoritative for
+                // how `decoded.positions` are read this time (see `Cursor`'s doc
+                // comment for the exact bound semantics). This is what makes the
+                // sliding window's "re-read a trimmed region by following an edge
+                // cursor in the opposite direction" a supported, well-defined
+                // request rather than a version mismatch to reject.
+                PositionSource::FromCursor(decoded.positions)
+            }
+            None => PositionSource::FromAnchor(parse_anchor_input(&params)?),
+        };
+        Ok((direction, limit, source, filter))
+    })();
 
-    let handle = state.registry.get(&cluster)?;
+    // Both branches below feed the same `mpsc::Receiver<TimelineEvent>`
+    // shape, so `Sse<impl Stream<...>>`'s single concrete return type is
+    // satisfied either way. `CancelOnDrop` is tied to the stream's own
+    // `.map()` closure lifetime, so a client disconnect flips `cancel` the
+    // instant the stream is dropped, not only once some in-flight send
+    // happens to fail — the "no zombie scans" guarantee.
+    let (rx, guard): (mpsc::Receiver<TimelineEvent>, CancelOnDrop) = match validated {
+        Err(e) => single_event_stream(e.into()),
+        Ok((direction, limit, source, filter)) => {
+            let handle = state.registry.get(&cluster)?;
 
-    // One watermarks round trip per page request either way: an anchor page
-    // needs them to resolve positions, a cursor page needs them anyway for
-    // `run_page`'s own windowing and exhaustion check.
-    //
-    // `resolved` is kept as a `Result` rather than `?`-unwrapped here so an
-    // anchor resolution failure (e.g. "no message at that offset") becomes
-    // an IN-STREAM `TimelineEvent::Error` below instead of a pre-stream HTTP
-    // error: `EventSource` discards a non-200 response body wholesale, so
-    // the frontend would otherwise see generic "connection lost" instead of
-    // the real reason. The one exception is a `spawn_blocking` `JoinError`
-    // (the task itself panicked) — a genuine internal fault, not a
-    // rejection of anything the user did — which still short-circuits as a
-    // pre-stream 500 via the `?` on the join itself.
-    type PositionsAndWatermarks = (Vec<(i32, i64)>, Vec<(i32, i64, i64)>);
-    let resolved: Result<PositionsAndWatermarks, ApiError> = {
-        let handle = handle.clone();
-        let topic = topic.clone();
-        tokio::task::spawn_blocking(move || -> Result<PositionsAndWatermarks, ApiError> {
-            let wm = fetch::watermarks_blocking(&handle, &topic)?;
-            let positions = match source {
-                PositionSource::FromCursor(positions) => positions,
-                PositionSource::FromAnchor(input) => {
-                    timeline::resolve_positions_blocking(&handle, &topic, &wm, input, direction)?
-                }
+            // One watermarks round trip per page request either way: an anchor
+            // page needs them to resolve positions, a cursor page needs them
+            // anyway for `run_page`'s own windowing and exhaustion check.
+            //
+            // `resolved` is kept as a `Result` rather than `?`-unwrapped here so
+            // an anchor resolution failure (e.g. "no message at that offset")
+            // becomes an IN-STREAM `TimelineEvent::Error` below instead of a
+            // pre-stream HTTP error. The one exception is a `spawn_blocking`
+            // `JoinError` (the task itself panicked) — a genuine internal
+            // fault, not a rejection of anything the user did — which still
+            // short-circuits as a pre-stream 500 via the `?` on the join
+            // itself.
+            type PositionsAndWatermarks = (Vec<(i32, i64)>, Vec<(i32, i64, i64)>);
+            let resolved: Result<PositionsAndWatermarks, ApiError> = {
+                let handle = handle.clone();
+                let topic = topic.clone();
+                tokio::task::spawn_blocking(move || -> Result<PositionsAndWatermarks, ApiError> {
+                    let wm = fetch::watermarks_blocking(&handle, &topic)?;
+                    let positions = match source {
+                        PositionSource::FromCursor(positions) => positions,
+                        PositionSource::FromAnchor(input) => {
+                            timeline::resolve_positions_blocking(&handle, &topic, &wm, input, direction)?
+                        }
+                    };
+                    Ok((positions, wm))
+                }).await.map_err(ApiError::task_join)?
             };
-            Ok((positions, wm))
-        }).await.map_err(ApiError::task_join)?
-    };
 
-    // Both branches feed the same `mpsc::Receiver<TimelineEvent>` shape, so
-    // `Sse<impl Stream<...>>`'s single concrete return type is satisfied
-    // either way. `CancelOnDrop` is tied to the stream's own `.map()`
-    // closure lifetime, so a client disconnect flips `cancel` the instant
-    // the stream is dropped, not only once some in-flight send happens to
-    // fail — the "no zombie scans" guarantee. The error path never started a
-    // scan, so its guard wraps a fresh, inert flag: nothing to cancel.
-    let (rx, guard): (mpsc::Receiver<TimelineEvent>, CancelOnDrop) = match resolved {
-        Ok((positions, watermarks)) => {
-            let budget = state.limits.timeline_scan_budget;
-            let req = timeline::PageRequest { positions, watermarks, direction, limit, filter, budget };
-            let (rx, cancel) = timeline::run_page(handle, topic, req);
-            (rx, CancelOnDrop(cancel))
-        }
-        Err(e) => {
-            // A fresh, single-purpose channel carrying exactly one event:
-            // `try_send` on a brand-new, empty channel can't fail for
-            // capacity reasons, and there is nothing else to send after
-            // it — the sender drops at the end of this arm, closing the
-            // channel once this one buffered event has been delivered.
-            let (tx, rx) = mpsc::channel::<TimelineEvent>(1);
-            let _ = tx.try_send(e.into());
-            (rx, CancelOnDrop(Arc::new(AtomicBool::new(false))))
+            match resolved {
+                Ok((positions, watermarks)) => {
+                    let budget = state.limits.timeline_scan_budget;
+                    let req = timeline::PageRequest { positions, watermarks, direction, limit, filter, budget };
+                    let (rx, cancel) = timeline::run_page(handle, topic, req);
+                    (rx, CancelOnDrop(cancel))
+                }
+                Err(e) => single_event_stream(e.into()),
+            }
         }
     };
     let stream = ReceiverStream::new(rx).map(move |event: TimelineEvent| {
