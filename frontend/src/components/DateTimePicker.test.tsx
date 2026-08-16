@@ -7,6 +7,7 @@ import {
   formatDateTimeMillis,
   parseDateTimeMillis,
   wheelCenteredIndex,
+  wheelIndexForScrollTop,
   wheelRewrapScrollTop,
   wheelScrollTopForIndex,
 } from './DateTimePicker'
@@ -145,6 +146,19 @@ describe('DateTimePicker', () => {
       expect(wheelRewrapScrollTop(100, count, rowHeight)).toBe(100 + blockHeight)
       // Drifted into the bottom third: jump backward by one block.
       expect(wheelRewrapScrollTop(blockHeight * 2 - 50, count, rowHeight)).toBe(blockHeight * 2 - 50 - blockHeight)
+    })
+
+    it('wheelIndexForScrollTop is the exact inverse of wheelScrollTopForIndex', () => {
+      expect(wheelIndexForScrollTop(wheelScrollTopForIndex(33))).toBe(33)
+      expect(wheelIndexForScrollTop(wheelScrollTopForIndex(0))).toBe(0)
+      expect(wheelIndexForScrollTop(wheelScrollTopForIndex(105))).toBe(105)
+    })
+
+    it('wheelIndexForScrollTop rounds to the nearest row when scrollTop sits between two rows', () => {
+      // Row 33 is centered at scrollTop 744; a few px off either way still
+      // resolves to row 33 rather than its neighbor.
+      expect(wheelIndexForScrollTop(744 + 5)).toBe(33)
+      expect(wheelIndexForScrollTop(744 - 5)).toBe(33)
     })
   })
 
@@ -476,6 +490,102 @@ describe('DateTimePicker', () => {
       expect(screen.getByTestId('datetime-picker-hour-09')).toHaveAttribute('aria-pressed', 'true')
       expect(screen.getByTestId('datetime-picker-minute-32')).toHaveAttribute('aria-pressed', 'true')
       expect(screen.getByTestId('datetime-picker-second-10')).toHaveAttribute('aria-pressed', 'true')
+    })
+
+    // Owner ruling 2026-08-17: scrolling a wheel doesn't just pan it, it
+    // SELECTS — once the scroll settles (no further scroll events for
+    // ~120ms), whichever value is resting at the vertical center becomes
+    // the selection, snapped exactly into place. jsdom has no real scroll
+    // physics, so `scrollTop` is driven directly via stubbed `fireEvent.scroll`
+    // (matching the pure geometry helpers tested above) and settling is
+    // driven via fake timers — the actual wheel drag/momentum FEEL is
+    // verified in the browser pass, not here.
+    describe('scroll-to-select (fake timers drive the settle debounce)', () => {
+      const scrollTopForHour = (h: number) => wheelScrollTopForIndex(wheelCenteredIndex(h, 24))
+
+      it('scrolling a wheel column and letting it settle selects the centered value, snapping it to center', () => {
+        vi.useFakeTimers()
+        try {
+          render(<Picker valueMs={SEED_MS} onChange={vi.fn()} />)
+          fireEvent.click(screen.getByTestId('datetime-picker-trigger'))
+
+          const hourList = screen.getByTestId('datetime-picker-hour-list')
+          fireEvent.scroll(hourList, { target: { scrollTop: scrollTopForHour(9) } })
+          // Not yet selected — still settling.
+          expect(screen.getByTestId('datetime-picker-hour-18')).toHaveAttribute('aria-pressed', 'true')
+
+          act(() => { vi.advanceTimersByTime(150) })
+
+          expect(screen.getByTestId('datetime-picker-hour-09')).toHaveAttribute('aria-pressed', 'true')
+          expect(screen.getByTestId('datetime-picker-hour-18')).toHaveAttribute('aria-pressed', 'false')
+          // Selecting via scroll zeroes millis exactly like a click selection.
+          expect(screen.getByTestId('datetime-picker-text')).toHaveValue('2026-08-15 09:32:10.000')
+        } finally {
+          vi.useRealTimers()
+        }
+      })
+
+      it('does not select while still scrolling (before the settle window elapses)', () => {
+        vi.useFakeTimers()
+        try {
+          render(<Picker valueMs={SEED_MS} onChange={vi.fn()} />)
+          fireEvent.click(screen.getByTestId('datetime-picker-trigger'))
+
+          const hourList = screen.getByTestId('datetime-picker-hour-list')
+          fireEvent.scroll(hourList, { target: { scrollTop: scrollTopForHour(9) } })
+          act(() => { vi.advanceTimersByTime(80) }) // < the ~120ms settle window
+
+          expect(screen.getByTestId('datetime-picker-hour-18')).toHaveAttribute('aria-pressed', 'true')
+          expect(screen.getByTestId('datetime-picker-hour-09')).toHaveAttribute('aria-pressed', 'false')
+        } finally {
+          vi.useRealTimers()
+        }
+      })
+
+      it('rapid successive scroll events reset the settle timer — only the final resting position is selected', () => {
+        vi.useFakeTimers()
+        try {
+          render(<Picker valueMs={SEED_MS} onChange={vi.fn()} />)
+          fireEvent.click(screen.getByTestId('datetime-picker-trigger'))
+
+          const hourList = screen.getByTestId('datetime-picker-hour-list')
+          fireEvent.scroll(hourList, { target: { scrollTop: scrollTopForHour(9) } })
+          act(() => { vi.advanceTimersByTime(80) }) // resets the debounce below
+          fireEvent.scroll(hourList, { target: { scrollTop: scrollTopForHour(3) } })
+          act(() => { vi.advanceTimersByTime(150) })
+
+          expect(screen.getByTestId('datetime-picker-hour-03')).toHaveAttribute('aria-pressed', 'true')
+          expect(screen.getByTestId('datetime-picker-hour-09')).toHaveAttribute('aria-pressed', 'false')
+          expect(screen.getByTestId('datetime-picker-hour-18')).toHaveAttribute('aria-pressed', 'false')
+        } finally {
+          vi.useRealTimers()
+        }
+      })
+
+      it('scrolling one column does not affect the others', () => {
+        vi.useFakeTimers()
+        try {
+          render(<Picker valueMs={SEED_MS} onChange={vi.fn()} />)
+          fireEvent.click(screen.getByTestId('datetime-picker-trigger'))
+
+          const hourList = screen.getByTestId('datetime-picker-hour-list')
+          fireEvent.scroll(hourList, { target: { scrollTop: scrollTopForHour(9) } })
+          act(() => { vi.advanceTimersByTime(150) })
+
+          expect(screen.getByTestId('datetime-picker-minute-32')).toHaveAttribute('aria-pressed', 'true')
+          expect(screen.getByTestId('datetime-picker-second-10')).toHaveAttribute('aria-pressed', 'true')
+        } finally {
+          vi.useRealTimers()
+        }
+      })
+
+      it('click-to-select still works unchanged alongside scroll-to-select', async () => {
+        const user = userEvent.setup()
+        render(<Picker valueMs={SEED_MS} onChange={vi.fn()} />)
+        await user.click(screen.getByTestId('datetime-picker-trigger'))
+        await user.click(screen.getByTestId('datetime-picker-minute-05'))
+        expect(screen.getByTestId('datetime-picker-minute-05')).toHaveAttribute('aria-pressed', 'true')
+      })
     })
   })
 
