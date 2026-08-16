@@ -22,6 +22,18 @@ function insertByOffsetAscending(arr: MessageOut[], msg: MessageOut): void {
   arr.splice(lo, 0, msg)
 }
 
+/** Binary-searches `arr` (offset-ascending) for `offset`, returning its index or -1. */
+function findOffsetIndex(arr: MessageOut[], offset: number): number {
+  let lo = 0
+  let hi = arr.length
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1
+    if (arr[mid].offset < offset) lo = mid + 1
+    else hi = mid
+  }
+  return lo < arr.length && arr[lo].offset === offset ? lo : -1
+}
+
 // ===========================================================================
 // v1.6 sliding window store (spec: docs/superpowers/specs/2026-08-13-
 // messages-timeline-design.md, "Sliding window (v1.6 — owner ruling)").
@@ -456,7 +468,7 @@ export function createSlidingWindowStore(cap = 2000): SlidingWindowStore {
   function removeMessage(msg: MessageOut): void {
     const arr = partitions.get(msg.partition)
     if (!arr) return
-    const idx = arr.findIndex((m) => m.offset === msg.offset)
+    const idx = findOffsetIndex(arr, msg.offset)
     if (idx >= 0) arr.splice(idx, 1)
     if (arr.length === 0) partitions.delete(msg.partition)
     seen.delete(partitionKey(msg.partition, msg.offset))
