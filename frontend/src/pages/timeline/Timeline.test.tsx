@@ -262,6 +262,50 @@ describe('Timeline', () => {
       expect(screen.getAllByTestId('message-row')[0]).toHaveTextContent('2023-12-31 19:01:05.000 UTC-5')
       expect(FakeEventSource.instances.length).toBe(requestsBefore)
     })
+
+    // Owner ruling (moved 2026-08-16): the toggle itself moved from the
+    // sidebar into this header — this proves it's actually wired here (a
+    // real click on the rendered control, not just a programmatic
+    // `setTimeDisplayMode` call), driving the exact same zero-network
+    // re-render as the test above.
+    it('clicking the rendered header toggle flips the window-range and rows live, without any new request', async () => {
+      mockTail()
+      render(<Timeline cluster="prod" topic="orders" />)
+      await emit(0, 'match', mk(2, { timestamp_ms: 1_704_067_265_000 })) // 2024-01-01T00:01:05Z
+      await emit(0, 'match', mk(1, { timestamp_ms: 1_704_067_205_000 })) // 2024-01-01T00:00:05Z
+      await emit(0, 'page_end', { cursor: cur({ 0: 1 }), exhausted: false })
+      expect(screen.getByTestId('window-range')).toHaveTextContent('2024-01-01 00:00 → 00:01 UTC')
+
+      const requestsBefore = FakeEventSource.instances.length
+      fireEvent.click(screen.getByRole('button', { name: /time zone/i }))
+
+      expect(screen.getByTestId('window-range')).toHaveTextContent('2023-12-31 19:00 → 19:01 UTC-5')
+      expect(screen.getAllByTestId('message-row')[0]).toHaveTextContent('2023-12-31 19:01:05.000 UTC-5')
+      expect(FakeEventSource.instances.length).toBe(requestsBefore)
+    })
+
+    // Persistence is the global store's job (`lib/timeDisplayMode`,
+    // untouched by this move) — this proves the moved call site still reads
+    // it correctly on a fresh mount, without needing to click again.
+    it('persists the choice across a remount of the Timeline', () => {
+      mockTail()
+      const { unmount } = render(<Timeline cluster="prod" topic="orders" />)
+      fireEvent.click(screen.getByRole('button', { name: /time zone/i }))
+      expect(screen.getByRole('button', { name: /time zone/i })).toHaveAttribute('data-mode', 'local')
+      unmount()
+
+      render(<Timeline cluster="prod" topic="orders" />)
+      expect(screen.getByRole('button', { name: /time zone/i })).toHaveAttribute('data-mode', 'local')
+    })
+  })
+
+  // Owner ruling (moved 2026-08-16): the UTC/local toggle now lives in this
+  // header cluster (see TimeZoneToggle.tsx) — it used to sit in the sidebar
+  // (AppShell.test.tsx now proves the reverse: absent there).
+  it('renders the time zone toggle in the header, defaulting to UTC', () => {
+    mockTail()
+    render(<Timeline cluster="prod" topic="orders" />)
+    expect(screen.getByRole('button', { name: /time zone/i })).toHaveAttribute('data-mode', 'utc')
   })
 
   it('header reads gracefully before any row has loaded', () => {

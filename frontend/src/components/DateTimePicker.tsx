@@ -41,8 +41,9 @@ import { useTimeDisplayMode, type TimeDisplayMode } from '../lib/timeDisplayMode
 // was a coincidental color collision with no shared meaning. Sky was
 // chosen over amber/red (also reserved: staleness/error) because it's
 // already the app's own "this is selected/notable, no status implied"
-// color — AppShell's own UTC/local `TimeZoneToggle` lights its active half
-// with `bg-sky-100/text-sky-700` (dark: `bg-sky-500/20/text-sky-300`), and
+// color — the UTC/local `TimeZoneToggle` (components/TimeZoneToggle.tsx)
+// lights its active half with `bg-sky-100/text-sky-700` (dark:
+// `bg-sky-500/20/text-sky-300`), and
 // message header keys (MessageRow/JsonView) render `text-sky-800/300` —
 // both purely representational, never a status signal. The jump-target row
 // highlight (separate component) stays emerald on purpose: "you jumped

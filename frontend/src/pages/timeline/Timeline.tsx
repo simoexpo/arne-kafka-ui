@@ -7,6 +7,7 @@ import { MessageList } from '../../components/messages/MessageList'
 import type { MessageListHandle } from '../../components/messages/MessageList'
 import { Panel } from '../../components/Panel'
 import { StalenessChip } from '../../components/StalenessChip'
+import { TimeZoneToggle } from '../../components/TimeZoneToggle'
 import { parseFilterQuery, type FilterQueryApi } from '../../lib/filterQuery'
 import { formatWindowRange } from '../../lib/format'
 import { decodeCursor } from '../../lib/timelineCursor'
@@ -318,6 +319,12 @@ export function Timeline({
   // the header's zone label/time from the SAME loaded rows — see
   // `lib/timeDisplayMode`'s own comment. No refetch: nothing below reads
   // this to decide what to request, only how to format what's already here.
+  //
+  // Owner ruling (moved 2026-08-16): the rendered `TimeZoneToggle` control
+  // itself now lives in THIS header (see the render below), next to the
+  // window-range display it rewrites and the live/pause controls — it used
+  // to sit in the sidebar (`layout/AppShell.tsx`), where its effect was
+  // never actually visible. The global store this reads from is unchanged.
   const timeDisplayMode = useTimeDisplayMode()
 
   const [live, setLive] = useState(true)
@@ -1218,6 +1225,7 @@ export function Timeline({
             : formatWindowRange(rows.at(-1)!.timestamp_ms, rows[0].timestamp_ms, timeDisplayMode)}
         </h2>
         <div className="flex items-center gap-2">
+          <TimeZoneToggle />
           <LivePill count={bufferReceivedRef.current} capped={bufferOverflowRef.current} attached={attached} onClick={handlePillClick} />
           {live && attached ? (
             // Attached: the normal live indicator/toggle cluster.

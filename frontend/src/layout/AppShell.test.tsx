@@ -1,13 +1,8 @@
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
-import { fireEvent, render, screen } from '@testing-library/react'
+import { describe, expect, it } from 'vitest'
+import { screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { renderWithQuery, renderWithRouter } from '../test/utils'
-import { getTimeDisplayMode } from '../lib/timeDisplayMode'
-import { Sidebar, ThemeToggle, TimeZoneToggle, sectionFromPathname } from './AppShell'
-
-// `@types/node` isn't in this app's tsconfig `types` (browser app) — declared
-// locally for the fixed-TZ test below rather than widening ambient types.
-declare const process: { env: Record<string, string | undefined> }
+import { Sidebar, ThemeToggle, sectionFromPathname } from './AppShell'
 
 const clusters = [
   { name: 'prod', status: 'healthy', broker_count: 3, error: null } as const,
@@ -36,6 +31,17 @@ describe('Sidebar', () => {
       initialPath: '/c/prod/topics',
     })
     expect(screen.getByAltText('Betrachtung logo')).toHaveAttribute('src', '/logo.svg')
+  })
+
+  // The UTC/local toggle moved out of the sidebar into the Messages tab's
+  // Timeline header (see TimeZoneToggle.tsx / Timeline.tsx) — its effect
+  // (rewriting the window-range/row timestamps) is only ever visible there,
+  // never in the sidebar itself.
+  it('does not render the time zone toggle (moved to the Timeline header)', async () => {
+    await renderWithRouter(<Sidebar cluster="prod" clusters={[...clusters]} active="topics" />, {
+      initialPath: '/c/prod/topics',
+    })
+    expect(screen.queryByRole('button', { name: /time zone/i })).not.toBeInTheDocument()
   })
 })
 
@@ -71,52 +77,5 @@ describe('ThemeToggle', () => {
     expect(button).toHaveAttribute('data-mode', 'dark')
     await userEvent.click(button)
     expect(button).toHaveAttribute('data-mode', 'light')
-  })
-})
-
-// UTC/local display toggle (owner ruling 2026-08-15): display-only, no
-// refetch — proven at the Timeline level (see Timeline.test.tsx); this
-// suite covers the toggle control itself.
-//
-// Owner ruling 2026-08-17: the word "local" disappears everywhere — the
-// toggle's local half now shows the CURRENT numeric UTC offset dynamically
-// (e.g. "UTC+2"), same family as rows/header/picker. Fixed TZ + fake system
-// time so "current offset" is deterministic here.
-describe('TimeZoneToggle', () => {
-  const ORIGINAL_TZ = process.env.TZ
-  beforeAll(() => { process.env.TZ = 'America/New_York' })
-  afterAll(() => { process.env.TZ = ORIGINAL_TZ })
-
-  beforeEach(() => {
-    vi.useFakeTimers()
-    vi.setSystemTime(new Date(Date.UTC(2026, 7, 15, 12, 0, 0))) // Aug 15: EDT, UTC-4
-  })
-  afterEach(() => vi.useRealTimers())
-
-  it('defaults to UTC and shows the current local offset in the other half', () => {
-    render(<TimeZoneToggle />)
-    const button = screen.getByRole('button', { name: /time zone/i })
-    expect(button).toHaveAttribute('data-mode', 'utc')
-    expect(button).toHaveTextContent('UTC')
-    expect(button).toHaveTextContent('UTC-4')
-  })
-
-  // `fireEvent` (not `userEvent`) — userEvent's own internal delays don't
-  // mix with fake timers without extra setup, and these tests only need a
-  // plain click (same pattern as DateTimePicker's "today marker" test).
-  it('clicking flips to local and persists the choice', () => {
-    render(<TimeZoneToggle />)
-    const button = screen.getByRole('button', { name: /time zone/i })
-    fireEvent.click(button)
-    expect(button).toHaveAttribute('data-mode', 'local')
-    expect(getTimeDisplayMode()).toBe('local')
-  })
-
-  it('clicking again flips back to utc', () => {
-    render(<TimeZoneToggle />)
-    const button = screen.getByRole('button', { name: /time zone/i })
-    fireEvent.click(button)
-    fireEvent.click(button)
-    expect(button).toHaveAttribute('data-mode', 'utc')
   })
 })
