@@ -38,7 +38,7 @@ export function MessageRow({
       className={`cursor-pointer border-b border-zinc-100 px-2 py-1.5 font-mono text-sm dark:border-zinc-800 ${
         isJumpTarget
           ? 'bg-emerald-50 hover:bg-emerald-100 dark:bg-emerald-950/40 dark:hover:bg-emerald-950/60'
-          : 'hover:bg-zinc-50 dark:hover:bg-zinc-900'
+          : 'hover:bg-zinc-50 dark:hover:bg-zinc-800/70'
       }`}
     >
       <div className="flex items-center gap-3">
@@ -76,7 +76,7 @@ export function MessageRow({
         {message.value && <EncodingBadge encoding={message.value.encoding} />}
       </div>
       {expanded && (
-        <div className="mt-2 grid grid-cols-1 gap-3 md:grid-cols-2" onClick={(e) => e.stopPropagation()}>
+        <div className="mt-2 grid cursor-default grid-cols-1 gap-3 md:grid-cols-2" onClick={(e) => e.stopPropagation()}>
           <div>
             <PayloadView payload={message.key} label="key" />
           </div>
