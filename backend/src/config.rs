@@ -35,13 +35,27 @@ pub struct ClusterConfig {
     pub schema_registry: Option<SchemaRegistryConfig>,
 }
 
-#[derive(Debug, Deserialize, Clone, PartialEq)]
+#[derive(Deserialize, Clone, PartialEq)]
 pub struct SaslConfig {
     pub mechanism: SaslMechanism,
     pub username: String,
     pub password: String,
     #[serde(default = "default_true")]
     pub tls: bool,
+}
+
+/// Hand-written so a stray `tracing::debug!(?cfg)` (or any other Debug
+/// rendering) can never leak the plaintext broker password into logs —
+/// mirrors `ClusterHandle`'s own hand-written `Debug` for the same reason.
+impl std::fmt::Debug for SaslConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SaslConfig")
+            .field("mechanism", &self.mechanism)
+            .field("username", &self.username)
+            .field("password", &"<redacted>")
+            .field("tls", &self.tls)
+            .finish()
+    }
 }
 
 #[derive(Debug, Deserialize, Clone, Copy, PartialEq)]
@@ -269,6 +283,19 @@ clusters:
 server: { port: 9000 }
 limits: { sampler_interval_secs: 5 }
 "#;
+
+    #[test]
+    fn sasl_config_debug_redacts_the_password() {
+        let sasl = SaslConfig {
+            mechanism: SaslMechanism::Plain,
+            username: "app".into(),
+            password: "s3cret".into(),
+            tls: true,
+        };
+        let debug = format!("{sasl:?}");
+        assert!(!debug.contains("s3cret"), "password must never appear in Debug output: {debug}");
+        assert!(debug.contains("<redacted>"), "got: {debug}");
+    }
 
     fn parse(yaml: &str) -> Result<Config, ConfigError> {
         let interpolated = interpolate_outside_comments(yaml, &|v| {
