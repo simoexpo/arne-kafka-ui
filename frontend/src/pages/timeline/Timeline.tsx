@@ -2,8 +2,6 @@ import { useCallback, useEffect, useLayoutEffect, useReducer, useRef, useState }
 import { tailTopic } from '../../api/sse'
 import type { TimelineDirection, TimelinePageParams } from '../../api/sse'
 import type { MessageOut } from '../../api/types'
-import { FilterInput } from '../../components/FilterInput'
-import { FilterHelp } from '../../components/FilterHelp'
 import { MessageList } from '../../components/messages/MessageList'
 import type { MessageListHandle } from '../../components/messages/MessageList'
 import { Panel } from '../../components/Panel'
@@ -21,6 +19,7 @@ import { classifyScroll } from '../../lib/timeline/scrollZones'
 import { stepSettling, type SettlingState } from '../../lib/timeline/settling'
 import { useFallingEdge } from './useFallingEdge'
 import { ContinueScanButton } from './ContinueScanButton'
+import { FilterBar } from './FilterBar'
 import { JumpControl } from './JumpControl'
 import { useTimelinePage } from './useTimelinePage'
 import { TimelineHeader } from './TimelineHeader'
@@ -954,25 +953,12 @@ export function Timeline({
         onPillClick={handlePillClick}
         onPlayPauseClick={handlePlayPauseToggle}
       />
-      <div className="flex flex-wrap items-center gap-3">
-        <div className="min-w-0 flex-1">
-          <FilterInput value={filterText} onChange={setFilterText} placeholder="filter messages…" ariaLabel="filter messages" className="w-full" fullWidth />
-        </div>
-        <FilterHelp />
-        {progressVisible && (
-          <div data-testid="filter-progress" className="flex items-center gap-2 text-xs text-zinc-500 dark:text-zinc-400">
-            <span>{`scanned ${progressScanned} · ${progressMatches} matches`}</span>
-            <button
-              type="button"
-              data-testid="cancel-scan"
-              onClick={handleCancelScan}
-              className="rounded border border-zinc-300 px-2 py-0.5 text-zinc-600 hover:bg-zinc-100 dark:border-zinc-700 dark:text-zinc-400 dark:hover:bg-zinc-800"
-            >
-              Cancel
-            </button>
-          </div>
-        )}
-      </div>
+      <FilterBar
+        value={filterText}
+        onChange={setFilterText}
+        progress={progressVisible ? { scanned: progressScanned, matches: progressMatches } : null}
+        onCancel={handleCancelScan}
+      />
       <JumpControl onJump={handleJump} partitionIds={partitionIds} />
       {tailErrorText && (
         <p className="text-sm text-amber-600 dark:text-amber-400">{`live stopped — ${tailErrorText}`}</p>
