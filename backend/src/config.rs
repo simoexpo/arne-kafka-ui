@@ -70,8 +70,6 @@ impl Default for ServerConfig {
 
 #[derive(Debug, Deserialize, Clone, PartialEq)]
 pub struct Limits {
-    #[serde(default = "default_max_matches")]
-    pub max_search_matches: u32,
     #[serde(default = "default_sampler_interval")]
     pub sampler_interval_secs: u64,
     /// Per-request cap on records scanned by one timeline page (`run_page`),
@@ -85,7 +83,6 @@ pub struct Limits {
 impl Default for Limits {
     fn default() -> Self {
         Self {
-            max_search_matches: default_max_matches(),
             sampler_interval_secs: default_sampler_interval(),
             timeline_scan_budget: default_timeline_scan_budget(),
         }
@@ -94,7 +91,6 @@ impl Default for Limits {
 
 fn default_true() -> bool { true }
 fn default_port() -> u16 { 8080 }
-fn default_max_matches() -> u32 { 500 }
 fn default_sampler_interval() -> u64 { 10 }
 fn default_timeline_scan_budget() -> u64 { 250_000 }
 
@@ -271,7 +267,7 @@ clusters:
   - name: local
     bootstrap: localhost:9092
 server: { port: 9000 }
-limits: { max_search_matches: 100, sampler_interval_secs: 5 }
+limits: { sampler_interval_secs: 5 }
 "#;
 
     fn parse(yaml: &str) -> Result<Config, ConfigError> {
@@ -295,14 +291,12 @@ limits: { max_search_matches: 100, sampler_interval_secs: 5 }
         assert!(matches!(sasl.mechanism, SaslMechanism::ScramSha512));
         assert_eq!(cfg.clusters[1].sasl, None);
         assert_eq!(cfg.server.port, 9000);
-        assert_eq!(cfg.limits.max_search_matches, 100);
     }
 
     #[test]
     fn defaults_apply_when_sections_missing() {
         let cfg = parse("clusters:\n  - name: a\n    bootstrap: x:9092\n").unwrap();
         assert_eq!(cfg.server.port, 8080);
-        assert_eq!(cfg.limits.max_search_matches, 500);
         assert_eq!(cfg.limits.sampler_interval_secs, 10);
         assert_eq!(cfg.limits.timeline_scan_budget, 250_000);
     }

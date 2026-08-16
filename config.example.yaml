@@ -4,4 +4,4 @@ clusters:
     # sasl: { mechanism: SCRAM-SHA-512, username: app, password: "${KAFKA_PASSWORD}" }
     # schema_registry: { url: http://localhost:8081 }
 server: { port: 8080 }
-limits: { max_search_matches: 500, sampler_interval_secs: 10 }
+limits: { sampler_interval_secs: 10, timeline_scan_budget: 250000 }
