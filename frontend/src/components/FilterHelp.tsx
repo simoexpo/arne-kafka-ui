@@ -37,7 +37,7 @@ export function FilterHelp() {
       {open && (
         <div
           data-testid="filter-help-popover"
-          className="absolute right-0 top-8 z-10 w-80 rounded border border-zinc-300 bg-white p-3 text-xs shadow-lg dark:border-zinc-700 dark:bg-zinc-900"
+          className="absolute right-0 top-8 z-10 w-80 rounded border border-zinc-300 bg-white p-3 text-xs shadow-lg dark:border-zinc-700 dark:bg-zinc-950"
         >
           <h3 className="mb-2 text-sm font-medium text-zinc-500 dark:text-zinc-400">Filter syntax</h3>
           <dl className="space-y-1.5">

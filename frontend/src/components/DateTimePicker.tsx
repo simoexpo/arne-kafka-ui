@@ -473,7 +473,7 @@ export function DateTimePicker({
         onKeyDown={(e) => {
           if (e.key === 'Enter') onTextEnter?.()
         }}
-        className="w-44 rounded border border-zinc-300 bg-transparent px-1.5 py-0.5 pr-6 dark:border-zinc-700 dark:bg-zinc-900"
+        className="w-44 rounded border border-zinc-300 bg-transparent px-1.5 py-0.5 pr-6 dark:border-zinc-700 dark:bg-zinc-950"
       />
       <button
         type="button"
@@ -488,7 +488,7 @@ export function DateTimePicker({
       {open && (
         <div
           data-testid="datetime-picker-popover"
-          className="absolute z-20 mt-1 w-80 rounded-lg border border-zinc-200 bg-white p-2 text-xs shadow-lg dark:border-zinc-800 dark:bg-zinc-900"
+          className="absolute z-20 mt-1 w-80 rounded-lg border border-zinc-200 bg-white p-2 text-xs shadow-lg dark:border-zinc-800 dark:bg-zinc-950"
         >
           <div className="mb-1 flex justify-end">
             <span

@@ -24,7 +24,7 @@ export function PaletteView({ items, onNavigate, onClose }: {
   return (
     <div className="fixed inset-0 z-50 flex items-start justify-center bg-black/40 pt-24" onClick={onClose}>
       <div
-        className="w-[32rem] rounded-lg border border-zinc-200 bg-white shadow-xl dark:border-zinc-700 dark:bg-zinc-900"
+        className="w-[32rem] rounded-lg border border-zinc-200 bg-white shadow-xl dark:border-zinc-700 dark:bg-zinc-950"
         onClick={(e) => e.stopPropagation()}
       >
         <input

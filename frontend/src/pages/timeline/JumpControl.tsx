@@ -101,7 +101,7 @@ export function JumpControl({ onJump, partitionIds = [] }: { onJump: (target: Ju
               aria-label="partition"
               value={partitionText}
               onChange={(e) => setPartitionText(e.target.value)}
-              className="rounded border border-zinc-300 px-1 py-0.5 dark:border-zinc-700 dark:bg-zinc-900"
+              className="rounded border border-zinc-300 px-1 py-0.5 dark:border-zinc-700 dark:bg-zinc-950"
             >
               <option value="" disabled>partition</option>
               {partitionIds.map((id) => (
@@ -116,7 +116,7 @@ export function JumpControl({ onJump, partitionIds = [] }: { onJump: (target: Ju
               value={partitionText}
               onChange={(e) => setPartitionText(e.target.value)}
               onKeyDown={(e) => e.key === 'Enter' && applyOffset()}
-              className="w-16 rounded border border-zinc-300 px-1 py-0.5 dark:border-zinc-700 dark:bg-zinc-900"
+              className="w-16 rounded border border-zinc-300 px-1 py-0.5 dark:border-zinc-700 dark:bg-zinc-950"
             />
           )}
           <input
@@ -126,7 +126,7 @@ export function JumpControl({ onJump, partitionIds = [] }: { onJump: (target: Ju
             value={offsetText}
             onChange={(e) => setOffsetText(e.target.value)}
             onKeyDown={(e) => e.key === 'Enter' && applyOffset()}
-            className="w-36 rounded border border-zinc-300 px-1 py-0.5 dark:border-zinc-700 dark:bg-zinc-900"
+            className="w-36 rounded border border-zinc-300 px-1 py-0.5 dark:border-zinc-700 dark:bg-zinc-950"
           />
           <button
             type="button"

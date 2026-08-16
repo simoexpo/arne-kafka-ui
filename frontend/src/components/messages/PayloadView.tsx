@@ -23,7 +23,7 @@ export function PayloadView({ payload, label }: { payload: DecodedPayload | null
       <div className="space-y-1 font-mono text-sm">
         {heading}
         <p className="text-red-700 dark:text-red-400">{payload.error}</p>
-        <pre className="max-h-40 overflow-auto rounded bg-zinc-100 p-2 text-xs text-zinc-500 dark:bg-zinc-900">{payload.text}</pre>
+        <pre className="max-h-40 overflow-auto rounded bg-zinc-100 p-2 text-xs text-zinc-500 dark:bg-zinc-950">{payload.text}</pre>
       </div>
     )
   }
