@@ -56,7 +56,7 @@ export interface InsertOutcome {
   trimmedTop: number
   trimmedBottom: number
   /**
-   * The store's REAL attachment state as of this call (fix round 1, C1).
+   * The store's REAL attachment state as of this call.
    * NOT the same thing as `edges().top === null` — that also reads `null`
    * whenever `topMap` is simply empty (e.g. a zero-row anchor page, legal
    * per the empty-page contract), which has nothing to do with whether the
@@ -67,8 +67,8 @@ export interface InsertOutcome {
    */
   attached: boolean
   /**
-   * `true` when this `insertPage` call was REJECTED wholesale as stale
-   * (fix round 1, C3) — see `insertPage`'s own doc comment. No rows were
+   * `true` when this `insertPage` call was REJECTED wholesale as stale —
+   * see `insertPage`'s own doc comment. No rows were
    * inserted and no map was mutated; `trimmedTop`/`trimmedBottom` are both
    * `0` and `attached` reflects whatever it already was before this call.
    * The caller should re-issue the same request from the store's OWN fresh
@@ -89,7 +89,7 @@ interface SlidingWindowStore {
    * response's own continuation cursor, or `null` when the backend reported
    * `exhausted: true` (nothing more in `direction` from these positions).
    *
-   * STALENESS PRECONDITION (fix round 1, C3 — enforced, not left to caller
+   * STALENESS PRECONDITION (enforced, not left to caller
    * discipline): before touching anything, compares `startPositions` (per
    * partition) against the CURRENT same-side map (`bottomMap` for `back`,
    * `topMap` for `forward`). If the current value has already moved PAST
@@ -117,7 +117,7 @@ interface SlidingWindowStore {
     /**
      * `attach`: only meaningful for a BACK-direction anchor bootstrap
      * (`startPositions === null`) — controls whether this bootstrap claims
-     * the window covers the live tail (M-new, task-3 review carry-over).
+     * the window covers the live tail.
      * Latest genuinely reads from `hi`, so it attaches; Offset/Timestamp
      * anchors land mid-topic and must NOT attach even though they, too, are
      * back-direction anchor bootstraps with no request cursor. A forward
@@ -157,7 +157,7 @@ interface SlidingWindowStore {
   /** Merged rows, newest-first (partition offset order within a partition, timestamp merge across partitions). */
   rows(): readonly MessageOut[]
   /**
-   * Fix round 1, M2: a READ-ONLY preview of what `rows()` would look like
+   * A READ-ONLY preview of what `rows()` would look like
    * with `extraRows` also merged in — WITHOUT mutating anything (no `seen`
    * update, no edge-map update, no cap enforcement). Lets a caller display
    * an in-flight page's own accumulated matches progressively (product
@@ -190,7 +190,7 @@ interface SlidingWindowStore {
    */
   edges(): { top: string | null; bottom: string | null }
   /**
-   * The store's real, ungasked attachment state (fix round 1, C1) — same
+   * The store's real, ungasked attachment state — same
    * value as `InsertOutcome.attached`; `edges().top === null` is NOT a safe
    * proxy for it (see `InsertOutcome.attached`'s own doc comment).
    *
@@ -220,7 +220,7 @@ interface SlidingWindowStore {
  * doesn't get reinvented:** an earlier version of this comment claimed "a
  * partition not touched by a trim already correctly describes its
  * boundary" — true only once `insertLive` also touched `topMap`, which it
- * originally didn't (fix round 1, C1: a live-delivered row could sit above
+ * originally didn't (a live-delivered row could sit above
  * a stale or absent `topMap` entry forever). The FIRST fix for that added a
  * live-insert ceiling GUARDED by "only advance if this insert's own lowest
  * offset is at or below the existing boundary." Round 2 review proved that
@@ -261,8 +261,8 @@ interface SlidingWindowStore {
  *   bookkeeping is exactly what tracks that), and nothing about a live
  *   feed's offset-ordering guarantee helps: a row arriving "live" while
  *   detached could easily sit above a real, unrecovered gap. This is
- *   precisely why v1.3 (and Task 3, which owns the live subscription)
- *   buffers live rows instead of applying them while detached — the same
+ *   precisely why v1.3 (and Timeline's live-tail subscription, which owns
+ *   buffering) buffers live rows instead of applying them while detached — the same
  *   "auto-pause" behavior the design doc describes for the live pill. This
  *   store enforces that contract at its own boundary (throws) rather than
  *   trying to make the update rule safe for a case that should never reach
@@ -316,7 +316,7 @@ interface SlidingWindowStore {
  *
  *    **Re-attach buffer flush** (v1.3 semantics, modeled here explicitly):
  *    when a detached window re-attaches (a forward page reports
- *    `exhausted`), any live rows Task 3 buffered while detached get flushed
+ *    `exhausted`), any live rows the live-tail subscription buffered while detached get flushed
  *    through `insertLive` immediately after — now legal, since the store is
  *    attached again. Every one of those rows lands in one of three ways: (a)
  *    strictly above the window's current top (a genuine extension — the
@@ -368,11 +368,11 @@ interface SlidingWindowStore {
  * map is seeded directly from the just-fetched rows' own offsets — per
  * partition, `max(offset) + 1` (back anchor's opposite/top side) or
  * `min(offset)` (forward anchor's opposite/bottom side) — but ONLY when
- * that partition's entry is still ABSENT (fix round 2, N2): this same
+ * that partition's entry is still ABSENT: this same
  * window can already hold a genuinely-established value for the opposite
  * side from an EARLIER insert with no `clear()` in between, and an
  * unrelated page's own row offsets are never grounds to clobber it — see
- * `insertPage`'s own doc comment on this seeding step. N2's motivating call
+ * `insertPage`'s own doc comment on this seeding step. The motivating call
  * site (a `loadNewer` forward-anchor fallback that re-issued an anchor
  * without an intervening `clear()`) was deleted from `Timeline.tsx` and is
  * now production-unreachable — every anchor re-issue there goes through
@@ -386,8 +386,8 @@ interface SlidingWindowStore {
  * not something this store can fix without knowing the true watermark, which
  * `insertPage`'s signature never receives).
  *
- * **When an incomplete opposite-seed actually matters (fix round 2, N1):**
- * the C2 completeness check (`edges()`'s own doc comment) that masks
+ * **When an incomplete opposite-seed actually matters:**
+ * the completeness check (`edges()`'s own doc comment) that masks
  * `edges().top` when `topMap` is missing a partition `bottomMap` knows
  * about is only CONSULTED when `topCompletenessMatters` — set true by a
  * HISTORICAL (`attach: false`) back-anchor bootstrap, never by a Latest
@@ -407,7 +407,7 @@ interface SlidingWindowStore {
  * when a forward page reports `exhausted` (`contCursor === null` — caught
  * back up to the tail); it becomes `false` on any top trim. `edges().top`
  * reports `null` while `attached` (and also, separately, while `topMap` is
- * empty or incomplete — see `edges()`'s own doc comment for the C2
+ * empty or incomplete — see `edges()`'s own doc comment for that
  * completeness check) — the map keeps tracking underneath regardless, so the
  * moment a top trim detaches the window, a correct boundary is already
  * sitting there from whichever rule last touched it. Crucially, a forward
@@ -424,18 +424,16 @@ export function createSlidingWindowStore(cap = 2000): SlidingWindowStore {
   const bottomMap = new Map<number, number>()
   const topMap = new Map<number, number>()
   let attached = false
-  // Fix round 2, N1 (the blocker on the C2 completeness check): whether an
-  // incomplete `topMap` (relative to `bottomMap`) is a real risk worth
-  // masking `edges().top` for at all. Set true ONLY by a HISTORICAL
+  // Whether an incomplete `topMap` (relative to `bottomMap`) is a real risk
+  // worth masking `edges().top` for at all. Set true ONLY by a HISTORICAL
   // (`attach: false`) back-anchor bootstrap — a cold/empty partition
   // omitted from `topMap`'s opposite-side seed there genuinely hides a
-  // forward gap (the C2 scenario). A LATEST (`attach: true`) bootstrap
-  // never sets this: everything above a Latest anchor is, by construction,
-  // the live tail — a cold partition contributing zero rows there has
-  // nothing above it to hide (nothing has been produced yet, for ANY
-  // partition). Left false by default (and reset by `clear()`) so a
-  // Latest-mounted window's `edges().top` is trusted the instant a trim
-  // detaches it, same as before the C2 fix ever existed.
+  // forward gap. A LATEST (`attach: true`) bootstrap never sets this:
+  // everything above a Latest anchor is, by construction, the live tail —
+  // a cold partition contributing zero rows there has nothing above it to
+  // hide (nothing has been produced yet, for ANY partition). Left false by
+  // default (and reset by `clear()`) so a Latest-mounted window's
+  // `edges().top` is trusted the instant a trim detaches it.
   let topCompletenessMatters = false
   let cachedRows: readonly MessageOut[] | null = null
 
@@ -445,7 +443,7 @@ export function createSlidingWindowStore(cap = 2000): SlidingWindowStore {
     return n
   }
 
-  // Parameterized over WHICH partitions map to merge (fix round 1, M2):
+  // Parameterized over WHICH partitions map to merge:
   // `mergeRows()` below merges the real, committed `partitions`;
   // `previewWithOverlay` merges a throwaway temporary map instead, so the
   // two never duplicate this k-way merge logic (and can't drift apart).
@@ -569,8 +567,8 @@ export function createSlidingWindowStore(cap = 2000): SlidingWindowStore {
       for (let i = 0; i < excess; i++) recordTrim(merged[i])
       for (const [p, offsets] of trimmedByPartition) topMap.set(p, minOf(offsets))
 
-      // Completeness backfill (fix round 1, C1b; mutation-verified — see
-      // timelineStore.test.ts's N1 tests): a partition can be
+      // Completeness backfill (mutation-verified — see timelineStore.test.ts's
+      // "mutation-verified load-bearing paths" suite): a partition can be
       // holding rows in the window RIGHT NOW without ever having had its
       // own top boundary planted — e.g. it contributed zero rows to the
       // anchor page (so the anchor opposite-side seed skipped it), or was
@@ -601,7 +599,7 @@ export function createSlidingWindowStore(cap = 2000): SlidingWindowStore {
   }
 
   /**
-   * Fix round 1, C3: is `startPositions` (this page's own request-time
+   * Is `startPositions` (this page's own request-time
    * positions) still safe to merge, or has the current same-side map
    * already moved PAST it (a concurrent trim recovered exactly the range
    * this page never asked about)? `null` startPositions (an anchor page)
@@ -620,7 +618,7 @@ export function createSlidingWindowStore(cap = 2000): SlidingWindowStore {
 
   return {
     insertPage(rows, direction, startPositions, contCursor, opts) {
-      // Staleness precondition (fix round 1, C3) — see this method's own
+      // Staleness precondition — see this method's own
       // doc comment. Checked BEFORE any mutation: a rejected page must
       // leave the store byte-for-byte as it was.
       if (isStale(direction, startPositions)) {
@@ -682,7 +680,7 @@ export function createSlidingWindowStore(cap = 2000): SlidingWindowStore {
 
       // Attached transitions (see home doc comment): a back-anchor bootstrap
       // starts at the tail — but ONLY when the caller confirms this
-      // particular bootstrap is Latest-style (M-new: Offset/Timestamp
+      // particular bootstrap is Latest-style (Offset/Timestamp
       // anchors are also back-direction, startPositions === null bootstraps,
       // but they land mid-topic, not at the tail, and must stay detached —
       // see `opts.attach`'s own doc comment above). A forward page reporting
@@ -694,20 +692,19 @@ export function createSlidingWindowStore(cap = 2000): SlidingWindowStore {
       return enforceCap(direction === 'back' ? 'bottom-insert' : 'top-insert')
     },
     insertLive(rows) {
-      // Precondition, enforced (fix round 2 — see the class doc comment's
-      // "The resolution" section): only sound while attached. A caller
-      // violating this is a programming error (Task 3 must buffer live rows
+      // Precondition, enforced (see the class doc comment's "The resolution"
+      // section): only sound while attached. A caller violating this is a
+      // programming error (the live-tail subscription must buffer live rows
       // while detached, per v1.3), not a data condition to tolerate quietly.
       if (!attached) {
         throw new Error(
           'insertLive called while detached: live rows must be buffered by the caller until the window re-attaches (isAttached() / InsertOutcome.attached becomes true)',
         )
       }
-      // N2 defensive drop — filter out anything at or below `bottomMap[p]`
+      // Defensive drop — filter out anything at or below `bottomMap[p]`
       // before inserting. This is NOT purely hypothetical belt-and-
-      // suspenders against some future caller bug (L-new, task-3 review
-      // carry-over): it IS reached in real usage by Task 3's re-attach
-      // buffer flush. A live row buffered while detached carries an offset
+      // suspenders against some future caller bug: it IS reached in real
+      // usage by the live-tail subscription's re-attach buffer flush. A live row buffered while detached carries an offset
       // that was genuinely above the window's top at the moment it was
       // buffered — but forward paging can keep running for a while after
       // that (advancing `bottomMap` via rule 1's row-derived tightening, or
@@ -724,8 +721,7 @@ export function createSlidingWindowStore(cap = 2000): SlidingWindowStore {
       // it isn't mistaken for telemetry this method doesn't provide.
       const safeRows = rows.filter((r) => r.offset >= (bottomMap.get(r.partition) ?? -Infinity))
       const { insertedMax } = insertRows(safeRows)
-      // Unconditional ceiling (fix round 2, restored — see the class doc
-      // comment's rule 2): sound only because of the attached check above.
+      // Unconditional ceiling (see the class doc comment's rule 2): sound only because of the attached check above.
       for (const [p, max] of insertedMax) topMap.set(p, Math.max(topMap.get(p) ?? -Infinity, max + 1))
       return enforceCap('top-insert')
     },
@@ -759,7 +755,7 @@ export function createSlidingWindowStore(cap = 2000): SlidingWindowStore {
     },
     edges() {
       const bottom = bottomMap.size === 0 ? null : encodeCursor(mapToPositions(bottomMap))
-      // C2 completeness check (see this method's own doc comment above):
+      // Completeness check (see this method's own doc comment above):
       // `topMap` is trustworthy as a minted cursor only if it has an entry
       // for every partition `bottomMap` knows about — `bottomMap`, right
       // after any back-direction request, is authoritatively complete over
@@ -769,7 +765,7 @@ export function createSlidingWindowStore(cap = 2000): SlidingWindowStore {
       // ≥1 row this page get seeded) — this is the ONLY event that can
       // create the discrepancy this check catches.
       //
-      // Fix round 2, N1: this check is only CONSULTED when
+      // This check is only CONSULTED when
       // `topCompletenessMatters` — i.e. when the window's provenance
       // includes a historical anchor bootstrap. A Latest-only window never
       // sets that flag, so an omitted cold partition (harmless there — see
