@@ -71,6 +71,19 @@ fn mid_chunk_progress(total_scanned: u64, records_popped_this_chunk: u64) -> Opt
         .then_some(total_scanned + records_popped_this_chunk)
 }
 
+/// One page request's parameters, bundled so `run_page` takes a single named
+/// struct instead of a long positional argument list. `handle` and `topic`
+/// stay separate arguments to `run_page` (identify *which* cluster/topic;
+/// everything here is *how* to page it).
+pub struct PageRequest {
+    pub positions: Vec<(i32, i64)>,
+    pub watermarks: Vec<(i32, i64, i64)>,
+    pub direction: Direction,
+    pub limit: usize,
+    pub filter: Option<Filter>,
+    pub budget: u64,
+}
+
 /// Runs one timeline page — filtered or not, `filter: None` behaving as
 /// match-everything (the design's "filter-off = match-all, same code
 /// path"). Scans and decodes windows of `topic` starting from `positions`,
@@ -192,17 +205,12 @@ fn mid_chunk_progress(total_scanned: u64, records_popped_this_chunk: u64) -> Opt
 /// `page_end`, so a client can tell "this page finished" from "this page
 /// broke". A client disconnect ends the task silently instead — there is
 /// nobody left to tell.
-#[allow(clippy::too_many_arguments)] // one request's worth of parameters, six of eight are the request itself
 pub fn run_page(
     handle: Arc<ClusterHandle>,
     topic: String,
-    positions: Vec<(i32, i64)>,
-    watermarks: Vec<(i32, i64, i64)>,
-    direction: Direction,
-    limit: usize,
-    filter: Option<Filter>,
-    budget: u64,
+    req: PageRequest,
 ) -> (mpsc::Receiver<TimelineEvent>, Arc<AtomicBool>) {
+    let PageRequest { positions, watermarks, direction, limit, filter, budget } = req;
     let (tx, rx) = mpsc::channel::<TimelineEvent>(256);
     let cancelled = Arc::new(AtomicBool::new(false));
     let cancel = cancelled.clone();

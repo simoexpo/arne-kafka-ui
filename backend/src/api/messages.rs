@@ -178,7 +178,8 @@ pub async fn timeline_sse(
     let (rx, guard): (mpsc::Receiver<TimelineEvent>, CancelOnDrop) = match resolved {
         Ok((positions, watermarks)) => {
             let budget = state.limits.timeline_scan_budget;
-            let (rx, cancel) = timeline::run_page(handle, topic, positions, watermarks, direction, limit, filter, budget);
+            let req = timeline::PageRequest { positions, watermarks, direction, limit, filter, budget };
+            let (rx, cancel) = timeline::run_page(handle, topic, req);
             (rx, CancelOnDrop(cancel))
         }
         Err(e) => {

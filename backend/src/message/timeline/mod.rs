@@ -16,7 +16,8 @@
 //! - `merge` — the cross-partition ordering rules: `merge_prefers` (merge
 //!   step) and `chunk_display_order` (emission order).
 //! - `event` — `TimelineEvent`, what a page emits.
-//! - `engine` — `run_page`, the async scan loop that reads and decodes pages.
+//! - `engine` — `PageRequest` (one page's bundled parameters) and `run_page`,
+//!   the async scan loop that reads and decodes pages.
 //!
 //! Everything outside `engine` and `anchor`'s two `_blocking` functions is
 //! pure: no I/O, no Kafka client, nothing async, so it is unit-tested
@@ -44,6 +45,6 @@ mod window;
 
 pub use anchor::{initial_positions, resolve_positions_blocking, Anchor, TimelineAnchorInput};
 pub use cursor::{Cursor, Direction};
-pub use engine::run_page;
+pub use engine::{run_page, PageRequest};
 pub use event::TimelineEvent;
 pub use window::page_windows;
