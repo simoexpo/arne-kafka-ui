@@ -715,6 +715,10 @@ describe('Timeline', () => {
       const toggle = screen.getByTestId('play-pause-toggle')
       expect(toggle).toHaveAttribute('aria-pressed', 'true')
       expect(toggle).toHaveAttribute('title', expect.stringMatching(/inspecting/))
+      // M3: the click actually PAUSES from here (pauseReason was 'none' —
+      // only the open inspection makes the toggle render lit/pressed) — the
+      // accessible name must say that, not "resume live updates".
+      expect(toggle).toHaveAttribute('aria-label', expect.not.stringMatching(/resume/))
 
       await user.click(screen.getAllByTestId('message-row')[0])
       expect(screen.getByText('● live')).toBeInTheDocument()

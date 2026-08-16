@@ -79,4 +79,24 @@ describe('PlayPauseToggle', () => {
     await user.click(screen.getByTestId('play-pause-toggle'))
     expect(onClick).toHaveBeenCalledTimes(1)
   })
+
+  it('aria-label states the action: "pause" while live, "resume" while genuinely paused', () => {
+    const { rerender } = render(<PlayPauseToggle paused={false} onClick={vi.fn()} />)
+    expect(screen.getByTestId('play-pause-toggle')).toHaveAttribute('aria-label', 'pause live updates')
+    rerender(<PlayPauseToggle paused={true} onClick={vi.fn()} />)
+    expect(screen.getByTestId('play-pause-toggle')).toHaveAttribute('aria-label', 'resume live updates')
+  })
+
+  // M3: `paused` renders lit/pressed while inspecting even when the actual
+  // pause reason is 'none' (TimelineHeader passes `paused || inspecting`) —
+  // but the click still PAUSES from there (toggleClick's 'none' branch), it
+  // does not resume anything. `inspectingOnly` is true for exactly that
+  // case, and must override the label so a screen reader is told what the
+  // click actually does instead of "resume live updates".
+  it('aria-label says the click pauses explicitly (and stays paused after inspection) when lit ONLY because of an open inspection', () => {
+    render(<PlayPauseToggle paused={true} inspectingOnly title="paused while inspecting" onClick={vi.fn()} />)
+    const btn = screen.getByTestId('play-pause-toggle')
+    expect(btn).toHaveAttribute('aria-label', 'pause explicitly — stays paused after inspection')
+    expect(btn).not.toHaveAttribute('aria-label', 'resume live updates')
+  })
 })

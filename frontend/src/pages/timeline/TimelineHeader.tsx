@@ -54,8 +54,17 @@ export function TimelineHeader({
         {tailAlive && attached && !paused && !inspecting && <span className="animate-pulse text-emerald-500">● live</span>}
         {attached ? (
           tailAlive ? (
-            // Attached: the normal live play/pause toggle.
-            <PlayPauseToggle paused={paused || inspecting} title={inspecting ? 'paused while inspecting — closing the message resumes' : undefined} onClick={onPlayPauseClick} />
+            // Attached: the normal live play/pause toggle. M3: `inspecting`
+            // lights the toggle even when `paused` (the real pause reason)
+            // is false — `inspectingOnly` tells PlayPauseToggle so its
+            // aria-label can say what the click actually does (pause) rather
+            // than the default "resume live updates".
+            <PlayPauseToggle
+              paused={paused || inspecting}
+              inspectingOnly={inspecting && !paused}
+              title={inspecting ? 'paused while inspecting — closing the message resumes' : undefined}
+              onClick={onPlayPauseClick}
+            />
           ) : (
             // Attached but live has died: this alarm is honest (new data
             // is genuinely missing) — keep today's aging/alarm tiers.

@@ -65,13 +65,30 @@ function PlayIcon({ active }: { active: boolean }) {
 // that reading order. `aria-label` stays action-based (what clicking does)
 // and `aria-pressed` mirrors `paused` — this is a pressed/unpressed toggle,
 // not two separate buttons.
-export function PlayPauseToggle({ paused, title, onClick }: { paused: boolean; title?: string; onClick: () => void }) {
+export function PlayPauseToggle({
+  paused,
+  inspectingOnly,
+  title,
+  onClick,
+}: {
+  paused: boolean
+  // M3: true when `paused` is lit ONLY because a row is open for inspection
+  // — the actual pause reason is 'none', so the click still PAUSES from
+  // here (toggleClick's 'none' branch), it does not resume anything. The
+  // default aria-label ("resume live updates") would tell a screen reader
+  // the opposite of what the click does; this overrides it with the real
+  // action instead.
+  inspectingOnly?: boolean
+  title?: string
+  onClick: () => void
+}) {
+  const ariaLabel = inspectingOnly ? 'pause explicitly — stays paused after inspection' : paused ? 'resume live updates' : 'pause live updates'
   return (
     <button
       type="button"
       data-testid="play-pause-toggle"
       title={title}
-      aria-label={paused ? 'resume live updates' : 'pause live updates'}
+      aria-label={ariaLabel}
       aria-pressed={paused}
       onClick={onClick}
       className="flex items-center gap-1 rounded-full border border-zinc-300 p-1 text-xs dark:border-zinc-700"
