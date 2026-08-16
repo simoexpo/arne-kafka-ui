@@ -3,16 +3,9 @@ import { act, fireEvent, render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, expect, it, vi } from 'vitest'
 import { withFixedTZ } from '../test/timezone'
-import {
-  DateTimePicker,
-  formatDateTimeMillis,
-  parseDateTimeMillis,
-  wheelCenteredIndex,
-  wheelIndexForScrollTop,
-  wheelRewrapScrollTop,
-  wheelScrollTopForIndex,
-} from './DateTimePicker'
+import { DateTimePicker, formatDateTimeMillis, parseDateTimeMillis } from './DateTimePicker'
 import { setTimeDisplayMode } from '../lib/timeDisplayMode'
+import { wheelCenteredIndex, wheelScrollTopForIndex } from '../lib/wheelGeometry'
 
 // Betrachtung has no native-popup fallback left to lean on (see report:
 // Chrome/Firefox's own `datetime-local` calendar popup is themed by the
@@ -112,46 +105,6 @@ describe('DateTimePicker', () => {
       expect(parseDateTimeMillis('not a date', 'utc')).toBeNull()
       expect(parseDateTimeMillis('2026-02-30 10:00:00.000', 'local')).toBeNull() // Feb 30 doesn't exist
       expect(parseDateTimeMillis('2026-08-15 25:00:00.000', 'utc')).toBeNull() // hour out of range
-    })
-  })
-
-  describe('wheel geometry (pure functions — jsdom has no real scroll physics, so this is unit-tested directly)', () => {
-    it('wheelCenteredIndex is the middle (2nd) copy of the tripled list', () => {
-      expect(wheelCenteredIndex(9, 24)).toBe(24 + 9)
-      expect(wheelCenteredIndex(0, 60)).toBe(60)
-      expect(wheelCenteredIndex(45, 60)).toBe(105)
-    })
-
-    it('wheelScrollTopForIndex centers the given row in the default 120px/5-row viewport', () => {
-      // row 33 top-aligned at 33*24=792, +half a row (12) - half the viewport (60)
-      expect(wheelScrollTopForIndex(33)).toBe(792 + 12 - 60)
-      expect(wheelScrollTopForIndex(0)).toBe(0 + 12 - 60)
-    })
-
-    it('wheelRewrapScrollTop silently jumps by one block only near an edge, otherwise no-ops', () => {
-      const count = 60
-      const rowHeight = 24
-      const blockHeight = count * rowHeight // 1440
-      // Deep in the middle third: no rewrap.
-      expect(wheelRewrapScrollTop(blockHeight, count, rowHeight)).toBeNull()
-      expect(wheelRewrapScrollTop(blockHeight * 1.4, count, rowHeight)).toBeNull()
-      // Drifted into the top third: jump forward by one block.
-      expect(wheelRewrapScrollTop(100, count, rowHeight)).toBe(100 + blockHeight)
-      // Drifted into the bottom third: jump backward by one block.
-      expect(wheelRewrapScrollTop(blockHeight * 2 - 50, count, rowHeight)).toBe(blockHeight * 2 - 50 - blockHeight)
-    })
-
-    it('wheelIndexForScrollTop is the exact inverse of wheelScrollTopForIndex', () => {
-      expect(wheelIndexForScrollTop(wheelScrollTopForIndex(33))).toBe(33)
-      expect(wheelIndexForScrollTop(wheelScrollTopForIndex(0))).toBe(0)
-      expect(wheelIndexForScrollTop(wheelScrollTopForIndex(105))).toBe(105)
-    })
-
-    it('wheelIndexForScrollTop rounds to the nearest row when scrollTop sits between two rows', () => {
-      // Row 33 is centered at scrollTop 744; a few px off either way still
-      // resolves to row 33 rather than its neighbor.
-      expect(wheelIndexForScrollTop(744 + 5)).toBe(33)
-      expect(wheelIndexForScrollTop(744 - 5)).toBe(33)
     })
   })
 
