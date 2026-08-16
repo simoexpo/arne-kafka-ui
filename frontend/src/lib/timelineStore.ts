@@ -139,7 +139,9 @@ interface SlidingWindowStore {
    * Live-tail rows: always extend the newest (top) end.
    *
    * PRECONDITION (enforced — throws if violated): only call this while
-   * attached (`edges().top === null`). This is not an arbitrary rule: the
+   * attached (`isAttached()`/`InsertOutcome.attached` — NOT `edges().top
+   * === null`, which is not a safe proxy; see `InsertOutcome.attached`'s own
+   * doc comment). This is not an arbitrary rule: the
    * per-partition ceiling this method advances `topMap` with is only sound
    * while attached, because attached means every partition is genuinely
    * caught up to the tail — the live feed then delivers each partition's
@@ -233,9 +235,11 @@ interface SlidingWindowStore {
  * rule, it's a precondition on when `insertLive` may be called at all. See
  * below.
  *
- * **The resolution:** `insertLive` throws unless the store is attached
- * (`edges().top === null`) — enforced at the top of the method, not left
- * to caller discipline. This isn't an arbitrary restriction; it's the exact
+ * **The resolution:** `insertLive` throws unless the store is attached (the
+ * internal `attached` flag — NOT `edges().top === null`, which this same
+ * comment's earlier revision already showed is a different condition) —
+ * enforced at the top of the method, not left to caller discipline. This
+ * isn't an arbitrary restriction; it's the exact
  * condition that makes an UNGUARDED, unconditional per-partition ceiling
  * correct:
  *
@@ -683,7 +687,7 @@ export function createSlidingWindowStore(cap = 2000): SlidingWindowStore {
       // while detached, per v1.3), not a data condition to tolerate quietly.
       if (!attached) {
         throw new Error(
-          'insertLive called while detached: live rows must be buffered by the caller until the window re-attaches (edges().top === null)',
+          'insertLive called while detached: live rows must be buffered by the caller until the window re-attaches (isAttached() / InsertOutcome.attached becomes true)',
         )
       }
       // N2 defensive drop — filter out anything at or below `bottomMap[p]`
