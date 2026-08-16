@@ -217,6 +217,37 @@ describe('Timeline filter box', () => {
     expect(screen.queryByTestId('filter-progress')).not.toBeInTheDocument()
   })
 
+  // B-2 (charter violation): the show-delay must gate on the GESTURE (a
+  // user-issued page plus every auto-continued empty page that follows it),
+  // not on any single page's own `state.loading` — a multi-page scan whose
+  // individual pages each resolve well under the show-delay, but whose
+  // combined gesture runs past it, must still show the progress row and
+  // Cancel. Previously: every auto-continued page re-armed a fresh 400ms
+  // timer from zero, so a long scan made of quick pages never rendered
+  // anything and offered no way to cancel it.
+  it('a multi-page filtered scan whose pages each resolve quickly still shows the progress row and Cancel once the whole gesture crosses the show-delay', async () => {
+    mockTail()
+    await mountAndSettleInitial()
+
+    typeFilter('value:zzz')
+    await settle() // the 500ms debounce settle — the first page starts loading here
+
+    // Five auto-continued empty pages, each advancing well under the
+    // show-delay on its own (90ms) — but summing to 450ms across the whole
+    // gesture.
+    for (let i = 0; i < 5; i++) {
+      const idx = FakeEventSource.instances.length - 1
+      await settle(90)
+      await emit(idx, 'page_end', { cursor: cur({ 0: i + 1 }), exhausted: false })
+    }
+
+    expect(screen.getByTestId('filter-progress')).toBeInTheDocument()
+    const cancelBtn = screen.getByTestId('cancel-scan')
+    expect(cancelBtn).toBeEnabled()
+    fireEvent.click(cancelBtn)
+    expect(FakeEventSource.instances.at(-1)!.closed).toBe(true)
+  })
+
   // Same ruling: a scan that's STILL loading once the show-delay elapses
   // must show the row with the correct running totals, and Cancel must
   // still work exactly as before.

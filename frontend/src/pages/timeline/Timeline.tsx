@@ -169,6 +169,20 @@ export function Timeline({
   // this from double-counting the page currently in flight.
   const gestureScannedRef = useRef(0)
   const gestureMatchesRef = useRef(0)
+  // B-2 fix: whether a gesture (a user-issued page plus every
+  // auto-continued empty page that follows it) is still running — as
+  // opposed to `state.loading`, which is only true for the CURRENT page and
+  // flips false/true at every page boundary. The show-delayed progress row
+  // below (`scanRunning`) must gate on THIS, not on `state.loading`: a
+  // multi-page scan whose individual pages each resolve in well under
+  // PROGRESS_SHOW_DELAY_MS previously re-armed a fresh 400ms timer at every
+  // page boundary and could run indefinitely without ever rendering
+  // anything or offering Cancel. Set `true` at the top of every `runPage`
+  // call; set `false` on every TERMINAL branch of the auto-continue effect
+  // below (error, exhausted, matched-with-affordance, no next cursor,
+  // iteration-cap) and in `handleCancelScan` — never on the relaunch
+  // branch, which is the same gesture continuing.
+  const [gestureRunning, setGestureRunning] = useState(false)
 
   // Viewport repositioning after a jump: 'now' lands looking at the top of
   // its new window. 'beginning'/'offset'/'timestamp' (owner ruling
@@ -346,6 +360,7 @@ export function Timeline({
       // intent explicitly.
       opts: { resetIteration: boolean; resetGesture?: boolean; attach: boolean },
     ) => {
+      setGestureRunning(true)
       if (opts.resetIteration) iterationRef.current = 0
       if (opts.resetGesture ?? opts.resetIteration) {
         gestureScannedRef.current = 0
@@ -667,10 +682,14 @@ export function Timeline({
         pageRowsRef.current = []
         bump()
       }
+      setGestureRunning(false)
       return
     }
 
-    if (state.exhausted[direction]) return
+    if (state.exhausted[direction]) {
+      setGestureRunning(false)
+      return
+    }
     gestureScannedRef.current += state.progress?.scanned ?? 0
     gestureMatchesRef.current += state.progress?.matches ?? 0
     if (matchedRef.current) {
@@ -685,12 +704,17 @@ export function Timeline({
       if (activeFilterApiRef.current !== null && pageMatchesRef.current < PAGE_LIMIT) {
         setContinueDirection(direction)
       }
+      setGestureRunning(false)
       return
     }
     const nextCursor = edgeCursorFor(direction)
-    if (nextCursor === null) return
+    if (nextCursor === null) {
+      setGestureRunning(false)
+      return
+    }
     if (iterationRef.current >= ITERATION_CAP) {
       setContinueDirection(direction)
+      setGestureRunning(false)
       return
     }
     iterationRef.current += 1
@@ -1040,6 +1064,7 @@ export function Timeline({
       pageRowsRef.current = []
       bump()
     }
+    setGestureRunning(false)
     cancel()
   }
 
@@ -1069,13 +1094,17 @@ export function Timeline({
     : 'scanned far, nothing found here — continue'
 
   // Show-delay the progress row (see PROGRESS_SHOW_DELAY_MS above): starts a
-  // timer the moment a filtered scan begins loading, cleared (and the flag
+  // timer the moment a filtered GESTURE begins, cleared (and the flag
   // reset) the instant it stops — whether that's a genuine page_end, an
-  // error, or an explicit cancel; `state.loading` covers all three
-  // uniformly (see useTimelinePage). A scan that never runs this long never
-  // flips the flag at all, so a fast page renders nothing extra — not even
-  // for one frame.
-  const scanRunning = filterActive && state.loading
+  // error, or an explicit cancel (see `gestureRunning`'s own comment). B-2
+  // fix: this must gate on the GESTURE, not on any single page's own
+  // `state.loading` — an auto-continued page flips `state.loading` false
+  // then true again at every page boundary, which previously reset this
+  // timer on every boundary too, so a scan made of quick pages could run
+  // indefinitely without ever rendering anything. A gesture that never runs
+  // this long never flips the flag at all, so a fast scan renders nothing
+  // extra — not even for one frame.
+  const scanRunning = filterActive && gestureRunning
   const [progressVisible, setProgressVisible] = useState(false)
   useEffect(() => {
     if (!scanRunning) {
