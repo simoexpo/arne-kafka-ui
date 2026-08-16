@@ -31,6 +31,11 @@ pub fn fetch_call_count(topic: &str) -> u64 {
     FETCH_CALLS.get().and_then(|m| m.lock().unwrap().get(topic).copied()).unwrap_or(0)
 }
 
+/// Hard wall-clock bound on one `fetch_ranges_blocking` call — unrelated to
+/// `cluster::ADMIN_TIMEOUT` (same value today, coincidentally); this one
+/// bounds a single poll loop's real time, not one Kafka admin RPC.
+const FETCH_DEADLINE: Duration = Duration::from_secs(10);
+
 #[derive(Debug)]
 pub struct RawRecord {
     pub partition: i32,
@@ -143,7 +148,7 @@ pub fn fetch_ranges_blocking(
     let targets: HashMap<i32, i64> = ranges.iter().map(|r| (r.partition, r.end)).collect();
     let mut done: HashMap<i32, bool> = ranges.iter().map(|r| (r.partition, false)).collect();
     let mut out = Vec::new();
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + FETCH_DEADLINE;
 
     while done.values().any(|d| !d)
         && Instant::now() < deadline
