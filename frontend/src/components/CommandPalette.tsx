@@ -44,9 +44,9 @@ export function PaletteView({ items, onNavigate, onClose }: {
           placeholder="jump to topic, group, cluster…"
           className="w-full border-b border-zinc-200 bg-transparent px-4 py-3 text-sm outline-none dark:border-zinc-700"
         />
-        <ul id="palette-list" className="max-h-80 overflow-y-auto p-1">
+        <ul id="palette-list" role="listbox" className="max-h-80 overflow-y-auto p-1">
           {matches.map((m) => (
-            <li key={`${m.kind}:${m.to}`}>
+            <li key={`${m.kind}:${m.to}`} role="option" aria-selected={false}>
               <button
                 className="flex w-full items-center gap-2 rounded px-3 py-1.5 text-left text-sm hover:bg-zinc-100 dark:hover:bg-zinc-800"
                 onClick={() => { onNavigate(m.to); onClose() }}
