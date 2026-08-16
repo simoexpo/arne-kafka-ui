@@ -988,6 +988,37 @@ describe('Timeline', () => {
       // pre-existing "collapse last while pinned ⇒ resumes" test elsewhere
       // in this describe block).
     })
+
+    // H1: `resetWindow` (both call sites — a jump and a filter change, see
+    // Timeline.filter.test.tsx for the latter) used to drop the store but
+    // never touch `expandedKeysRef`/`inspectingRef` — the expanded row was
+    // gone from `rows()` for good, yet its key stayed "expanded" forever,
+    // with no `onToggle` left to ever close it. Permanent phantom pause:
+    // live never merges again (useLiveTail gates on `!inspectingRef`), and
+    // the header would keep claiming "paused while inspecting" about a row
+    // that no longer exists.
+    it('a jump while inspecting clears the inspection — no permanent phantom pause (H1)', async () => {
+      const tail = mockTail()
+      const user = userEvent.setup()
+      render(<Timeline cluster="prod" topic="orders" />)
+      await settleWithOneRow()
+
+      await user.click(screen.getByTestId('message-row')) // expand -> inspecting
+      expect(screen.getByText('no headers')).toBeInTheDocument()
+      expect(screen.getByTestId('play-pause-toggle')).toHaveAttribute('title', expect.stringMatching(/inspecting/))
+
+      await user.click(screen.getByTestId('jump-now')) // clears the store AND must clear the inspection
+      const idx = FakeEventSource.instances.length - 1
+      await emit(idx, 'page_end', { cursor: null, exhausted: true })
+
+      // No leftover "paused while inspecting" — the row (and its title) is gone for good.
+      expect(screen.getByTestId('play-pause-toggle')).not.toHaveAttribute('title', expect.stringMatching(/inspecting/))
+
+      // Live genuinely resumes: a tail message merges directly instead of buffering forever.
+      await act(async () => tail.handlers().onMessage(mk(11)))
+      expect(screen.getByText('p0·11')).toBeInTheDocument()
+      expect(screen.queryByTestId('live-pill')).not.toBeInTheDocument()
+    })
   })
 
   describe('scroll-triggered pagination', () => {

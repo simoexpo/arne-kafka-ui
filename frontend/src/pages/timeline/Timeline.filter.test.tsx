@@ -642,4 +642,61 @@ describe('Timeline filter box', () => {
     await settle()
     expect(FakeEventSource.instances).toHaveLength(before)
   })
+
+  // H3: a jump issued INSIDE the 500ms debounce window used to have no
+  // effect on the pending timer — type a filter (armed at t=0), jump at
+  // t=200ms (store cleared, its own page issued and landed), and at t=500ms
+  // the stale timer fired `applyFilter`, clearing the jump's freshly loaded
+  // window ~300ms after it landed. The earlier-typed filter beat the
+  // later-clicked jump, inverting intent order. A jump must cancel any
+  // pending filter debounce outright.
+  it('a jump during the debounce window cancels the pending filter apply — it must not clobber the jump (H3)', async () => {
+    mockTail()
+    await mountAndSettleInitial()
+
+    typeFilter('foo')
+    await settle(200) // debounce armed, not yet fired
+    const beforeJump = FakeEventSource.instances.length
+
+    fireEvent.click(screen.getByTestId('jump-beginning'))
+    expect(FakeEventSource.instances).toHaveLength(beforeJump + 1) // only the jump's own request so far
+    const jumpIdx = FakeEventSource.instances.length - 1
+    await emit(jumpIdx, 'page_end', { cursor: cur({ 0: 5 }), exhausted: false })
+    const afterJumpLanded = FakeEventSource.instances.length
+
+    // Advance well past the ORIGINAL 500ms debounce deadline (300 more ms,
+    // i.e. t=700ms from the keystroke) — the cancelled `applyFilter('foo')`
+    // must never fire and clear the window the jump just loaded.
+    await settle(300)
+    expect(FakeEventSource.instances).toHaveLength(afterJumpLanded)
+  })
+
+  // H1: `resetWindow` (both call sites — a jump, tested in Timeline.test.tsx,
+  // and a filter change, here) used to drop the store but never touch
+  // `expandedKeysRef`/`inspectingRef`. The expanded row is gone from
+  // `rows()` for good after the filter reload, yet its key stayed
+  // "expanded" forever with nothing left able to close it — live would
+  // never merge again (useLiveTail gates on `!inspectingRef`).
+  it('a filter change while inspecting clears the inspection so live resumes normally (H1)', async () => {
+    const tail = mockTail()
+    render(<Timeline cluster="prod" topic="orders" />)
+    await emit(0, 'match', mk(1))
+    await emit(0, 'page_end', { cursor: null, exhausted: true })
+
+    fireEvent.click(screen.getByTestId('message-row')) // expand -> inspecting
+    expect(screen.getByText('no headers')).toBeInTheDocument()
+
+    typeFilter('v') // matches every mk() message (value text is `v<offset>`)
+    await settle()
+    const idx = FakeEventSource.instances.length - 1
+    await emit(idx, 'page_end', { cursor: null, exhausted: true })
+
+    // Live genuinely resumes: a tail message merges directly instead of
+    // buffering forever behind an inspection nothing can ever close again.
+    await act(async () => {
+      tail.handlers().onMessage(mk(11))
+    })
+    expect(screen.getByText('p0·11')).toBeInTheDocument()
+    expect(screen.queryByTestId('live-pill')).not.toBeInTheDocument()
+  })
 })

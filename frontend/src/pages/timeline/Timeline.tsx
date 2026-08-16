@@ -624,6 +624,15 @@ export function Timeline({
       liveBufferRef.current.clear()
       bottomTrimmedSinceRef.current = false
       topTrimmedSinceRef.current = false
+      // H1: the whole window is gone — any open inspection is gone with it
+      // (its row no longer exists in `rows()`, and its `onToggle` no longer
+      // exists to ever close it). Left in place, `inspectingRef` would stay
+      // true forever: useLiveTail's merge gate (`!inspectingRef.current`)
+      // would never clear, and the header would keep claiming "paused while
+      // inspecting" about a row that can't be found or closed — a permanent
+      // phantom pause. Mirrors noteOutcome's identical pruning for a trim.
+      expandedKeysRef.current.clear()
+      inspectingRef.current = false
       reset()
       setAttached(false)
     },
@@ -675,13 +684,27 @@ export function Timeline({
   // applied text instead is idempotent: re-running this effect any number of
   // times for the same text does nothing at all.
   const appliedFilterRef = useRef('')
+  // H3: the debounce timer's own id, so a jump landing mid-debounce can
+  // cancel it directly (see handleJump) — this effect's own cleanup only
+  // fires on the NEXT [filterText] change or unmount, neither of which a
+  // jump causes. Without this, a filter typed just before a jump could still
+  // fire ~500ms after the keystroke, well after the jump's own page landed,
+  // and `resetWindow(null)` from that stale `applyFilter` would clobber the
+  // jump's freshly loaded window and highlight — the later-clicked jump
+  // undone by the earlier-typed filter, inverting intent order.
+  const filterDebounceIdRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   useEffect(() => {
     if (filterText === appliedFilterRef.current) return
     const id = setTimeout(() => {
+      filterDebounceIdRef.current = null
       appliedFilterRef.current = filterText
       applyFilter(filterText)
     }, 500)
-    return () => clearTimeout(id)
+    filterDebounceIdRef.current = id
+    return () => {
+      clearTimeout(id)
+      if (filterDebounceIdRef.current === id) filterDebounceIdRef.current = null
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [filterText])
 
@@ -854,6 +877,13 @@ export function Timeline({
   const handleJump = (target: JumpTarget) => {
     const plan = planJump(target, PAGE_LIMIT)
     resetWindow(plan.highlight)
+    // H3: a jump discards whatever the filter box's own pending debounce was
+    // about to do — see filterDebounceIdRef's own comment on why this can't
+    // just rely on the effect's own cleanup.
+    if (filterDebounceIdRef.current !== null) {
+      clearTimeout(filterDebounceIdRef.current)
+      filterDebounceIdRef.current = null
+    }
     pendingScrollEdgeRef.current = plan.scrollEdge
     anchorContextRef.current = plan.anchorContext
     pauseReasonRef.current = plan.pauseReason
