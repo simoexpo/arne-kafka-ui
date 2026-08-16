@@ -108,8 +108,10 @@ export const MessageList = forwardRef<
       // with a `calc(100dvh-...)` fudge factor. overflow-anchor:none —
       // Timeline does its own junction anchoring on forward prepends; the
       // browser's native scroll anchoring must never compensate a second
-      // time (today the index-bearing row keys happen to defeat it, but
-      // that's incidental, not something to rely on).
+      // time. This is the mechanism that prevents that, full stop — row
+      // keys are (partition, offset)-only (see below) precisely so they do
+      // NOT incidentally defeat native scroll anchoring via a spurious
+      // remount on every prepend.
       className="min-h-0 flex-1 overflow-auto [overflow-anchor:none]"
     >
       <div style={{ height: virtualizer.getTotalSize(), position: 'relative' }}>
@@ -125,7 +127,16 @@ export const MessageList = forwardRef<
             jumpTarget != null && m.partition === jumpTarget.partition && m.offset === jumpTarget.offset
           return (
             <div
-              key={`${m.partition}-${m.offset}-${item.index}`}
+              // (partition, offset) is a unique row identity — the store
+              // dedupes on it (see timelineStore.ts's `seen` set) — so it's
+              // stable across a prepend/append, unlike `item.index`, which
+              // shifts for every existing row whenever a forward page
+              // prepends. Keying on the volatile index used to force a full
+              // remount (and re-measurement) of every row on every prepend
+              // and every live insert, silently resetting each row's own
+              // `open` state and re-triggering ResizeObserver for rows that
+              // never actually moved.
+              key={`${m.partition}-${m.offset}`}
               ref={typeof ResizeObserver !== 'undefined' ? virtualizer.measureElement : undefined}
               data-index={item.index}
               style={{ position: 'absolute', top: 0, left: 0, width: '100%', transform: `translateY(${item.start}px)` }}

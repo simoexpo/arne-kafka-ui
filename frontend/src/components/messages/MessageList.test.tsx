@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { render, screen } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { MessageList } from './MessageList'
 import type { MessageOut } from '../../api/types'
 
@@ -65,5 +66,24 @@ describe('MessageList', () => {
     const rows = [msg({ partition: 0, offset: 2 })]
     render(<MessageList messages={rows} jumpTarget={null} />)
     expect(screen.queryAllByTestId('jump-target')).toHaveLength(0)
+  })
+  it('a prepended forward page does not reset an already-open row (row identity survives an index shift)', async () => {
+    const user = userEvent.setup()
+    const rowA = msg({ partition: 0, offset: 5 })
+    const rowB = msg({
+      partition: 0,
+      offset: 3,
+      headers: [{ key: 'trace-id', value: 'abc' }],
+    })
+    const { rerender } = render(<MessageList messages={[rowA, rowB]} />)
+    // Open rowB (currently at index 1) — its expanded headers become visible.
+    await user.click(screen.getAllByTestId('message-row')[1])
+    expect(screen.getByText('trace-id')).toBeInTheDocument()
+
+    // A forward page prepends a newer row — rowB shifts from index 1 to
+    // index 2, same (partition, offset) identity throughout.
+    const rowC = msg({ partition: 0, offset: 10 })
+    rerender(<MessageList messages={[rowC, rowA, rowB]} />)
+    expect(screen.getByText('trace-id')).toBeInTheDocument()
   })
 })
