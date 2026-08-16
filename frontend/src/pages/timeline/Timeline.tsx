@@ -16,6 +16,7 @@ import { createSlidingWindowStore, type InsertOutcome } from '../../lib/timeline
 import { useTimeDisplayMode } from '../../lib/timeDisplayMode'
 import { createLiveBuffer } from '../../lib/timeline/liveBuffer'
 import { classifyScroll } from '../../lib/timeline/scrollZones'
+import { stepSettling, type SettlingState } from '../../lib/timeline/settling'
 import { useFallingEdge } from './useFallingEdge'
 import { JumpControl, type JumpTarget } from './JumpControl'
 import { LivePill, PlayPauseToggle } from './LivePill'
@@ -32,13 +33,7 @@ const PAGE_LIMIT = 100
 const ITERATION_CAP = 20
 // Live-buffer cap while paused/detached (design spec).
 const BUFFER_CAP = 500
-// Bounds a jump landing's settling re-snaps (see `settlingRef`'s own
-// comment on `Timeline`) — content that never genuinely stabilizes (a
-// pathological case, not the expected one) must still eventually stop
-// re-snapping and resume normal scroll handling, the same
-// never-loop-forever discipline as `ITERATION_CAP`. A real-browser probe
-// observed settling resolve within 2-3 events; this leaves generous
-// headroom without risking a runaway loop.
+// A real-browser probe observed settling resolve within 2-3 events; this caps a pathological non-settling case.
 const MAX_SETTLE_ATTEMPTS = 10
 // Owner ruling 2026-08-16 (sliding-window followups, "NEXT STEP"): a
 // filtered scan that resolves in milliseconds (e.g. scroll-up after a
@@ -185,13 +180,8 @@ export function Timeline({
   // an empty page that auto-continues further.
   const listRef = useRef<MessageListHandle>(null)
   const pendingScrollEdgeRef = useRef<'top' | 'bottom' | null>(null)
-  // A jump landing keeps re-snapping to its edge until two consecutive
-  // scroll events report the same `scrollHeight` (capped at
-  // `MAX_SETTLE_ATTEMPTS`); such events are never treated as pagination
-  // triggers. See docs/superpowers/specs/timeline-design-decisions.md
-  // ("MessageList.scrollToEdge's return value") for why this is needed and
-  // the two rejected designs that preceded it.
-  const settlingRef = useRef<{ edge: 'top' | 'bottom'; lastScrollHeight: number | null } | null>(null)
+  // See docs/superpowers/specs/timeline-design-decisions.md ("MessageList.scrollToEdge's return value") for why re-snapping is needed at all.
+  const settlingRef = useRef<SettlingState | null>(null)
   const settleAttemptsRef = useRef(0)
 
   // Scroll anchoring: capture the row at index 0 before a forward batch (or
@@ -712,10 +702,7 @@ export function Timeline({
     if (edge === null) return
     pendingScrollEdgeRef.current = null
     const landed = listRef.current?.scrollToEdge(edge)
-    // See settlingRef's own comment: only arm settling-detection if the
-    // scroll element was actually mounted to receive the assignment at all
-    // (a zero-row anchor page renders Panel's loading skeleton instead —
-    // nothing to watch settle).
+    // A zero-row anchor page renders Panel's loading skeleton instead of the scroller — nothing to arm settling on.
     if (landed !== null && landed !== undefined) {
       settlingRef.current = { edge, lastScrollHeight: null }
       settleAttemptsRef.current = 0
@@ -971,23 +958,13 @@ export function Timeline({
   // would silently drop the running scanned/matches totals the continue
   // affordance is displaying, exactly the "silent stop" I2 exists to avoid.
   const handleScroll = (scrollTop: number, scrollHeight: number, clientHeight: number) => {
-    // See settlingRef's own comment: a jump landing keeps re-snapping to
-    // its edge (never treated as a pagination trigger) until scrollHeight
-    // reports the SAME value on two consecutive events (or the attempt cap
-    // is hit) — i.e., until the virtualizer's post-mount remeasurement has
-    // genuinely stopped moving the true edge out from under us. The event
-    // that CONFIRMS stability is itself still just an echo of the PREVIOUS
-    // re-snap we issued, not evidence of a real user gesture — so it, too,
-    // is consumed here (settling ends, but this exact event never reaches
-    // the pagination checks below); the next TRULY independent scroll event
-    // is what may legitimately trigger `loadOlder`/`loadNewer`.
+    // The event that confirms stability is itself consumed here, never falling through to pagination below.
     if (settlingRef.current !== null) {
-      const { edge, lastScrollHeight } = settlingRef.current
-      const stillMoving = lastScrollHeight === null || scrollHeight !== lastScrollHeight
       settleAttemptsRef.current += 1
-      if (stillMoving && settleAttemptsRef.current <= MAX_SETTLE_ATTEMPTS) {
-        settlingRef.current = { edge, lastScrollHeight: scrollHeight }
-        listRef.current?.scrollToEdge(edge)
+      const step = stepSettling(settlingRef.current, scrollHeight, settleAttemptsRef.current, MAX_SETTLE_ATTEMPTS)
+      if (step.action === 'resnap') {
+        settlingRef.current = step.next
+        listRef.current?.scrollToEdge(step.next.edge)
       } else {
         settlingRef.current = null
       }
