@@ -136,8 +136,7 @@ pub fn fetch_ranges_blocking(
     while done.values().any(|d| !d)
         && Instant::now() < deadline
         && out.len() < cap
-        // I3 (fix round 1): honor the caller's cancellation flag the same
-        // way search.rs's scan loop does, so a client-disconnect
+        // Honor the caller's cancellation flag, so a client-disconnect
         // (CancelOnDrop) actually stops an in-flight timeline scan instead
         // of only ever being read by whoever built the `Arc` and nothing
         // else.

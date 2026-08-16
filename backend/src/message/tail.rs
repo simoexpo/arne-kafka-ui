@@ -12,16 +12,15 @@ use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 
 /// Monotonic per-process counter so each tail's throwaway group.id is unique
-/// even when two tails land in the same millisecond (mirrors fetch.rs's and
-/// search.rs's pattern — `assign()` requires a group.id even though no real
+/// even when two tails land in the same millisecond (mirrors fetch.rs's own
+/// per-fetch counter — `assign()` requires a group.id even though no real
 /// consumer group is involved).
 static TAIL_SEQ: AtomicU64 = AtomicU64::new(0);
 
 /// If the poll loop sees nothing but errors for this long (dead broker,
-/// deleted topic, ...) it gives up instead of spinning forever — mirrors
-/// search.rs's STALL_TIMEOUT. Unlike search, a *quiet* topic (no errors, no
-/// messages) never counts toward this: an idle tail is normal and must not
-/// be mistaken for a stalled one.
+/// deleted topic, ...) it gives up instead of spinning forever. A *quiet*
+/// topic (no errors, no messages) never counts toward this: an idle tail is
+/// normal and must not be mistaken for a stalled one.
 const STALL_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// C1 fix: tail's SSE stream now carries an explicit event enum (mirroring
@@ -198,10 +197,10 @@ pub async fn run(
                 break;
             }
         }
-        // Mirrors search.rs's F1 fix: drop the receiver before joining the
-        // blocking task so a scanner parked mid-`blocking_send` (e.g. the
-        // SSE client went away, breaking the loop above before the raw
-        // channel drained) is woken immediately instead of leaking forever.
+        // Drop the receiver before joining the blocking task so a scanner
+        // parked mid-`blocking_send` (e.g. the SSE client went away,
+        // breaking the loop above before the raw channel drained) is woken
+        // immediately instead of leaking forever.
         drop(raw_rx);
 
         match scan.await {
@@ -231,8 +230,7 @@ mod tests {
     /// C1 stall-detection regression: a poll loop that only ever errors
     /// (dead broker, "Unknown topic or partition" after a delete, ...) must
     /// eventually give up instead of polling forever with no visible sign
-    /// of trouble — mirrors search.rs's STALL_TIMEOUT idiom. Uses a tiny
-    /// `stall_timeout` so the test stays fast; the real STALL_TIMEOUT
+    /// of trouble. Uses a tiny `stall_timeout` so the test stays fast; the real STALL_TIMEOUT
     /// constant is only used in production.
     #[test]
     fn stalls_after_persistent_poll_errors() {

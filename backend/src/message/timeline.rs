@@ -271,10 +271,9 @@ pub fn advance(
     (new_positions, exhausted)
 }
 
-/// One event of a `run_page` SSE stream. Serialized untagged (like
-/// `search::SearchEvent`): the SSE `event:` field carries the discriminant
-/// (`.name()`), so the JSON `data:` payload is just the variant's own
-/// fields.
+/// One event of a `run_page` SSE stream. Serialized untagged: the SSE
+/// `event:` field carries the discriminant (`.name()`), so the JSON `data:`
+/// payload is just the variant's own fields.
 #[derive(Debug, Serialize)]
 #[serde(untagged)]
 pub enum TimelineEvent {
@@ -643,7 +642,7 @@ fn cap_windows_to_budget(windows: Vec<PartitionRange>, budget_cap: u64) -> Vec<P
 /// signal). This is what makes a hole-dominated region — filtered or not —
 /// get crossed within one request instead of one near-empty page per
 /// `limit` offsets.
-#[allow(clippy::too_many_arguments)] // mirrors search.rs's `drive_partition`
+#[allow(clippy::too_many_arguments)] // one request's worth of parameters, six of eight are the request itself
 pub fn run_page(
     handle: Arc<ClusterHandle>,
     topic: String,
@@ -725,11 +724,11 @@ pub fn run_page(
                 let cfg = handle.config.clone();
                 let topic = topic.clone();
                 let windows = windows.clone();
-                // I3: `run_page`'s own `cancelled` flag (checked by
+                // `run_page`'s own `cancelled` flag (checked by
                 // `CancelOnDrop` on client disconnect) reaches the blocking
-                // scan loop, the same way `search.rs`'s does — a dropped
-                // SSE stream stops the in-flight Kafka poll loop instead of
-                // only ever toggling a flag nothing reads.
+                // scan loop, so a dropped SSE stream stops the in-flight
+                // Kafka poll loop instead of only ever toggling a flag
+                // nothing reads.
                 let cancelled = cancelled.clone();
                 tokio::task::spawn_blocking(move || -> ScanResult {
                     let cap = range::total(&windows) as usize;

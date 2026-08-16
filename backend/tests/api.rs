@@ -944,11 +944,11 @@ async fn timeline_limit_zero_is_400() {
     assert_eq!(body["code"], "bad_request");
 }
 
-/// Fix round 1, M3: params must be validated before the cluster registry
-/// lookup, so a bad request against an *unknown* cluster is still 400 (not
-/// a 404 that masks the real problem) — mirrors
-/// `search_bad_range_on_unknown_topic_is_400_not_404`'s rationale, applied
-/// to an unknown cluster instead of an unknown topic.
+/// Params must be validated before the cluster registry lookup, so a bad
+/// request against an *unknown* cluster is still 400 (not a 404 that masks
+/// the real problem): a client typo'ing both the cluster name and a param
+/// should see the param error, not a 404 that looks like the cluster itself
+/// is the problem.
 #[tokio::test]
 async fn timeline_bad_params_on_unknown_cluster_is_400_not_404() {
     let bootstrap = start_kafka().await;
