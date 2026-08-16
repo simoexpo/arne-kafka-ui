@@ -23,7 +23,7 @@ export function MessageRow({
     <div
       data-testid="message-row"
       onClick={() => setOpen((o) => !o)}
-      className={`cursor-pointer border-b border-zinc-100 px-2 py-1.5 font-mono text-xs dark:border-zinc-800 ${
+      className={`cursor-pointer border-b border-zinc-100 px-2 py-1.5 font-mono text-sm dark:border-zinc-800 ${
         isJumpTarget
           ? 'bg-emerald-50 hover:bg-emerald-100 dark:bg-emerald-950/40 dark:hover:bg-emerald-950/60'
           : 'hover:bg-zinc-50 dark:hover:bg-zinc-900'
