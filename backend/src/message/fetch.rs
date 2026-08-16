@@ -10,34 +10,25 @@ use rdkafka::topic_partition_list::TopicPartitionList;
 use rdkafka::Offset;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
-#[cfg(feature = "test-hooks")]
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 /// Per-topic count of real (non-trivial) `fetch_ranges_blocking` calls —
 /// i.e. calls that actually built a `BaseConsumer`, not the early-return for
-/// an already-empty range set. Genuinely test-only: compiled only
-/// under the `test-hooks` feature, which `cargo test` always carries via
-/// the dev-dependency self-reference in `Cargo.toml`, so a release build
-/// never allocates this map or pays its mutex lock on any real request. A
-/// client-disconnect integration test reads this counter to prove a
-/// cancelled scan stops minting fresh consumers rather than spinning
-/// forever (the "no zombie scans" guarantee). Scoped per-topic (not a
-/// single global count) so it stays meaningful even when other tests'
-/// fetches run concurrently against the shared test broker.
-#[cfg(feature = "test-hooks")]
+/// an already-empty range set. Read only by tests: a client-disconnect
+/// integration test proves a cancelled scan stops minting fresh consumers
+/// rather than spinning forever (the "no zombie scans" guarantee). Scoped
+/// per-topic (not a single global count) so it stays meaningful even when
+/// other tests' fetches run concurrently against the shared test broker.
+/// One counter bump per broker round trip is noise next to the round trip
+/// itself, so this compiles unconditionally.
 static FETCH_CALLS: OnceLock<Mutex<HashMap<String, u64>>> = OnceLock::new();
 
-#[cfg(feature = "test-hooks")]
 fn record_fetch_call(topic: &str) {
     let calls = FETCH_CALLS.get_or_init(|| Mutex::new(HashMap::new()));
     *calls.lock().unwrap().entry(topic.to_string()).or_insert(0) += 1;
 }
-/// No-op outside `test-hooks` builds — see `FETCH_CALLS`'s doc comment.
-#[cfg(not(feature = "test-hooks"))]
-fn record_fetch_call(_topic: &str) {}
 
-#[cfg(feature = "test-hooks")]
 pub fn fetch_call_count(topic: &str) -> u64 {
     FETCH_CALLS.get().and_then(|m| m.lock().unwrap().get(topic).copied()).unwrap_or(0)
 }

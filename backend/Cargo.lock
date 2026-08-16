@@ -218,7 +218,6 @@ dependencies = [
  "apache-avro",
  "axum",
  "base64 0.23.1",
- "betrachtung",
  "futures-util",
  "http-body-util",
  "libc",

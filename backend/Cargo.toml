@@ -3,22 +3,6 @@ name = "betrachtung"
 version = "0.1.0"
 edition = "2024"
 
-[features]
-# Gates the handful of production-path call-count counters
-# (`message::fetch::fetch_call_count`, `cluster::admin::group_metadata_fetch_count`,
-# `cluster::admin::group_watermark_fetch_count`) that exist only so an
-# integration test can prove a scan/lookup ran exactly as many times as it
-# should — never read by production code itself. `cfg(test)` can't gate
-# them: `backend/tests/*.rs` integration tests link the lib as an ordinary
-# (non-`--cfg test`) dependency, a separate crate from the lib's own unit
-# tests. This feature is the honest alternative: with it OFF (the default,
-# what `cargo build`/`cargo build --release` use), the counters and their
-# recording calls compile to nothing, so a release binary never allocates
-# their maps or pays a mutex lock on any real request. The dev-dependency
-# self-reference below turns it ON for every `cargo test`, so `cargo test`
-# keeps working with no extra flags — see that entry's own comment.
-test-hooks = []
-
 [dependencies]
 anyhow = "1.0.104"
 apache-avro = "0.22.0"
@@ -42,12 +26,6 @@ tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 
 [dev-dependencies]
-# Self-reference trick: depending on our own package with `test-hooks`
-# turned on unifies that feature into every `cargo test` build (unit AND
-# integration), without turning it on for `cargo build`/`cargo build
-# --release` (which never pull in dev-dependencies) — see the `test-hooks`
-# feature's own doc comment above for what it gates and why.
-betrachtung = { path = ".", features = ["test-hooks"] }
 futures-util = "0.3.33"
 http-body-util = "0.1.4"
 libc = "0.2.189"
