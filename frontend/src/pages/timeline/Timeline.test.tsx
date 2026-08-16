@@ -419,7 +419,7 @@ describe('Timeline', () => {
     expect(screen.getByTestId('continue-scan')).toBeInTheDocument()
     const countAtCap = FakeEventSource.instances.length
     // No further auto-continue happens once capped.
-    await new Promise((r) => setTimeout(r, 0))
+    await act(async () => {})
     expect(FakeEventSource.instances).toHaveLength(countAtCap)
 
     // Clicking continue resumes the loop from the last known cursor.
