@@ -13,12 +13,6 @@ import {
 } from './DateTimePicker'
 import { setTimeDisplayMode } from '../lib/timeDisplayMode'
 
-// `@types/node` isn't in this app's tsconfig `types` (it's a browser app) —
-// this is the one Node global the fixed-TZ tests below need, declared
-// locally rather than widening the whole app's ambient types for one test
-// file's sake.
-declare const process: { env: Record<string, string | undefined> }
-
 // Betrachtung has no native-popup fallback left to lean on (see report:
 // Chrome/Firefox's own `datetime-local` calendar popup is themed by the
 // OS/browser's `prefers-color-scheme`, NOT by page CSS — verified, not

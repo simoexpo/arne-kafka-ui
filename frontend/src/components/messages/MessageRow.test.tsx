@@ -5,10 +5,6 @@ import { MessageRow } from './MessageRow'
 import type { MessageOut } from '../../api/types'
 import { setTimeDisplayMode } from '../../lib/timeDisplayMode'
 
-// `@types/node` isn't in this app's tsconfig `types` (browser app) — declared
-// locally for the fixed-TZ test below rather than widening ambient types.
-declare const process: { env: Record<string, string | undefined> }
-
 const msg = (overrides: Partial<MessageOut> = {}): MessageOut => ({
   partition: 2, offset: 1337, timestamp_ms: 1754900000000,
   key: { encoding: 'utf8', text: 'order-42', schema_id: null, error: null },

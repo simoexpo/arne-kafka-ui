@@ -1,10 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { formatAgo, formatCount, formatRetentionValue, formatTimestamp, formatWindowRange, retentionMsHint, zoneSuffix } from './format'
 
-// `@types/node` isn't in this app's tsconfig `types` (browser app) — declared
-// locally for the fixed-TZ tests below rather than widening ambient types.
-declare const process: { env: Record<string, string | undefined> }
-
 describe('formatAgo', () => {
   const now = 1_000_000_000
   it('sub-12s is "just now"', () => expect(formatAgo(now - 1500, now)).toBe('just now'))

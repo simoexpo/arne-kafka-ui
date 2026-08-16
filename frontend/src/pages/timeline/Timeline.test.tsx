@@ -8,10 +8,6 @@ import { encodeCursor } from '../../lib/timelineCursor'
 import { setTimeDisplayMode } from '../../lib/timeDisplayMode'
 import { Timeline } from './Timeline'
 
-// `@types/node` isn't in this app's tsconfig `types` (browser app) — declared
-// locally for the fixed-TZ tests below rather than widening ambient types.
-declare const process: { env: Record<string, string | undefined> }
-
 // Task 3: the sliding-window store decodes every non-null cursor as a real
 // per-partition position map (see timelineCursor.ts) — unlike the old v1.4
 // store, an opaque placeholder string like 'c1' is no longer a valid

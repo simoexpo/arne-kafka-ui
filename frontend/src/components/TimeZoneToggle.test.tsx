@@ -3,10 +3,6 @@ import { fireEvent, render, screen } from '@testing-library/react'
 import { getTimeDisplayMode } from '../lib/timeDisplayMode'
 import { TimeZoneToggle } from './TimeZoneToggle'
 
-// `@types/node` isn't in this app's tsconfig `types` (browser app) — declared
-// locally for the fixed-TZ test below rather than widening ambient types.
-declare const process: { env: Record<string, string | undefined> }
-
 // UTC/local display toggle: moved out of the sidebar (`layout/AppShell.tsx`)
 // into its own component so it can be rendered wherever its effect is
 // actually felt — the Messages tab's Timeline header (see Timeline.tsx),

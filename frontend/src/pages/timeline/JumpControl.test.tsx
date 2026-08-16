@@ -4,12 +4,6 @@ import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import { setTimeDisplayMode } from '../../lib/timeDisplayMode'
 import { JumpControl } from './JumpControl'
 
-// `@types/node` isn't in this app's tsconfig `types` (it's a browser app) —
-// this is the one Node global the fixed-TZ tests below need, declared
-// locally rather than widening the whole app's ambient types for one test
-// file's sake.
-declare const process: { env: Record<string, string | undefined> }
-
 describe('JumpControl', () => {
   it('jumping to "now" calls onJump immediately with kind now, and collapses any open offset expansion', async () => {
     const user = userEvent.setup()
