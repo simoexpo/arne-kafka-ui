@@ -34,7 +34,7 @@ export function MessageRow({
           <span
             data-testid="jump-target"
             role="img"
-            aria-label="Jump target"
+            aria-label="jump target"
             title={`Jump target: p${message.partition}·${message.offset}`}
             className="h-1.5 w-1.5 shrink-0 rounded-full bg-emerald-500"
           />
