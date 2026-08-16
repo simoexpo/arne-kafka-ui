@@ -48,9 +48,10 @@ export const MessageList = forwardRef<
   {
     messages: readonly MessageOut[]
     // Forwarded directly onto the real scrolling element (not a wrapper) —
-    // scroll events don't bubble, so Timeline's top-pin/bottom-sentinel
-    // detection needs the handler on the exact element the virtualizer
-    // scrolls. In real browsers this is `parentRef`'s scrollTop/scrollHeight/
+    // scroll events don't bubble, so Timeline's top-pin/near-bottom
+    // classification (`classifyScroll`) needs the handler on the exact
+    // element the virtualizer scrolls. In real browsers this is
+    // `parentRef`'s scrollTop/scrollHeight/
     // clientHeight; jsdom tests drive it via `fireEvent.scroll` on this same
     // element (found via its data-testid), stubbing scrollHeight/clientHeight
     // since jsdom never actually lays anything out.

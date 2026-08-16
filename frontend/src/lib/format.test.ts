@@ -109,7 +109,7 @@ describe('formatTimestamp', () => {
     expect(formatTimestamp(Date.UTC(2026, 0, 15, 12, 0, 0), 'local')).toBe('2026-01-15 07:00:00.000 UTC-5')
   })
 
-  it('millis:false omits the trailing .mmm (the compact header uses this)', () => {
+  it('millis:false omits the trailing .mmm (unused by any current caller, but exercised here directly)', () => {
     expect(formatTimestamp(1_704_067_205_000, 'utc', { millis: false })).toBe('2024-01-01 00:00:05 UTC')
   })
 })

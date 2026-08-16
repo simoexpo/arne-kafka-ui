@@ -4,7 +4,7 @@ import { Link, Outlet, useLocation, useParams } from '@tanstack/react-router'
 import { getClusters } from '../api/client'
 import { describeError } from '../api/errors'
 import type { ClusterHealth } from '../api/types'
-import { CommandPalette } from '../components/CommandPalette' // Task 11 stub
+import { CommandPalette } from '../components/CommandPalette'
 
 export function useClusters() {
   return useQuery({ queryKey: ['clusters'], queryFn: ({ signal }) => getClusters(signal), refetchInterval: 10_000 })

@@ -33,7 +33,7 @@ const PAGE_LIMIT = 100
 const ITERATION_CAP = 20
 // Live-buffer cap while paused/detached (design spec).
 const BUFFER_CAP = 500
-// A real-browser probe observed settling resolve within 2-3 events; this caps a pathological non-settling case.
+// Settling normally resolves within a couple of scroll events; this caps a pathological non-settling case.
 const MAX_SETTLE_ATTEMPTS = 10
 // Owner ruling 2026-08-16 (sliding-window followups, "NEXT STEP"): a
 // filtered scan that resolves in milliseconds (e.g. scroll-up after a
@@ -507,8 +507,9 @@ export function Timeline({
           // only the commit's own top TRIM can move the reader, and only the
           // commit knows whether one happened. The junction row is the LAST
           // committed row (the reader is at the bottom — that is what fired
-          // the bottom sentinel — and a back commit only ever trims the TOP,
-          // so this row always survives). Its rendered offset is read BEFORE
+          // `loadOlder` via `classifyScroll`'s `nearBottom` — and a back
+          // commit only ever trims the TOP, so this row always survives).
+          // Its rendered offset is read BEFORE
           // `insertPage` runs, since `rowOffsetAt` reports the LAST RENDER's
           // measurements and this page's commit has not rendered yet. Safe
           // against an already-rendered overlay for the same reason: those
@@ -943,19 +944,20 @@ export function Timeline({
   // happens via catching the tail (forward-exhausted, in the page-end
   // effect) or jumping to now (jump / pill click).
   //
-  // Also the scroll-triggered pagination sentinels (spec: "scroll down ->
-  // next 100 older") — scroll is the ONLY pagination affordance, there is no
-  // load-older/load-newer button: a bottom-sentinel reaching the last row
-  // loads the next older page automatically, guarded by not already loading
-  // (`loadOlder`/`loadNewer` themselves no-op on a null cursor or an
-  // exhausted, never-trimmed direction). The symmetric top edge only ever
-  // matters once a beginning/offset/timestamp jump has opened a forward
-  // cursor — reusing the same top-pin check that already drives
-  // live-pause auto-resume.
+  // Also scroll-triggered pagination (spec: "scroll down -> next 100
+  // older") — scroll is the ONLY pagination affordance, there is no
+  // load-older/load-newer button and no sentinel element/IntersectionObserver:
+  // `classifyScroll`'s own `nearBottom` (within 20px of the bottom — see
+  // `lib/timeline/scrollZones.ts`) loads the next older page automatically,
+  // guarded by not already loading (`loadOlder`/`loadNewer` themselves no-op
+  // on a null cursor or an exhausted, never-trimmed direction). The symmetric
+  // top edge only ever matters once a beginning/offset/timestamp jump has
+  // opened a forward cursor — reusing the same top-pin check that already
+  // drives live-pause auto-resume.
   //
   // When the continue affordance (I2's partial-match budget stop, or the
-  // iteration-cap stop) is showing for a direction, the sentinel must drive
-  // `continueScan()` instead of `loadOlder`/`loadNewer` directly — those
+  // iteration-cap stop) is showing for a direction, reaching that edge must
+  // drive `continueScan()` instead of `loadOlder`/`loadNewer` directly — those
   // reset the gesture (resetGesture defaults to resetIteration:true), which
   // would silently drop the running scanned/matches totals the continue
   // affordance is displaying, exactly the "silent stop" I2 exists to avoid.

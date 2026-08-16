@@ -175,15 +175,18 @@ interface SlidingWindowStore {
   /**
    * Cursors minted from the current edge maps. `top` is `null` while the top
    * edge is genuinely the live tail (`isAttached()`), OR while `topMap` is
-   * empty or INCOMPLETE — see the "one gap" section above and fix round 1's
-   * C2: an anchor bootstrap's opposite-side seed only ever covers
-   * partitions that returned ≥1 row this page, so a partition contributing
-   * zero rows would otherwise be silently omitted from a minted cursor,
-   * worse than null (nothing would ever trigger recovery for it). `bottom`
-   * is `null` only before the store has ever learned a bottom position at
-   * all (an empty, freshly created store) — no equivalent completeness
-   * check on this side yet (see the test suite's own note on the
-   * symmetric, currently-unaddressed gap).
+   * empty or INCOMPLETE — but the incompleteness check only APPLIES when
+   * `topCompletenessMatters` (see `createSlidingWindowStore`'s own doc
+   * comment, "When an incomplete opposite-seed actually matters"): an anchor
+   * bootstrap's opposite-side seed only ever covers partitions that
+   * returned ≥1 row this page, so a partition contributing zero rows would
+   * otherwise be silently omitted from a minted cursor, worse than null
+   * (nothing would ever trigger recovery for it) — but only for a
+   * HISTORICAL bootstrap; a Latest bootstrap's cold partitions hide nothing
+   * and are never masked. `bottom` is `null` only before the store has ever
+   * learned a bottom position at all (an empty, freshly created store) — no
+   * equivalent completeness check on this side yet (see the test suite's
+   * own note on the symmetric, currently-unaddressed gap).
    */
   edges(): { top: string | null; bottom: string | null }
   /**
@@ -631,16 +634,15 @@ export function createSlidingWindowStore(cap = 2000): SlidingWindowStore {
         // side at all (see the home doc comment's "one gap none of the three
         // rules fill" section).
         //
-        // Fix round 2, N2: only fill entries that are still ABSENT
-        // outright — never unconditionally `.set()`. An opposite-side seed
-        // is an ESTIMATE for a side this request didn't actually focus on
-        // (it only reflects THIS page's own row offsets, nothing about the
-        // map's true history), and this same window can already hold a
+        // Only fill entries that are still ABSENT outright — never
+        // unconditionally `.set()`. An opposite-side seed is an ESTIMATE for
+        // a side this request didn't actually focus on (it only reflects
+        // THIS page's own row offsets, nothing about the map's true
+        // history), and this same window can already hold a
         // genuinely-established, independently-verified value for it from
-        // an EARLIER insert (no `clear()` in between — e.g. Timeline's
-        // loadNewer forward-anchor fallback re-issuing an anchor while
-        // `bottomMap` already holds the real edge from the window's own
-        // first bootstrap). Deferring entirely to whatever's already
+        // an EARLIER insert with no `clear()` in between (e.g. a live insert
+        // that already set the real edge for this side before this anchor
+        // bootstrap ran). Deferring entirely to whatever's already
         // there — rather than trying to "merge" the estimate in via some
         // min/max rule — is the simplest rule that can only ever leave the
         // map correct: an already-present entry was necessarily planted by

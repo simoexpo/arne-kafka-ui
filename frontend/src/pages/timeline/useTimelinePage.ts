@@ -81,11 +81,12 @@ export function useTimelinePage(cluster: string, topic: string): UseTimelinePage
     // A bare cancel (unlike reset()) is meant to stop an in-flight page
     // while leaving whatever already loaded intact — exhausted flags and the
     // caller's own store are untouched. But `loading` must still flip back
-    // to false, or a consumer driving a "cancel this scan" affordance off
-    // `state.loading`
-    // (Task 9's filtered-scan Cancel button) would be stuck showing it
-    // forever, since no further terminal event will ever arrive for a
-    // generation that's just been superseded.
+    // to false here: no further terminal event will ever arrive for a
+    // generation that's just been superseded, so nothing else would ever
+    // clear it. (Timeline's own Cancel affordance actually gates on
+    // `gestureRunning`, not `state.loading` directly — see its own comment
+    // — but `loading` staying stuck true would still be a lie about this
+    // hook's own state.)
     setState((prev) => (prev.loading ? { ...prev, loading: false } : prev))
   }, [])
 

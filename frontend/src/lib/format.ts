@@ -46,12 +46,13 @@ export function zoneSuffix(ms: number, mode: TimeDisplayMode): string {
 }
 
 // UTC/local display toggle (owner ruling 2026-08-15, `lib/timeDisplayMode`):
-// formats one absolute instant for direct display — message rows, the
-// window-range header, and the jump-timestamp preview all render
+// formats one absolute instant for direct display — message rows
+// (MessageRow) and the jump-timestamp preview (JumpControl) both render
 // already-loaded/already-computed epoch-ms values through this single
-// function, so every zone is computed exactly the same way everywhere.
-// `millis` defaults to true (rows keep their millisecond precision); the
-// compact window-range header passes `{ millis: false }`.
+// function, so every zone is computed exactly the same way everywhere. (The
+// window-range header does NOT go through here — see `formatWindowRange`'s
+// own comment for why.) `millis` defaults to true; no current caller passes
+// `{ millis: false }`, so that branch is unused today.
 export function formatTimestamp(ms: number, mode: TimeDisplayMode, opts: { millis?: boolean } = {}): string {
   const { millis = true } = opts
   return `${dateAndTime(ms, mode, millis)} ${zoneSuffix(ms, mode)}`
