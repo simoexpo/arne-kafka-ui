@@ -38,38 +38,36 @@ pub(super) fn at_edge(pos: i64, lo: i64, hi: i64, direction: Direction) -> bool 
     }
 }
 
-/// Clamps decoded cursor positions into each partition's *current*
-/// `[lo, hi]` watermark range before they drive anything else, and
-/// (fix round 3, N5) drops any partition that has no watermark entry at
-/// all.
+/// Hardens decoded cursor positions before they drive anything else:
+/// clamps each into its partition's *current* `[lo, hi]` watermark range,
+/// and drops any partition that has no watermark entry at all. `run_page`
+/// calls this first, so neither `page_windows` nor the cursor encoder ever
+/// sees a raw position.
 ///
-/// Fix round 1, C4 (clamping): a forged cursor, or a legitimate one whose
-/// partition has since been trimmed by retention, can carry a position
-/// outside today's watermarks (e.g. an offset below the new low
-/// watermark). `page_windows` already clamps its internal `pos` when
-/// computing a window's bounds — but a partition that ends up with no
-/// window this page (already at its edge) needs its position left
-/// unchanged so it can be recognized as at-edge on the *next* comparison
-/// too; if that position was never clamped, it's the raw out-of-range
-/// value, the edge check (`pos == lo`/`hi`) never matches it, and the same
-/// non-advancing cursor gets re-encoded and handed back forever: identical
-/// cursor, `exhausted: false`, nothing new, no error — a silent infinite
-/// loop from the client's point of view. Clamping once, up front, before
-/// `page_windows` or the cursor encoder ever see `positions`, makes
-/// "already at the edge" actually equal `lo`/`hi`.
+/// **Clamping.** A forged cursor, or a legitimate one whose partition has
+/// since been trimmed by retention, can carry a position outside today's
+/// watermarks (e.g. an offset below the new low watermark). `page_windows`
+/// clamps its own internal `pos` when computing window bounds — but a
+/// partition that gets no window this page (already at its edge) keeps its
+/// position unchanged, so that position must itself already equal `lo`/`hi`
+/// to be recognized as at-edge on the next comparison. An unclamped
+/// out-of-range value never matches the edge check (`pos == lo`/`hi`), so
+/// the same non-advancing cursor would be re-encoded and handed back
+/// forever: identical cursor, `exhausted: false`, nothing new, no error — a
+/// silent infinite loop from the client's point of view. Clamping up front
+/// makes "already at the edge" actually equal `lo`/`hi`.
 ///
-/// Fix round 3, N5 (dropping): a partition id with *no* watermark entry at
-/// all isn't a clamping problem (there's nothing to clamp against) — it
-/// means this partition doesn't exist in the topic today. Partition counts
-/// only ever grow for a given topic, so this can only be a forged cursor or
-/// one carried over from a different topic; there's no valid position to
-/// fall back to, so it's dropped from the tracked positions entirely rather
-/// than carried through unchanged. This matters beyond cosmetics: a
-/// carried-through phantom partition has no watermark to compare against,
-/// so `run_page`'s exhaustion check (which requires *every* tracked
-/// partition to be at its edge) could never be satisfied for it — the
-/// whole page's `exhausted` would be stuck at `false` forever, even once
-/// every real partition genuinely finished.
+/// **Dropping unknown partitions.** A partition id with *no* watermark
+/// entry isn't a clamping problem (there's nothing to clamp against) — it
+/// means the partition doesn't exist in this topic today. Partition counts
+/// only ever grow for a topic, so this is either a forged cursor or one
+/// carried over from a different topic; with no valid position to fall back
+/// to, it is dropped from the tracked positions rather than carried through.
+/// This matters beyond cosmetics: a phantom partition has no watermark to
+/// compare against, so `run_page`'s exhaustion check (which requires *every*
+/// tracked partition to be at its edge) could never be satisfied for it —
+/// the page's `exhausted` would be stuck at `false` forever, even once every
+/// real partition genuinely finished.
 pub(super) fn clamp_positions(positions: &[(i32, i64)], watermarks: &[(i32, i64, i64)]) -> Vec<(i32, i64)> {
     positions
         .iter()
@@ -87,8 +85,9 @@ pub(super) fn clamp_positions(positions: &[(i32, i64)], watermarks: &[(i32, i64,
 /// (`w.end`), so the adjacent record is the highest offset in the window,
 /// `w.end - 1` — the *top* of the window. For `Forward`, the position is
 /// the window's *inclusive lower bound* (`w.start`), so the adjacent record
-/// is `w.start` itself — the *bottom*. This is what fix round 2's N3
-/// short-read check (see `run_page`'s doc comment) tests for.
+/// is `w.start` itself — the *bottom*. `run_page`'s short-read guard looks
+/// for exactly this offset among an incomplete partition's fetched records
+/// (see `run_page`'s doc comment, step 2).
 pub(super) fn adjacent_offset(w: &PartitionRange, direction: Direction) -> i64 {
     match direction {
         Direction::Back => w.end - 1,
@@ -151,13 +150,14 @@ mod tests {
         ]);
     }
 
-    /// L1 fix (review finding): every other `page_windows` test positions
-    /// `p` exactly ON a watermark, where `.clamp(lo, hi)` can mask an
-    /// off-by-one in the window arithmetic itself. This pins a genuinely
-    /// mid-range position (lo=0, hi=100, p=60, span=10, nowhere near either
-    /// watermark): `Back` must yield the exclusive-upper window `[50, 60)`
-    /// (offsets ≤ 59), `Forward` the inclusive-lower window `[60, 70)`
-    /// (offsets ≥ 60) — verified to have teeth by mutation (see report).
+    /// Guards the bound semantics away from the watermarks. Every other
+    /// `page_windows` test positions `p` exactly ON a watermark, where
+    /// `.clamp(lo, hi)` can mask an off-by-one in the window arithmetic
+    /// itself; this one uses a genuinely mid-range position (lo=0, hi=100,
+    /// p=60, span=10, nowhere near either watermark), so only the
+    /// arithmetic can satisfy it: `Back` yields the exclusive-upper window
+    /// `[50, 60)` (offsets ≤ 59), `Forward` the inclusive-lower window
+    /// `[60, 70)` (offsets ≥ 60).
     #[test]
     fn page_windows_mid_range_position_back_and_forward() {
         let wm: &[(i32, i64, i64)] = &[(0, 0, 100)];
@@ -216,7 +216,7 @@ mod tests {
         assert!(at_edge(w2[0].start, 0, 1000, Direction::Back));
     }
 
-    /// Fix round 1, C4 (reviewer's exact construction): a forged or
+    /// The anti-infinite-loop property behind clamping: a forged or
     /// retention-raced cursor position (-5) on watermarks (0, 0, 10) must be
     /// clamped before it drives `page_windows` — otherwise a partition with
     /// no window this page would keep the raw, unclamped -5 forever:
@@ -293,7 +293,7 @@ mod tests {
         assert_eq!(clamp_positions(&positions, wm), positions);
     }
 
-    /// Fix round 3, N5 (reviewer's exact construction): a cursor decoded to
+    /// The dropping half: a cursor decoded to
     /// `[(0, 0), (99, 5)]` on a 1-partition topic (watermarks only cover
     /// partition 0) must behave as `[(0, 0)]` — partition 99 doesn't exist,
     /// so it's dropped rather than carried through with no watermark to
