@@ -457,7 +457,12 @@ describe('Timeline', () => {
     expect(FakeEventSource.instances).toHaveLength(1) // no request: back is exhausted, cursor is null
   })
 
-  it('a tail error stops live and shows the stopped caption', async () => {
+  // M5: the tail-error banner is routed through the same `describeError`
+  // path as every other error surface (Panel, the sidebar's cluster list) —
+  // product-voice wording with kafka attribution, never the raw wire code —
+  // and lives in an aria-live region so a screen reader announces the live
+  // stream dying.
+  it('a tail error stops live and shows a describeError-routed, product-voice caption in an aria-live region', async () => {
     const tail = mockTail()
     render(<Timeline cluster="prod" topic="orders" />)
     await emit(0, 'page_end', { cursor: null, exhausted: true })
@@ -465,7 +470,20 @@ describe('Timeline', () => {
       tail.handlers().onError({ code: 'kafka_error', message: 'broker gone', cluster: 'prod', retriable: true })
     })
     expect(screen.queryByText('● live')).not.toBeInTheDocument()
-    expect(screen.getByText('live stopped — kafka_error: broker gone')).toBeInTheDocument()
+    expect(screen.queryByText(/kafka_error/)).not.toBeInTheDocument()
+    const banner = screen.getByText("live stopped — Kafka unreachable — cluster 'prod'")
+    expect(banner).toBeInTheDocument()
+    expect(banner).toHaveAttribute('aria-live', 'polite')
+  })
+
+  it('a tail transport error surfaces the same connection-lost wording used everywhere else', async () => {
+    const tail = mockTail()
+    render(<Timeline cluster="prod" topic="orders" />)
+    await emit(0, 'page_end', { cursor: null, exhausted: true })
+    await act(async () => {
+      tail.handlers().onTransportError()
+    })
+    expect(screen.getByText('live stopped — Connection to Betrachtung lost')).toBeInTheDocument()
   })
 
   it('a page error renders as a banner while keeping already-loaded rows visible', async () => {

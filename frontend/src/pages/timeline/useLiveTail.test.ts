@@ -1,5 +1,6 @@
 import { act, renderHook } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { ApiError } from '../../api/client'
 import * as sse from '../../api/sse'
 import type { MessageOut, SseErrorData } from '../../api/types'
 import type { PauseReason } from '../../lib/timeline/model'
@@ -60,10 +61,10 @@ describe('useLiveTail', () => {
     expect(handles).toHaveLength(1)
   })
 
-  it('starts alive with no error text', () => {
+  it('starts alive with no error', () => {
     mockTail()
     const { result } = renderHook(() => useLiveTail('prod', 'orders', deps()))
-    expect(result.current).toEqual({ alive: true, errorText: null })
+    expect(result.current).toEqual({ alive: true, error: null })
   })
 
   it('a message failing the predicate is dropped: neither insert, buffer, nor onChange fire', () => {
@@ -122,19 +123,32 @@ describe('useLiveTail', () => {
     expect(d.onChange).toHaveBeenCalledTimes(1)
   })
 
-  it('a server error stops the stream for good and surfaces its text', () => {
+  // M5: a structured ApiError (not a bare string), same as useTimelinePage's
+  // `state.error` — so the consumer can route it through `describeError` for
+  // product-voice wording (kafka attribution) instead of rendering the wire
+  // code/message directly.
+  it('a server error stops the stream for good and surfaces a structured ApiError', () => {
     const handles = mockTail()
     const { result } = renderHook(() => useLiveTail('prod', 'orders', deps()))
-    act(() => handles[0].handlers.onError({ code: 'boom', message: 'kafka fell over' }))
-    expect(result.current).toEqual({ alive: false, errorText: 'boom: kafka fell over' })
+    act(() => handles[0].handlers.onError({ code: 'kafka_error', message: 'broker gone', cluster: 'prod', retriable: true }))
+    expect(result.current.alive).toBe(false)
+    expect(result.current.error).toBeInstanceOf(ApiError)
+    const err = result.current.error as ApiError
+    expect(err.code).toBe('kafka_error')
+    expect(err.message).toBe('broker gone')
+    expect(err.cluster).toBe('prod')
+    expect(err.retriable).toBe(true)
     expect(handles[0].close).toHaveBeenCalledTimes(1)
   })
 
-  it('a transport error stops the stream for good with fixed wording', () => {
+  it('a transport error stops the stream for good with a plain Error (legitimately connection-lost)', () => {
     const handles = mockTail()
     const { result } = renderHook(() => useLiveTail('prod', 'orders', deps()))
     act(() => handles[0].handlers.onTransportError())
-    expect(result.current).toEqual({ alive: false, errorText: 'connection lost — retrying is manual' })
+    expect(result.current.alive).toBe(false)
+    expect(result.current.error).not.toBeInstanceOf(ApiError)
+    expect(result.current.error).toBeInstanceOf(Error)
+    expect(result.current.error?.message).toBe('connection lost — retrying is manual')
     expect(handles[0].close).toHaveBeenCalledTimes(1)
   })
 

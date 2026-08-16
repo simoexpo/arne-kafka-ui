@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import type { RefObject } from 'react'
+import { ApiError } from '../../api/client'
 import { tailTopic } from '../../api/sse'
 import type { MessageOut } from '../../api/types'
 import type { PauseReason } from '../../lib/timeline/model'
@@ -30,9 +31,17 @@ export interface UseLiveTailDeps {
  * every render, so a fresh inline callback each render is simply never
  * seen.
  */
-export function useLiveTail(cluster: string, topic: string, deps: UseLiveTailDeps): { alive: boolean; errorText: string | null } {
+export function useLiveTail(
+  cluster: string,
+  topic: string,
+  deps: UseLiveTailDeps,
+): { alive: boolean; error: ApiError | Error | null } {
   const [alive, setAlive] = useState(true)
-  const [errorText, setErrorText] = useState<string | null>(null)
+  // M5: a structured ApiError (or, for a transport failure, a plain Error)
+  // rather than a pre-formatted string — same shape as useTimelinePage's
+  // `state.error` — so the consumer renders it through `describeError` for
+  // product-voice wording instead of the raw wire code/message.
+  const [error, setError] = useState<ApiError | Error | null>(null)
   const tailHandleRef = useRef<{ close: () => void } | null>(null)
 
   useEffect(() => {
@@ -48,13 +57,13 @@ export function useLiveTail(cluster: string, topic: string, deps: UseLiveTailDep
       },
       onError: (e) => {
         setAlive(false)
-        setErrorText(`${e.code}: ${e.message}`)
+        setError(new ApiError(0, e.code, e.message, e.cluster ?? null, e.retriable ?? false))
         tailHandleRef.current?.close()
         tailHandleRef.current = null
       },
       onTransportError: () => {
         setAlive(false)
-        setErrorText('connection lost — retrying is manual')
+        setError(new Error('connection lost — retrying is manual'))
         tailHandleRef.current?.close()
         tailHandleRef.current = null
       },
@@ -67,5 +76,5 @@ export function useLiveTail(cluster: string, topic: string, deps: UseLiveTailDep
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [cluster, topic])
 
-  return { alive, errorText }
+  return { alive, error }
 }

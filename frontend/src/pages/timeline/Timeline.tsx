@@ -4,6 +4,7 @@ import type { MessageOut } from '../../api/types'
 import { MessageList } from '../../components/messages/MessageList'
 import type { MessageListHandle } from '../../components/messages/MessageList'
 import { Panel } from '../../components/Panel'
+import { describeError } from '../../api/errors'
 import { parseFilterQuery, type FilterQueryApi } from '../../lib/filterQuery'
 import { formatWindowRange } from '../../lib/format'
 import { decodeCursor } from '../../lib/timelineCursor'
@@ -825,7 +826,7 @@ export function Timeline({
   // throws" in Timeline.test.tsx).
   const handleLiveInsert = useCallback((m: MessageOut) => noteOutcome(storeRef.current.insertLive([m])), [noteOutcome])
   const handleLiveBuffer = useCallback((m: MessageOut) => liveBufferRef.current.push(m), [])
-  const { alive: live, errorText: tailErrorText } = useLiveTail(cluster, topic, {
+  const { alive: live, error: tailError } = useLiveTail(cluster, topic, {
     predicateRef,
     attachedRef,
     pauseReasonRef,
@@ -1085,8 +1086,15 @@ export function Timeline({
         onCancel={handleCancelScan}
       />
       <JumpControl onJump={handleJump} partitionIds={partitionIds} />
-      {tailErrorText && (
-        <p className="text-sm text-amber-600 dark:text-amber-400">{`live stopped — ${tailErrorText}`}</p>
+      {tailError && (
+        // M5: routed through the same `describeError` product-voice path as
+        // every other error surface (Panel, the sidebar's cluster list) —
+        // never the raw wire code/message — and announced via aria-live so
+        // a screen reader catches the live stream dying, not just a visual
+        // color change.
+        <p role="status" aria-live="polite" className="text-sm text-amber-600 dark:text-amber-400">
+          {`live stopped — ${describeError(tailError).headline ?? tailError.message}`}
+        </p>
       )}
       {continueDirection === 'forward' && <ContinueScanButton label={continueScanLabel} onClick={continueScan} />}
       <Panel
