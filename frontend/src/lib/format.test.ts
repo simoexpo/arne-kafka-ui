@@ -21,10 +21,12 @@ describe('formatCount', () => {
 })
 
 describe('estimateErrorTitle', () => {
-  // I5: kafka attribution, product voice — never the raw error alone.
+  // Kafka attribution, product voice — never the raw error alone, and never
+  // the internal operation name the backend called it with (only the
+  // underlying reason — see admin.rs's `estimate_error_message`).
   it('attributes a watermark-fetch failure to Kafka, including the reason', () => {
-    expect(estimateErrorTitle('fetch watermarks: broker transport failure')).toBe(
-      "Kafka couldn't provide a count — fetch watermarks: broker transport failure",
+    expect(estimateErrorTitle('counting messages timed out')).toBe(
+      "Kafka couldn't provide a count — counting messages timed out",
     )
   })
 })

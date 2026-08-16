@@ -3,6 +3,7 @@ use crate::error::{self, ApiError};
 use crate::util::now_ms;
 use rdkafka::admin::{AdminOptions, ResourceSpecifier};
 use rdkafka::consumer::Consumer;
+use rdkafka::error::{KafkaError, RDKafkaErrorCode};
 use rdkafka::topic_partition_list::TopicPartitionList;
 use rdkafka::Offset;
 use serde::Serialize;
@@ -22,15 +23,40 @@ pub struct TopicSummary {
     /// topic's estimate, not just its own contribution). Also `null` for an
     /// internal (`__`-prefixed) topic, whose estimate is never computed.
     pub message_estimate: Option<i64>,
-    /// Set (and serialized) exactly when `message_estimate` is `null`
-    /// because a partition's watermark fetch failed — the Kafka-side reason
-    /// a client should render next to the blank count, per "never show
-    /// stale data silently: every metric carries its sample timestamp [or,
-    /// on failure, why it's missing]". `null` for a healthy estimate and for
+    /// `TopicSummary` derives a plain `Serialize` with no
+    /// `skip_serializing_if`, so this field is ALWAYS present on the wire —
+    /// as JSON `null` whenever there's nothing to report. Only actually
+    /// SET (non-null) when `message_estimate` is `null` because a
+    /// partition's watermark fetch failed — the Kafka-side reason a client
+    /// should render next to the blank count, per "never show stale data
+    /// silently: every metric carries its sample timestamp [or, on
+    /// failure, why it's missing]". `null` for a healthy estimate and for
     /// an internal topic (no estimate attempted at all).
     pub estimate_error: Option<String>,
     pub size_bytes: Option<u64>,
     pub internal: bool,
+}
+
+/// The text that ends up in `TopicSummary.estimate_error` and is rendered
+/// VERBATIM inside a tooltip by the frontend's
+/// `estimateErrorTitle` (already prefixed there with "Kafka couldn't
+/// provide a count — "). Deliberately NOT `error::from_kafka(...).message`
+/// — that helper's `"{what}: {err}"` shape leaked the internal operation
+/// name ("fetch watermarks") straight into the tooltip. This gives a plain,
+/// standalone reason: the raw broker-side text for an ordinary failure, or
+/// an honest one-line timeout message — no internal vocabulary either way.
+fn estimate_error_message(err: &KafkaError) -> String {
+    match err.rdkafka_error_code() {
+        Some(RDKafkaErrorCode::OperationTimedOut) | Some(RDKafkaErrorCode::RequestTimedOut) => {
+            "counting messages timed out".to_string()
+        }
+        // The raw `KafkaError`/`RDKafkaErrorCode` text ("Meta data fetch
+        // error: BrokerTransportFailure (Local: Broker transport
+        // failure)") is Kafka's own diagnostic — same quality bar as any
+        // other panel's raw error detail — it just must never be prefixed
+        // with the operation name we happened to call it with.
+        _ => err.to_string(),
+    }
 }
 
 /// Sums per-partition watermark deltas for one topic, tolerating a failure:
@@ -78,7 +104,7 @@ pub async fn list_topics(handle: Arc<ClusterHandle>) -> Result<TopicList, ApiErr
                 assemble_topic_estimate(t.partitions().iter().map(|p| p.id()), |id| {
                     handle.consumer()
                         .fetch_watermarks(t.name(), id, ADMIN_TIMEOUT)
-                        .map_err(|e| error::from_kafka(&handle.name, "fetch watermarks", &e).message)
+                        .map_err(|e| estimate_error_message(&e))
                 })
             };
             topics.push(TopicSummary {
@@ -523,5 +549,28 @@ mod tests {
         });
         assert_eq!(estimate, Some(0));
         assert_eq!(error, None);
+    }
+
+    /// `estimate_error` (rendered verbatim in a tooltip by
+    /// `estimateErrorTitle`) must never carry the internal "fetch
+    /// watermarks:" phrasing `from_kafka`'s generic `{what}: {err}` shape
+    /// produces — only the underlying (already Kafka-attributed by the
+    /// caller's own "Kafka couldn't provide a count —" prefix) reason.
+    #[test]
+    fn estimate_error_message_never_carries_the_internal_operation_prefix() {
+        use rdkafka::error::{KafkaError, RDKafkaErrorCode};
+        let err = KafkaError::MetadataFetch(RDKafkaErrorCode::BrokerTransportFailure);
+        let msg = estimate_error_message(&err);
+        assert!(
+            !msg.to_lowercase().contains("fetch watermarks"),
+            "must not leak the internal operation name we chose to interpolate: {msg:?}"
+        );
+    }
+
+    #[test]
+    fn estimate_error_message_is_honest_about_a_timeout() {
+        use rdkafka::error::{KafkaError, RDKafkaErrorCode};
+        let err = KafkaError::MetadataFetch(RDKafkaErrorCode::OperationTimedOut);
+        assert_eq!(estimate_error_message(&err), "counting messages timed out");
     }
 }
