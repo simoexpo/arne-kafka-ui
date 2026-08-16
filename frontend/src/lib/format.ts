@@ -73,6 +73,15 @@ export function formatCount(n: number): string {
   return `${(n / 1_000_000_000).toFixed(1)}B`
 }
 
+// I5: a topic's message-count estimate can be missing for two different
+// reasons — an internal topic (skipped on purpose, `estimate_error` null) or
+// a genuine per-partition watermark-fetch failure (`estimate_error` set).
+// Both render '—'; only the latter gets this tooltip, attributing the gap to
+// Kafka rather than leaving the reader to guess.
+export function estimateErrorTitle(error: string): string {
+  return `Kafka couldn't provide a count — ${error}`
+}
+
 // Byte-scaled (1024-based, unlike `formatCount`'s decimal message-count
 // shorthand) — a size in bytes should read as KB/MB/GB, not as unit-less "k".
 export function formatBytes(n: number): string {

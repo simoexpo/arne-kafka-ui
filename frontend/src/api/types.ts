@@ -21,6 +21,12 @@ export interface TopicSummary {
   partitions: number
   replication_factor: number
   message_estimate: number | null
+  // Non-null only when `message_estimate` failed for a genuine reason (a
+  // partition's watermark fetch errored) — never set for an internal topic,
+  // whose estimate is skipped outright (see the backend's `list_topics`).
+  // Lets the UI tell "we didn't bother" from "we tried and Kafka refused"
+  // where `message_estimate` renders as '—' either way.
+  estimate_error: string | null
   size_bytes: number | null
   internal: boolean
 }

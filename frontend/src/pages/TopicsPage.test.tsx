@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { screen, waitFor } from '@testing-library/react'
+import { screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { renderWithRouter } from '../test/utils'
 import { TopicsView } from './TopicsPage'
@@ -12,9 +12,9 @@ vi.mock('../api/client', async (importOriginal) => ({
 
 const topics = {
   topics: [
-    { name: 'orders', partitions: 3, replication_factor: 2, message_estimate: 1200, size_bytes: null, internal: false },
-    { name: 'payments', partitions: 1, replication_factor: 2, message_estimate: 50, size_bytes: null, internal: false },
-    { name: '__consumer_offsets', partitions: 50, replication_factor: 3, message_estimate: 0, size_bytes: null, internal: true },
+    { name: 'orders', partitions: 3, replication_factor: 2, message_estimate: 1200, estimate_error: null, size_bytes: null, internal: false },
+    { name: 'payments', partitions: 1, replication_factor: 2, message_estimate: 50, estimate_error: null, size_bytes: null, internal: false },
+    { name: '__consumer_offsets', partitions: 50, replication_factor: 3, message_estimate: 0, estimate_error: null, size_bytes: null, internal: true },
   ],
   as_of: Date.now(),
 }
@@ -37,7 +37,7 @@ describe('TopicsView', () => {
       // size_bytes is non-null so the only '—' in the row is attributable to
       // the message-estimate cell, not the (already-guarded) size cell
       topics: [
-        { name: 'flaky', partitions: 2, replication_factor: 1, message_estimate: null, size_bytes: 100, internal: false },
+        { name: 'flaky', partitions: 2, replication_factor: 1, message_estimate: null, estimate_error: null, size_bytes: 100, internal: false },
       ],
       as_of: Date.now(),
     })
@@ -48,11 +48,49 @@ describe('TopicsView', () => {
     expect(row).not.toHaveTextContent('null')
   })
 
+  // I5: an internal topic's null estimate (skipped on purpose) carries no
+  // `estimate_error` and gets no tooltip; a genuine watermark-fetch failure
+  // does, in product voice with kafka attribution.
+  it('shows a title explaining WHY the estimate is missing when a watermark fetch failed', async () => {
+    vi.mocked(client.getTopics).mockResolvedValue({
+      topics: [
+        {
+          name: 'flaky',
+          partitions: 2,
+          replication_factor: 1,
+          message_estimate: null,
+          estimate_error: 'fetch watermarks: broker transport failure',
+          size_bytes: 100,
+          internal: false,
+        },
+      ],
+      as_of: Date.now(),
+    })
+    await renderWithRouter(<TopicsView cluster="prod" />)
+    await screen.findByText('flaky')
+    const row = screen.getByText('flaky').closest('tr')!
+    const dash = within(row).getByText('—')
+    expect(dash).toHaveAttribute('title', "Kafka couldn't provide a count — fetch watermarks: broker transport failure")
+  })
+
+  it('the size-only "—" carries no estimate-error tooltip', async () => {
+    vi.mocked(client.getTopics).mockResolvedValue({
+      topics: [
+        { name: 'flaky', partitions: 2, replication_factor: 1, message_estimate: null, estimate_error: null, size_bytes: 100, internal: false },
+      ],
+      as_of: Date.now(),
+    })
+    await renderWithRouter(<TopicsView cluster="prod" />)
+    await screen.findByText('flaky')
+    const row = screen.getByText('flaky').closest('tr')!
+    expect(within(row).getByText('—')).not.toHaveAttribute('title')
+  })
+
   it('encodes topic names with spaces and slashes in the detail link href', async () => {
     vi.mocked(client.getTopics).mockResolvedValue({
       topics: [
-        { name: 'order events', partitions: 1, replication_factor: 1, message_estimate: 0, size_bytes: null, internal: false },
-        { name: 'a/b', partitions: 1, replication_factor: 1, message_estimate: 0, size_bytes: null, internal: false },
+        { name: 'order events', partitions: 1, replication_factor: 1, message_estimate: 0, estimate_error: null, size_bytes: null, internal: false },
+        { name: 'a/b', partitions: 1, replication_factor: 1, message_estimate: 0, estimate_error: null, size_bytes: null, internal: false },
       ],
       as_of: Date.now(),
     })

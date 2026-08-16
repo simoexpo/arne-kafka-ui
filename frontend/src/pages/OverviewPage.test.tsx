@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { screen } from '@testing-library/react'
+import { screen, within } from '@testing-library/react'
 import { renderWithQuery } from '../test/utils'
 import { OverviewView } from './OverviewPage'
 import * as client from '../api/client'
@@ -23,9 +23,9 @@ describe('OverviewView', () => {
     })
     vi.mocked(client.getTopics).mockResolvedValue({
       topics: [
-        { name: 'big', partitions: 3, replication_factor: 1, message_estimate: 5000, size_bytes: null, internal: false },
-        { name: 'small', partitions: 1, replication_factor: 1, message_estimate: 10, size_bytes: null, internal: false },
-        { name: '__internal', partitions: 1, replication_factor: 1, message_estimate: 99999, size_bytes: null, internal: true },
+        { name: 'big', partitions: 3, replication_factor: 1, message_estimate: 5000, estimate_error: null, size_bytes: null, internal: false },
+        { name: 'small', partitions: 1, replication_factor: 1, message_estimate: 10, estimate_error: null, size_bytes: null, internal: false },
+        { name: '__internal', partitions: 1, replication_factor: 1, message_estimate: 99999, estimate_error: null, size_bytes: null, internal: true },
       ],
       as_of: Date.now(),
     })
@@ -48,8 +48,8 @@ describe('OverviewView', () => {
     })
     vi.mocked(client.getTopics).mockResolvedValue({
       topics: [
-        { name: 'flaky', partitions: 1, replication_factor: 1, message_estimate: null, size_bytes: null, internal: false },
-        { name: 'ranked', partitions: 1, replication_factor: 1, message_estimate: 10, size_bytes: null, internal: false },
+        { name: 'flaky', partitions: 1, replication_factor: 1, message_estimate: null, estimate_error: null, size_bytes: null, internal: false },
+        { name: 'ranked', partitions: 1, replication_factor: 1, message_estimate: 10, estimate_error: null, size_bytes: null, internal: false },
       ],
       as_of: Date.now(),
     })
@@ -58,6 +58,38 @@ describe('OverviewView', () => {
     expect(topTopics[0]).toHaveTextContent('ranked')
     expect(topTopics[1]).toHaveTextContent('flaky')
     expect(topTopics[1]).toHaveTextContent('—')
+  })
+
+  // I5: same kafka-attributed tooltip as TopicsPage, for the "Top topics" table.
+  it('shows a title explaining WHY the estimate is missing when a watermark fetch failed', async () => {
+    vi.mocked(client.getOverview).mockResolvedValue({
+      brokers: [{ id: 1, host: 'b1', port: 9092 }],
+      controller_id: null,
+      topic_count: 1,
+      partition_count: 1,
+      under_replicated_partitions: 0,
+      as_of: Date.now(),
+    })
+    vi.mocked(client.getTopics).mockResolvedValue({
+      topics: [
+        {
+          name: 'flaky',
+          partitions: 1,
+          replication_factor: 1,
+          message_estimate: null,
+          estimate_error: 'fetch watermarks: broker transport failure',
+          size_bytes: null,
+          internal: false,
+        },
+      ],
+      as_of: Date.now(),
+    })
+    renderWithQuery(<OverviewView cluster="prod" />)
+    const row = await screen.findByTestId('top-topic')
+    expect(within(row).getByText('—')).toHaveAttribute(
+      'title',
+      "Kafka couldn't provide a count — fetch watermarks: broker transport failure",
+    )
   })
 
   it('renders an inline error in the failing panel only', async () => {

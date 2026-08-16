@@ -50,8 +50,8 @@ describe('CommandPalette', () => {
     })
     vi.mocked(client.getTopics).mockResolvedValue({
       topics: [
-        { name: 'orders', partitions: 3, replication_factor: 1, message_estimate: 10, size_bytes: null, internal: false },
-        { name: '__consumer_offsets', partitions: 1, replication_factor: 1, message_estimate: 0, size_bytes: null, internal: true },
+        { name: 'orders', partitions: 3, replication_factor: 1, message_estimate: 10, estimate_error: null, size_bytes: null, internal: false },
+        { name: '__consumer_offsets', partitions: 1, replication_factor: 1, message_estimate: 0, estimate_error: null, size_bytes: null, internal: true },
       ],
       as_of: Date.now(),
     })

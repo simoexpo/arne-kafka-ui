@@ -4,7 +4,7 @@ import { useParams } from '@tanstack/react-router'
 import { getOverview, getTopics } from '../api/client'
 import { Panel } from '../components/Panel'
 import { StalenessChip } from '../components/StalenessChip'
-import { formatCount } from '../lib/format'
+import { estimateErrorTitle, formatCount } from '../lib/format'
 
 export function OverviewView({ cluster }: { cluster: string }) {
   const overview = useQuery({
@@ -62,7 +62,17 @@ export function OverviewView({ cluster }: { cluster: string }) {
               <tr key={t.name} data-testid="top-topic" className="border-t border-zinc-100 dark:border-zinc-800">
                 <td className="py-1 font-mono">{t.name}</td>
                 <td>{t.partitions}</td>
-                <td>{t.message_estimate === null ? '—' : formatCount(t.message_estimate)}</td>
+                <td>
+                  {t.message_estimate !== null ? (
+                    formatCount(t.message_estimate)
+                  ) : t.estimate_error !== null ? (
+                    <span title={estimateErrorTitle(t.estimate_error)} className="cursor-help text-zinc-400 underline decoration-dotted">
+                      —
+                    </span>
+                  ) : (
+                    '—'
+                  )}
+                </td>
               </tr>
             ))}
           </tbody>

@@ -7,7 +7,7 @@ import { FilterInput } from '../components/FilterInput'
 import { Panel } from '../components/Panel'
 import { StalenessChip } from '../components/StalenessChip'
 import { Switch } from '../components/Switch'
-import { formatBytes, formatCount } from '../lib/format'
+import { estimateErrorTitle, formatBytes, formatCount } from '../lib/format'
 
 export function TopicsView({ cluster }: { cluster: string }) {
   const [filter, setFilter] = useState('')
@@ -66,7 +66,17 @@ export function TopicsView({ cluster }: { cluster: string }) {
                 </td>
                 <td>{t.partitions}</td>
                 <td>{t.replication_factor}</td>
-                <td>{t.message_estimate === null ? '—' : formatCount(t.message_estimate)}</td>
+                <td>
+                  {t.message_estimate !== null ? (
+                    formatCount(t.message_estimate)
+                  ) : t.estimate_error !== null ? (
+                    <span title={estimateErrorTitle(t.estimate_error)} className="cursor-help text-zinc-400 underline decoration-dotted">
+                      —
+                    </span>
+                  ) : (
+                    '—'
+                  )}
+                </td>
                 <td className="text-zinc-400">{t.size_bytes === null ? '—' : formatBytes(t.size_bytes)}</td>
               </tr>
             ))}

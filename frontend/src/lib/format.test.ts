@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { formatAgo, formatBytes, formatCount, formatRetentionValue, formatTimestamp, formatWindowRange, retentionMsHint, zoneSuffix } from './format'
+import { estimateErrorTitle, formatAgo, formatBytes, formatCount, formatRetentionValue, formatTimestamp, formatWindowRange, retentionMsHint, zoneSuffix } from './format'
 import { withFixedTZ } from '../test/timezone'
 
 describe('formatAgo', () => {
@@ -18,6 +18,15 @@ describe('formatCount', () => {
   it('thousands', () => expect(formatCount(1500)).toBe('1.5k'))
   it('millions', () => expect(formatCount(2_000_000)).toBe('2.0M'))
   it('billions', () => expect(formatCount(3_100_000_000)).toBe('3.1B'))
+})
+
+describe('estimateErrorTitle', () => {
+  // I5: kafka attribution, product voice — never the raw error alone.
+  it('attributes a watermark-fetch failure to Kafka, including the reason', () => {
+    expect(estimateErrorTitle('fetch watermarks: broker transport failure')).toBe(
+      "Kafka couldn't provide a count — fetch watermarks: broker transport failure",
+    )
+  })
 })
 
 describe('formatBytes', () => {
