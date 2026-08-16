@@ -31,10 +31,10 @@ function subscribe(onStoreChange: () => void): () => void {
 
 // `useSyncExternalStore` (built into React, no new dependency) rather than a
 // Context provider: the mode is read from a handful of components scattered
-// across the tree (sidebar toggle, message rows, the timeline header, the
-// jump-timestamp preview) that don't otherwise share a common ancestor worth
-// wrapping — a plain external store keeps every one of them independently
-// subscribed without threading a provider through every route.
+// across the tree (message rows, the timeline header, the jump-timestamp
+// preview) that don't otherwise share a common ancestor worth wrapping — a
+// plain external store keeps every one of them independently subscribed
+// without threading a provider through every route.
 export function useTimeDisplayMode(): TimeDisplayMode {
   return useSyncExternalStore(subscribe, getTimeDisplayMode, () => 'utc')
 }
