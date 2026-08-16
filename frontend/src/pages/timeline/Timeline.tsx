@@ -14,6 +14,7 @@ import { formatWindowRange } from '../../lib/format'
 import { decodeCursor } from '../../lib/timelineCursor'
 import { createSlidingWindowStore, type InsertOutcome } from '../../lib/timelineStore'
 import { useTimeDisplayMode } from '../../lib/timeDisplayMode'
+import { createLiveBuffer } from '../../lib/timeline/liveBuffer'
 import { useFallingEdge } from './useFallingEdge'
 import { JumpControl, type JumpTarget } from './JumpControl'
 import { LivePill, PlayPauseToggle } from './LivePill'
@@ -280,18 +281,12 @@ export function Timeline({
   // time, like storeRef), mutated directly and paired with `bump()` so a
   // change is visible next render — same pattern as the store itself,
   // avoiding stale closures in the tail effect (which only runs once, on
-  // [cluster, topic]). bufferRef holds the actual live messages held back
-  // while paused, capped at BUFFER_CAP (oldest dropped first) so flushing
-  // never inserts an unbounded backlog. bufferReceivedRef is a SEPARATE,
-  // uncapped counter — the pill keeps counting honestly past the cap
-  // (`"{n} new"`, n growing past 500) rather than freezing at a fixed
-  // string; bufferOverflowRef flips permanently (until the next flush) once
-  // the buffer has actually started dropping entries, which only gates the
-  // "· older dropped" suffix.
+  // [cluster, topic]). liveBufferRef holds the actual live messages held
+  // back while paused, plus the received/overflowed counters — see
+  // `createLiveBuffer`'s own doc comment for the buffering policy
+  // (capped at BUFFER_CAP, oldest dropped first).
   const pauseReasonRef = useRef<PauseReason>('none')
-  const bufferRef = useRef<MessageOut[]>([])
-  const bufferReceivedRef = useRef(0)
-  const bufferOverflowRef = useRef(false)
+  const liveBufferRef = useRef(createLiveBuffer(BUFFER_CAP))
 
   // `state.exhausted.back`/`.forward` (React state from useTimelinePage) is
   // only refreshed by a NEW page landing in that direction — these two refs
@@ -321,12 +316,10 @@ export function Timeline({
   )
 
   const flushBuffer = useCallback(() => {
-    if (bufferRef.current.length > 0) {
-      noteOutcome(storeRef.current.insertLive(bufferRef.current))
+    const drained = liveBufferRef.current.drain()
+    if (drained.length > 0) {
+      noteOutcome(storeRef.current.insertLive(drained))
     }
-    bufferRef.current = []
-    bufferReceivedRef.current = 0
-    bufferOverflowRef.current = false
   }, [noteOutcome])
 
   // Resends the currently active filter's server-side params (a no-op when
@@ -586,9 +579,7 @@ export function Timeline({
       storeRef.current.clear()
       pendingAnchorRef.current = null
       setJumpTarget(nextJumpTarget)
-      bufferRef.current = []
-      bufferReceivedRef.current = 0
-      bufferOverflowRef.current = false
+      liveBufferRef.current.clear()
       bottomTrimmedSinceRef.current = false
       topTrimmedSinceRef.current = false
       reset()
@@ -794,12 +785,7 @@ export function Timeline({
         if (attachedRef.current && pauseReasonRef.current === 'none') {
           noteOutcome(storeRef.current.insertLive([m]))
         } else {
-          bufferRef.current.push(m)
-          bufferReceivedRef.current += 1
-          if (bufferRef.current.length > BUFFER_CAP) {
-            bufferRef.current.shift() // drop the OLDEST buffered entry
-            bufferOverflowRef.current = true
-          }
+          liveBufferRef.current.push(m)
         }
         bump()
       },
@@ -1163,7 +1149,7 @@ export function Timeline({
             their right. See Timeline.test.tsx's "stable header controls"
             suite for the pixel-stability assertion. */}
         <div className="flex items-center gap-2">
-          <LivePill count={bufferReceivedRef.current} capped={bufferOverflowRef.current} attached={attached} onClick={handlePillClick} />
+          <LivePill count={liveBufferRef.current.received} capped={liveBufferRef.current.overflowed} attached={attached} onClick={handlePillClick} />
           {live && attached && !paused && <span className="animate-pulse text-emerald-500">● live</span>}
           {attached ? (
             live ? (
