@@ -1,5 +1,4 @@
 import { useCallback, useEffect, useLayoutEffect, useReducer, useRef, useState } from 'react'
-import { tailTopic } from '../../api/sse'
 import type { TimelineDirection, TimelinePageParams } from '../../api/sse'
 import type { MessageOut } from '../../api/types'
 import { MessageList } from '../../components/messages/MessageList'
@@ -21,6 +20,7 @@ import { useFallingEdge } from './useFallingEdge'
 import { ContinueScanButton } from './ContinueScanButton'
 import { FilterBar } from './FilterBar'
 import { JumpControl } from './JumpControl'
+import { useLiveTail } from './useLiveTail'
 import { useTimelinePage } from './useTimelinePage'
 import { TimelineHeader } from './TimelineHeader'
 
@@ -201,10 +201,6 @@ export function Timeline({
   // to sit in the sidebar (`layout/AppShell.tsx`), where its effect was
   // never actually visible. The global store this reads from is unchanged.
   const timeDisplayMode = useTimeDisplayMode()
-
-  const [live, setLive] = useState(true)
-  const [tailErrorText, setTailErrorText] = useState<string | null>(null)
-  const tailHandleRef = useRef<{ close: () => void } | null>(null)
 
   // Attached vs detached windows (design spec v1.3): the loaded window is
   // either ATTACHED to now (opened at latest, or forward-paginated until the
@@ -690,47 +686,21 @@ export function Timeline({
     listRef.current?.adjustScrollTop(newTop - anchor.priorTop)
   })
 
-  // Live tail: on by default, ON for the lifetime of the component. An
-  // error (server-emitted or transport) stops it for good.
-  useEffect(() => {
-    const handle = tailTopic(cluster, topic, {
-      onMessage: (m) => {
-        if (!predicateRef.current(m)) return
-        // While detached, live messages ALWAYS buffer — merging them would
-        // recreate the false seam a historical window exists to avoid.
-        // `attachedRef.current` is the gate (never `pauseReasonRef` alone):
-        // it can only be true once the store's own attachment has been
-        // confirmed (see its own comment above), so this branch can never
-        // reach a detached store — `insertLive`'s throw precondition is
-        // structurally unreachable from this call site (see
-        // "insertLive never throws" in Timeline.test.tsx).
-        if (attachedRef.current && pauseReasonRef.current === 'none') {
-          noteOutcome(storeRef.current.insertLive([m]))
-        } else {
-          liveBufferRef.current.push(m)
-        }
-        bump()
-      },
-      onError: (e) => {
-        setLive(false)
-        setTailErrorText(`${e.code}: ${e.message}`)
-        tailHandleRef.current?.close()
-        tailHandleRef.current = null
-      },
-      onTransportError: () => {
-        setLive(false)
-        setTailErrorText('connection lost — retrying is manual')
-        tailHandleRef.current?.close()
-        tailHandleRef.current = null
-      },
-    })
-    tailHandleRef.current = handle
-    return () => {
-      tailHandleRef.current?.close()
-      tailHandleRef.current = null
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [cluster, topic])
+  // While detached, a live message ALWAYS buffers — merging it would recreate the false seam a historical window
+  // exists to avoid. `attachedRef` is the gate (never `pauseReasonRef` alone): it can only be true once the store's
+  // own attachment has been confirmed (see its own comment above), so this branch can never reach a detached store —
+  // `insertLive`'s throw precondition is structurally unreachable from this call site (see "insertLive never
+  // throws" in Timeline.test.tsx).
+  const handleLiveInsert = useCallback((m: MessageOut) => noteOutcome(storeRef.current.insertLive([m])), [noteOutcome])
+  const handleLiveBuffer = useCallback((m: MessageOut) => liveBufferRef.current.push(m), [])
+  const { alive: live, errorText: tailErrorText } = useLiveTail(cluster, topic, {
+    predicateRef,
+    attachedRef,
+    pauseReasonRef,
+    onLiveInsert: handleLiveInsert,
+    onBuffer: handleLiveBuffer,
+    onChange: bump,
+  })
 
   // Fix round 1, M2: display the committed store rows merged with whatever
   // the CURRENT in-flight page has accumulated so far (a display-only
