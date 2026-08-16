@@ -54,7 +54,7 @@ export function TimelineHeader({
         {tailAlive && attached && !paused && !inspecting && <span className="animate-pulse text-emerald-500">● live</span>}
         {attached ? (
           tailAlive ? (
-            // Attached: the normal live play/pause toggle. M3: `inspecting`
+            // Attached: the normal live play/pause toggle. `inspecting`
             // lights the toggle even when `paused` (the real pause reason)
             // is false — `inspectingOnly` tells PlayPauseToggle so its
             // aria-label can say what the click actually does (pause) rather

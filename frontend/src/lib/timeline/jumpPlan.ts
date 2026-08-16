@@ -9,7 +9,7 @@ export type JumpTarget =
 
 export interface JumpPlan {
   anchorContext: AnchorContext
-  // H2: this is the jump's own STATIC intent only — never assigned directly
+  // This is the jump's own STATIC intent only — never assigned directly
   // to the live pause state. Every jump routes through pauseMachine's
   // 'jump' event (as `intent`), which is the one place that decides what
   // actually happens to the CURRENT pause reason (e.g. an explicit pause

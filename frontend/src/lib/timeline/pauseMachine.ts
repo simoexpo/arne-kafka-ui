@@ -8,7 +8,7 @@ export interface PauseInput {
   // an open inspection is a stronger "don't move things" signal than scroll
   // position, so pinning at top never implicitly resumes (or flushes) while
   // any row is still open. The 'reattached' branch honors the same
-  // dominance (M1 — see its own comment below).
+  // dominance — see its own comment below.
   inspecting: boolean
   // Only read by the 'jump' event: the jump's OWN static intent (planJump's
   // `pauseIntent` — see jumpPlan.ts), i.e. what the pause reason would be if
@@ -29,7 +29,7 @@ export type PauseEvent =
   // the decision left here is exactly scrollPinnedTop's own resume rule
   // (design spec v1.7: "mirroring auto-pause").
   | 'lastInspectionClosed'
-  // A jump landed (any kind — now/beginning/offset/timestamp). H2: this is
+  // A jump landed (any kind — now/beginning/offset/timestamp). This is
   // the ONE transition every caller must route through this table (Timeline
   // used to assign planJump's static intent straight to `pauseReasonRef`,
   // which meant a jump was the only place that could silently overwrite a
@@ -64,12 +64,12 @@ export function nextPause({ pauseReason, attached, inspecting, intent }: PauseIn
     case 'scrollAwayFromTop':
       return pauseReason === 'none' ? idle('auto') : idle(pauseReason)
     case 'reattached':
-      // M1: inspection dominance applies here exactly like scrollPinnedTop —
+      // Inspection dominance applies here exactly like scrollPinnedTop —
       // catching the tail while a row is expanded must never flush/merge the
       // buffer out from under the reader's open inspection. Nothing else
       // about the decision runs until the inspection closes.
       if (inspecting) return idle(pauseReason)
-      // M2: an explicit pause is never implicitly lifted — same rule
+      // An explicit pause is never implicitly lifted — same rule
       // `lastInspectionClosed` states below for the identical pauseReason.
       // Reattaching re-earns nothing for an EXPLICIT pause; only a
       // transient 'auto' pause (or none) is dropped, with a flush, since
@@ -77,9 +77,9 @@ export function nextPause({ pauseReason, attached, inspecting, intent }: PauseIn
       if (pauseReason === 'explicit') return idle('explicit')
       return { pause: 'none', flush: true, jumpToNow: false, scrollTop: false }
     case 'jump':
-      // H2: an explicit pause survives any jump — the strongest "don't move
+      // An explicit pause survives any jump — the strongest "don't move
       // things" signal in the table, and a jump does not lift it (mirrors
-      // reattached's own M2 rule immediately above). Every other pauseReason
+      // reattached's own rule immediately above). Every other pauseReason
       // ('auto' or 'none') defers entirely to the jump's own static intent,
       // discarding whatever transient state was active before it.
       return idle(pauseReason === 'explicit' ? 'explicit' : (intent ?? 'none'))

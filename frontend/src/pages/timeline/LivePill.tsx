@@ -72,7 +72,7 @@ export function PlayPauseToggle({
   onClick,
 }: {
   paused: boolean
-  // M3: true when `paused` is lit ONLY because a row is open for inspection
+  // True when `paused` is lit ONLY because a row is open for inspection
   // — the actual pause reason is 'none', so the click still PAUSES from
   // here (toggleClick's 'none' branch), it does not resume anything. The
   // default aria-label ("resume live updates") would tell a screen reader

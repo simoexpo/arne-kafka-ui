@@ -37,7 +37,7 @@ export function useLiveTail(
   deps: UseLiveTailDeps,
 ): { alive: boolean; error: ApiError | Error | null } {
   const [alive, setAlive] = useState(true)
-  // M5: a structured ApiError (or, for a transport failure, a plain Error)
+  // A structured ApiError (or, for a transport failure, a plain Error)
   // rather than a pre-formatted string — same shape as useTimelinePage's
   // `state.error` — so the consumer renders it through `describeError` for
   // product-voice wording instead of the raw wire code/message.

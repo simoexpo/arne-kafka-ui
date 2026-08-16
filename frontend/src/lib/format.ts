@@ -75,7 +75,7 @@ export function formatCount(n: number): string {
   return `${(n / 1_000_000_000).toFixed(1)}B`
 }
 
-// I5: a topic's message-count estimate can be missing for two different
+// A topic's message-count estimate can be missing for two different
 // reasons — an internal topic (skipped on purpose, `estimate_error` null) or
 // a genuine per-partition watermark-fetch failure (`estimate_error` set).
 // Both render '—'; only the latter gets this tooltip, attributing the gap to

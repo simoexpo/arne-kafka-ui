@@ -112,10 +112,11 @@ export function Timeline({
   // at issue time; consumed once, by runPage's own synchronous `onPageEnd`
   // callback, as `insertPage`'s `startPositions` argument.
   const pendingStartPositionsRef = useRef<Record<number, number> | null>(null)
-  // Only meaningful for a back-direction anchor bootstrap (the store's
-  // M-new anchor-awareness fix — see createSlidingWindowStore's `insertPage`
-  // doc comment): whether THIS bootstrap, if it turns out to be one, should
-  // claim the window is attached to the tail. Every anchor call site below
+  // Only meaningful for a back-direction anchor bootstrap (see
+  // createSlidingWindowStore's `insertPage` doc comment for the
+  // anchor-awareness mechanism): whether THIS bootstrap, if it turns out
+  // to be one, should claim the window is attached to the tail. Every
+  // anchor call site below
   // passes this explicitly (never relies on the store's own default, which
   // exists only for that module's unit-test ergonomics).
   const pendingAttachRef = useRef(false)
@@ -640,7 +641,7 @@ export function Timeline({
       liveBufferRef.current.clear()
       bottomTrimmedSinceRef.current = false
       topTrimmedSinceRef.current = false
-      // H1: the whole window is gone — any open inspection is gone with it
+      // The whole window is gone — any open inspection is gone with it
       // (its row no longer exists in `rows()`, and its `onToggle` no longer
       // exists to ever close it). Left in place, `inspectingRef` would stay
       // true forever: useLiveTail's merge gate (`!inspectingRef.current`)
@@ -700,7 +701,7 @@ export function Timeline({
   // applied text instead is idempotent: re-running this effect any number of
   // times for the same text does nothing at all.
   const appliedFilterRef = useRef('')
-  // H3: the debounce timer's own id, so a jump landing mid-debounce can
+  // The debounce timer's own id, so a jump landing mid-debounce can
   // cancel it directly (see handleJump) — this effect's own cleanup only
   // fires on the NEXT [filterText] change or unmount, neither of which a
   // jump causes. Without this, a filter typed just before a jump could still
@@ -892,7 +893,7 @@ export function Timeline({
   // is set false immediately here (matching the store's own clear()) and only re-confirmed true by the page-end
   // effect once the fresh anchor page actually lands — see `attached`'s own comment for why never optimistically.
   //
-  // H2: every OTHER pause transition in this component routes through
+  // Every OTHER pause transition in this component routes through
   // `nextPause` — this one used to assign `plan.pauseIntent` straight to
   // `pauseReasonRef`, the only place that could silently overwrite a user's
   // EXPLICIT pause (planJump has no input for the CURRENT pause reason to
@@ -902,7 +903,7 @@ export function Timeline({
   const handleJump = (target: JumpTarget) => {
     const plan = planJump(target, PAGE_LIMIT)
     resetWindow(plan.highlight)
-    // H3: a jump discards whatever the filter box's own pending debounce was
+    // A jump discards whatever the filter box's own pending debounce was
     // about to do — see filterDebounceIdRef's own comment on why this can't
     // just rely on the effect's own cleanup.
     if (filterDebounceIdRef.current !== null) {
@@ -965,12 +966,13 @@ export function Timeline({
   // opened a forward cursor — reusing the same top-pin check that already
   // drives live-pause auto-resume.
   //
-  // When the continue affordance (I2's partial-match budget stop, or the
+  // When the continue affordance (a partial-match budget stop, or the
   // iteration-cap stop) is showing for a direction, reaching that edge must
   // drive `continueScan()` instead of `loadOlder`/`loadNewer` directly — those
   // reset the gesture (resetGesture defaults to resetIteration:true), which
   // would silently drop the running scanned/matches totals the continue
-  // affordance is displaying, exactly the "silent stop" I2 exists to avoid.
+  // affordance is displaying — exactly the silent stop this affordance
+  // exists to avoid.
   const handleScroll = (scrollTop: number, scrollHeight: number, clientHeight: number) => {
     // The event that confirms stability is itself consumed here, never falling through to pagination below.
     if (settlingRef.current !== null) {
