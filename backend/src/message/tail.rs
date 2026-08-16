@@ -108,6 +108,15 @@ fn drive_tail_poll(
     Ok(())
 }
 
+/// The poll task's `JoinError` reported as a tail event. Never interpolates
+/// `join_err` directly (its `Display` includes any panic payload verbatim —
+/// see `ApiError::task_join`'s own doc comment for the same reasoning): the
+/// full diagnostic goes to the log, the client gets a fixed sentence.
+fn tail_join_error(join_err: tokio::task::JoinError) -> ApiError {
+    tracing::error!(error = %join_err, "tail poll task failed to join");
+    ApiError::internal("the live stream stopped unexpectedly".to_string())
+}
+
 /// Builds the tail consumer, assigns it to the end of every partition in
 /// `watermarks`, and drives the poll loop. Both `.create()` and `.assign()`
 /// failures are reported as an `Err`, never swallowed into a silent early
@@ -190,9 +199,7 @@ pub async fn run(
                 let _ = tx.send(TailEvent::from(&err)).await;
             }
             Err(join_err) => {
-                // Product voice: the internal `JoinError` diagnostic stays
-                // subdued in parens, never the headline vocabulary.
-                let err = ApiError::internal(format!("the live stream stopped unexpectedly ({join_err})"));
+                let err = tail_join_error(join_err);
                 let _ = tx.send(TailEvent::from(&err)).await;
             }
         }
@@ -385,5 +392,18 @@ mod tests {
         assert_eq!(json["cluster"], "prod");
         assert_eq!(json["retriable"], true);
         assert!(json["message"].as_str().unwrap().contains("boom"));
+    }
+
+    /// The poll task's `JoinError` (including any panic payload) must never
+    /// reach the wire — only a fixed, generic sentence; the diagnostic goes
+    /// to the log instead.
+    #[tokio::test]
+    async fn tail_join_error_never_leaks_the_panic_payload() {
+        let handle = tokio::spawn(async { panic!("some very specific internal detail nobody should see") });
+        let join_err = handle.await.unwrap_err();
+        let err = tail_join_error(join_err);
+        assert_eq!(err.message, "the live stream stopped unexpectedly");
+        assert!(!err.message.contains("specific internal detail"));
+        assert!(!err.message.to_lowercase().contains("panicked"));
     }
 }

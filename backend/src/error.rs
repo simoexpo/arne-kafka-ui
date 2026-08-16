@@ -59,10 +59,14 @@ impl ApiError {
     /// A `spawn_blocking`/`JoinHandle` failed to join (the blocking task
     /// panicked or was cancelled) — never a Kafka-side failure, so this is
     /// always `internal`, not `kafka`. Product voice: never say "task join"
-    /// or `JoinError` on the wire — this is an internal fault, not anything
-    /// the user's request did wrong.
+    /// or `JoinError` on the wire, and never interpolate `e` directly —
+    /// its `Display` is `"task {id} panicked with message {payload:?}"` /
+    /// `"task {id} was cancelled"`, which would put an arbitrary panic
+    /// payload straight onto the wire. The full diagnostic goes to the log;
+    /// the client gets a fixed, generic sentence.
     pub fn task_join(e: tokio::task::JoinError) -> Self {
-        Self::internal(format!("something went wrong completing the request ({e})"))
+        tracing::error!(error = %e, "background task failed to join");
+        Self::internal("something went wrong completing the request".to_string())
     }
 }
 
@@ -110,5 +114,20 @@ mod tests {
         let body = res.into_body().collect().await.unwrap().to_bytes();
         let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(v["retriable"], true);
+    }
+
+    /// The doc comment on `task_join` claims the raw `JoinError` never
+    /// reaches the wire. `JoinError`'s own `Display` (tokio) interpolates
+    /// the panic payload verbatim — so a real panic message must never
+    /// survive into `ApiError.message`, only a fixed, generic sentence.
+    #[tokio::test]
+    async fn task_join_never_leaks_the_panic_payload_onto_the_wire() {
+        let handle = tokio::spawn(async { panic!("some very specific internal detail nobody should see") });
+        let join_err = handle.await.unwrap_err();
+        let err = ApiError::task_join(join_err);
+        assert_eq!(err.message, "something went wrong completing the request");
+        assert!(!err.message.contains("specific internal detail"));
+        assert!(!err.message.to_lowercase().contains("panicked"));
+        assert!(!err.message.to_lowercase().contains("task"));
     }
 }
