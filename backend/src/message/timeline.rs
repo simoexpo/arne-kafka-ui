@@ -442,17 +442,6 @@ fn chunk_display_order(matches: Vec<MessageOut>, direction: Direction) -> Vec<Me
 /// records.
 const CHUNK_SPAN: u64 = 5_000;
 
-/// Decodes a single record — a thin wrapper over `fetch::to_message_out`'s
-/// batch API (mirrors `search.rs`'s `one_message_out`), used because
-/// filtering must decode-then-test one record at a time as the merge walks
-/// forward (see `run_page`'s doc comment, step 3): a filter's verdict on a
-/// record can only be known after decoding it, and the loop's stopping
-/// condition (accumulated matches reaching `limit`) depends on that verdict
-/// record-by-record, not on a batch decoded after the fact.
-async fn decode_one(record: RawRecord, sr: Option<&super::schema_registry::SchemaRegistry>) -> MessageOut {
-    fetch::to_message_out(vec![record], sr).await.pop().expect("one in, one out")
-}
-
 /// Truncates `windows` — kept in their original order, which is
 /// `cur_positions`' own stable order — to a prefix whose total span does
 /// not exceed `budget_cap`, dropping any windows past that point entirely
@@ -767,7 +756,7 @@ pub fn run_page(
                 taken_max[i] = Some(taken_max[i].map_or(offset, |m| m.max(offset)));
                 any_taken = true;
 
-                let decoded = decode_one(rec, handle.schema_registry.as_deref()).await;
+                let decoded = fetch::to_one_message_out(rec, handle.schema_registry.as_deref()).await;
                 let is_match = filter.as_ref().is_none_or(|f| super::filter::matches(f, &decoded));
                 if is_match {
                     chunk_matches.push(decoded);

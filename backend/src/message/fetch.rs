@@ -5,7 +5,7 @@ use crate::cluster::{build_client_config, ClusterHandle, ADMIN_TIMEOUT};
 use crate::config::ClusterConfig;
 use crate::error::ApiError;
 use rdkafka::consumer::{BaseConsumer, Consumer};
-use rdkafka::message::{Headers, Message};
+use rdkafka::message::{BorrowedMessage, Headers, Message};
 use rdkafka::topic_partition_list::TopicPartitionList;
 use rdkafka::Offset;
 use std::collections::{HashMap, HashSet};
@@ -43,6 +43,27 @@ pub struct RawRecord {
     pub key: Option<Vec<u8>>,
     pub value: Option<Vec<u8>>,
     pub headers: Vec<(String, Vec<u8>)>,
+}
+
+impl RawRecord {
+    /// Builds a `RawRecord` from a borrowed rdkafka message — the one place
+    /// that maps headers/timestamp/key/value, shared by every poll loop that
+    /// reads real messages (this module's own scan loop below, and
+    /// `tail::run_consumer_blocking`).
+    pub fn from_borrowed(msg: &BorrowedMessage) -> Self {
+        let headers = msg
+            .headers()
+            .map(|hs| hs.iter().map(|h| (h.key.to_string(), h.value.unwrap_or_default().to_vec())).collect())
+            .unwrap_or_default();
+        RawRecord {
+            partition: msg.partition(),
+            offset: msg.offset(),
+            timestamp_ms: msg.timestamp().to_millis(),
+            key: msg.key().map(<[u8]>::to_vec),
+            value: msg.payload().map(<[u8]>::to_vec),
+            headers,
+        }
+    }
 }
 
 /// Fetches fresh per-partition low/high watermarks for `topic`. Shared by
@@ -150,20 +171,9 @@ pub fn fetch_ranges_blocking(
                     done.insert(p, true);
                     continue;
                 }
-                let headers = msg.headers().map(|hs| {
-                    hs.iter()
-                        .map(|h| (h.key.to_string(), h.value.unwrap_or_default().to_vec()))
-                        .collect()
-                }).unwrap_or_default();
-                out.push(RawRecord {
-                    partition: p,
-                    offset: msg.offset(),
-                    timestamp_ms: msg.timestamp().to_millis(),
-                    key: msg.key().map(<[u8]>::to_vec),
-                    value: msg.payload().map(<[u8]>::to_vec),
-                    headers,
-                });
-                if msg.offset() + 1 >= end {
+                let offset = msg.offset();
+                out.push(RawRecord::from_borrowed(&msg));
+                if offset + 1 >= end {
                     done.insert(p, true);
                 }
             }
@@ -200,20 +210,27 @@ pub fn fetch_one_record_blocking(
     Ok(outcome.records.into_iter().next())
 }
 
+/// Decodes exactly one record — the shared decode step both the batch API
+/// below and a caller that must decode-then-test one record at a time (the
+/// timeline engine's filtered merge, tail's per-message stream) build on.
+pub async fn to_one_message_out(r: RawRecord, sr: Option<&SchemaRegistry>) -> MessageOut {
+    MessageOut {
+        partition: r.partition,
+        offset: r.offset,
+        timestamp_ms: r.timestamp_ms,
+        key: decode::decode_payload(r.key.as_deref(), sr).await,
+        value: decode::decode_payload(r.value.as_deref(), sr).await,
+        headers: r.headers.into_iter().map(|(key, v)| HeaderOut {
+            key,
+            value: String::from_utf8_lossy(&v).into_owned(),
+        }).collect(),
+    }
+}
+
 pub async fn to_message_out(records: Vec<RawRecord>, sr: Option<&SchemaRegistry>) -> Vec<MessageOut> {
     let mut out = Vec::with_capacity(records.len());
     for r in records {
-        out.push(MessageOut {
-            partition: r.partition,
-            offset: r.offset,
-            timestamp_ms: r.timestamp_ms,
-            key: decode::decode_payload(r.key.as_deref(), sr).await,
-            value: decode::decode_payload(r.value.as_deref(), sr).await,
-            headers: r.headers.into_iter().map(|(key, v)| HeaderOut {
-                key,
-                value: String::from_utf8_lossy(&v).into_owned(),
-            }).collect(),
-        });
+        out.push(to_one_message_out(r, sr).await);
     }
     out
 }

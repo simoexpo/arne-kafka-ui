@@ -2,7 +2,6 @@ use super::{fetch, MessageOut};
 use crate::cluster::ClusterHandle;
 use crate::error::ApiError;
 use rdkafka::consumer::{BaseConsumer, Consumer};
-use rdkafka::message::{Headers, Message};
 use rdkafka::topic_partition_list::TopicPartitionList;
 use rdkafka::{ClientConfig, Offset};
 use serde::Serialize;
@@ -70,21 +69,6 @@ enum PollOutcome {
     Empty,
 }
 
-fn build_record(msg: &rdkafka::message::BorrowedMessage) -> fetch::RawRecord {
-    let headers = msg
-        .headers()
-        .map(|hs| hs.iter().map(|h| (h.key.to_string(), h.value.unwrap_or_default().to_vec())).collect())
-        .unwrap_or_default();
-    fetch::RawRecord {
-        partition: msg.partition(),
-        offset: msg.offset(),
-        timestamp_ms: msg.timestamp().to_millis(),
-        key: msg.key().map(<[u8]>::to_vec),
-        value: msg.payload().map(<[u8]>::to_vec),
-        headers,
-    }
-}
-
 /// Drives the tail poll loop until `cancel` is set or a stall is declared.
 ///
 /// A stall is 10s (`stall_timeout`) elapsed since the last successfully
@@ -143,7 +127,7 @@ fn run_consumer_blocking(
 
     drive_tail_poll(
         || match consumer.poll(Duration::from_millis(200)) {
-            Some(Ok(msg)) => PollOutcome::Message(build_record(&msg)),
+            Some(Ok(msg)) => PollOutcome::Message(fetch::RawRecord::from_borrowed(&msg)),
             Some(Err(e)) => PollOutcome::Error(e.to_string()),
             None => PollOutcome::Empty,
         },
@@ -191,7 +175,7 @@ pub async fn run(
         });
 
         while let Some(record) = raw_rx.recv().await {
-            let msg = fetch::to_message_out(vec![record], sr.as_deref()).await.pop().expect("one in one out");
+            let msg = fetch::to_one_message_out(record, sr.as_deref()).await;
             if tx.send(TailEvent::Message(Box::new(msg))).await.is_err() {
                 cancelled.store(true, Ordering::SeqCst);
                 break;
