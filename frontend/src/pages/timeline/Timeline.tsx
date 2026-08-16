@@ -17,6 +17,7 @@ import { useTimeDisplayMode } from '../../lib/timeDisplayMode'
 import { createLiveBuffer } from '../../lib/timeline/liveBuffer'
 import { planJump } from '../../lib/timeline/jumpPlan'
 import type { AnchorContext, PauseReason } from '../../lib/timeline/model'
+import { nextPause } from '../../lib/timeline/pauseMachine'
 import { classifyScroll } from '../../lib/timeline/scrollZones'
 import { stepSettling, type SettlingState } from '../../lib/timeline/settling'
 import { useFallingEdge } from './useFallingEdge'
@@ -482,25 +483,14 @@ export function Timeline({
           // nothing (delta would be exactly 0 anyway) and the viewport must
           // be left strictly alone.
           if (backAnchor !== null && outcome.trimmedTop > 0) pendingAnchorRef.current = backAnchor
-          // "Just became store-attached" catch-up: covers BOTH a detached
-          // window's forward page catching the tail (v1.3's reattach) AND
-          // an anchor bootstrap ('now', or mount) whose own attach:true just
-          // landed — see `attached`'s own comment above for why UI-attached
-          // is only ever flipped true here, in direct response to the
-          // store's OWN confirmed attachment, never ahead of it.
-          //
-          // Fix round 1, C1: gates on `outcome.attached` (the store's REAL
-          // attachment truth), never on `edges().top === null` — that reads
-          // null for a SECOND, unrelated reason too (an empty or otherwise
-          // incomplete top map, e.g. a zero-row anchor page under the
-          // empty-page contract), which would otherwise make the UI believe
-          // a genuinely-detached historical window was attached, and go on
-          // to call `insertLive` on it — throwing (see the store's own
-          // precondition doc comment).
+          // Gates on `outcome.attached` (the store's real attachment truth), never on `edges().top === null` —
+          // that reads null for an unrelated reason too (an incomplete top map, e.g. a zero-row anchor page),
+          // which would wrongly call insertLive on a still-detached store (see its own throw precondition).
           if (!attachedRef.current && outcome.attached) {
             setAttached(true)
-            flushBuffer()
-            pauseReasonRef.current = pauseReasonRef.current === 'explicit' ? 'explicit' : 'none'
+            const decision = nextPause({ pauseReason: pauseReasonRef.current, attached: false }, 'reattached')
+            if (decision.flush) flushBuffer()
+            pauseReasonRef.current = decision.pause
           }
           bump()
           // Direction-based staleness refresh (see bottomTrimmedSinceRef/
@@ -777,46 +767,26 @@ export function Timeline({
   // just hasn't matched anything yet) skips the merge entirely.
   const rows = pageRowsRef.current.length > 0 ? storeRef.current.previewWithOverlay(pageRowsRef.current) : storeRef.current.rows()
 
-  // Clicking the "▲ n new" pill: while DETACHED, flushing in place would
-  // recreate the false seam the historical window exists to avoid — so
-  // instead the pill jumps to now (fresh latest page, scrolled to top, live
-  // resumed), abandoning the historical reading position by design (an
-  // explicit click). While ATTACHED, it flushes and scrolls to the top —
-  // the click means "show me the new messages", and flushing without
-  // moving would just shift content invisibly above the viewport. It only
-  // resumes when the pause was automatic — an explicit pause stays paused
-  // (the pill clears what had built up so far).
   const handlePillClick = () => {
-    if (!attachedRef.current) {
+    const decision = nextPause({ pauseReason: pauseReasonRef.current, attached: attachedRef.current }, 'pillClick')
+    if (decision.jumpToNow) {
       handleJump({ kind: 'now' })
       return
     }
-    flushBuffer()
-    listRef.current?.scrollToEdge('top')
-    if (pauseReasonRef.current === 'auto') pauseReasonRef.current = 'none'
+    if (decision.flush) flushBuffer()
+    if (decision.scrollTop) listRef.current?.scrollToEdge('top')
+    pauseReasonRef.current = decision.pause
     bump()
   }
 
-  // The explicit play/pause toggle: while DETACHED the toggle is only ever
-  // shown lit paused (see the header render below — live rendering is off
-  // by definition there), so the only honest click is the same jump-to-now
-  // the pill offers (design spec v1.3, owner ruling 2026-08-15) — flushing
-  // in place would recreate the false seam a historical window exists to
-  // avoid, same reasoning as handlePillClick. While ATTACHED: pausing
-  // always forces 'explicit' (overriding whatever auto/none state was in
-  // effect); un-pausing always flushes + resumes fully, regardless of how
-  // it got paused.
   const handlePlayPauseToggle = () => {
-    if (!attachedRef.current) {
+    const decision = nextPause({ pauseReason: pauseReasonRef.current, attached: attachedRef.current }, 'toggleClick')
+    if (decision.jumpToNow) {
       handleJump({ kind: 'now' })
       return
     }
-    if (pauseReasonRef.current === 'none') {
-      pauseReasonRef.current = 'explicit'
-    } else {
-      flushBuffer()
-      pauseReasonRef.current = 'none'
-    }
+    if (decision.flush) flushBuffer()
+    pauseReasonRef.current = decision.pause
     bump()
   }
 
@@ -898,18 +868,22 @@ export function Timeline({
     }
     const { pinnedTop, nearBottom } = classifyScroll({ scrollTop, scrollHeight, clientHeight })
     if (pinnedTop) {
-      if (attachedRef.current && pauseReasonRef.current === 'auto') {
-        flushBuffer()
-        pauseReasonRef.current = 'none'
+      const decision = nextPause({ pauseReason: pauseReasonRef.current, attached: attachedRef.current }, 'scrollPinnedTop')
+      if (decision.pause !== pauseReasonRef.current) {
+        if (decision.flush) flushBuffer()
+        pauseReasonRef.current = decision.pause
         bump()
       }
       if (!state.loading) {
         if (continueDirection === 'forward') continueScan()
         else loadNewer()
       }
-    } else if (pauseReasonRef.current === 'none') {
-      pauseReasonRef.current = 'auto'
-      bump()
+    } else {
+      const decision = nextPause({ pauseReason: pauseReasonRef.current, attached: attachedRef.current }, 'scrollAwayFromTop')
+      if (decision.pause !== pauseReasonRef.current) {
+        pauseReasonRef.current = decision.pause
+        bump()
+      }
     }
     if (nearBottom && !state.loading) {
       if (continueDirection === 'back') continueScan()
