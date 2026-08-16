@@ -4,10 +4,11 @@ import { Link, useParams } from '@tanstack/react-router'
 import { getTopics } from '../api/client'
 import { CopyButton } from '../components/CopyButton'
 import { FilterInput } from '../components/FilterInput'
+import { MessageEstimateCell } from '../components/MessageEstimateCell'
 import { Panel } from '../components/Panel'
 import { StalenessChip } from '../components/StalenessChip'
 import { Switch } from '../components/Switch'
-import { estimateErrorTitle, formatBytes, formatCount } from '../lib/format'
+import { formatBytes } from '../lib/format'
 
 export function TopicsView({ cluster }: { cluster: string }) {
   const [filter, setFilter] = useState('')
@@ -67,15 +68,7 @@ export function TopicsView({ cluster }: { cluster: string }) {
                 <td>{t.partitions}</td>
                 <td>{t.replication_factor}</td>
                 <td>
-                  {t.message_estimate !== null ? (
-                    formatCount(t.message_estimate)
-                  ) : t.estimate_error !== null ? (
-                    <span title={estimateErrorTitle(t.estimate_error)} className="cursor-help text-zinc-400 underline decoration-dotted">
-                      —
-                    </span>
-                  ) : (
-                    '—'
-                  )}
+                  <MessageEstimateCell estimate={t.message_estimate} error={t.estimate_error} />
                 </td>
                 <td className="text-zinc-400">{t.size_bytes === null ? '—' : formatBytes(t.size_bytes)}</td>
               </tr>

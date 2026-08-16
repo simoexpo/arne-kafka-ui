@@ -59,7 +59,7 @@ describe('TopicsView', () => {
           partitions: 2,
           replication_factor: 1,
           message_estimate: null,
-          estimate_error: 'fetch watermarks: broker transport failure',
+          estimate_error: 'counting messages timed out',
           size_bytes: 100,
           internal: false,
         },
@@ -70,7 +70,7 @@ describe('TopicsView', () => {
     await screen.findByText('flaky')
     const row = screen.getByText('flaky').closest('tr')!
     const dash = within(row).getByText('—')
-    expect(dash).toHaveAttribute('title', "Kafka couldn't provide a count — fetch watermarks: broker transport failure")
+    expect(dash).toHaveAttribute('title', "Kafka couldn't provide a count — counting messages timed out")
   })
 
   it('the size-only "—" carries no estimate-error tooltip', async () => {

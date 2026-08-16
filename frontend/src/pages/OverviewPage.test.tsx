@@ -77,7 +77,7 @@ describe('OverviewView', () => {
           partitions: 1,
           replication_factor: 1,
           message_estimate: null,
-          estimate_error: 'fetch watermarks: broker transport failure',
+          estimate_error: 'counting messages timed out',
           size_bytes: null,
           internal: false,
         },
@@ -88,7 +88,7 @@ describe('OverviewView', () => {
     const row = await screen.findByTestId('top-topic')
     expect(within(row).getByText('—')).toHaveAttribute(
       'title',
-      "Kafka couldn't provide a count — fetch watermarks: broker transport failure",
+      "Kafka couldn't provide a count — counting messages timed out",
     )
   })
 

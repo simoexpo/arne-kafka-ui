@@ -2,9 +2,9 @@ import { useQuery } from '@tanstack/react-query'
 import { Stat } from '../components/Stat'
 import { useParams } from '@tanstack/react-router'
 import { getOverview, getTopics } from '../api/client'
+import { MessageEstimateCell } from '../components/MessageEstimateCell'
 import { Panel } from '../components/Panel'
 import { StalenessChip } from '../components/StalenessChip'
-import { estimateErrorTitle, formatCount } from '../lib/format'
 
 export function OverviewView({ cluster }: { cluster: string }) {
   const overview = useQuery({
@@ -63,15 +63,7 @@ export function OverviewView({ cluster }: { cluster: string }) {
                 <td className="py-1 font-mono">{t.name}</td>
                 <td>{t.partitions}</td>
                 <td>
-                  {t.message_estimate !== null ? (
-                    formatCount(t.message_estimate)
-                  ) : t.estimate_error !== null ? (
-                    <span title={estimateErrorTitle(t.estimate_error)} className="cursor-help text-zinc-400 underline decoration-dotted">
-                      —
-                    </span>
-                  ) : (
-                    '—'
-                  )}
+                  <MessageEstimateCell estimate={t.message_estimate} error={t.estimate_error} />
                 </td>
               </tr>
             ))}
