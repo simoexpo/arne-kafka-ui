@@ -7,7 +7,7 @@ import { Panel } from '../components/Panel'
 import { StalenessChip } from '../components/StalenessChip'
 import { ConfigTab } from './ConfigTab'
 import { ConsumersTab } from './ConsumersTab'
-import { MessagesTab } from './MessagesTab'
+import { Timeline } from './timeline/Timeline'
 
 const TABS = ['Messages', 'Partitions', 'Consumers', 'Config'] as const
 type Tab = (typeof TABS)[number]
@@ -55,7 +55,17 @@ export function TopicDetailView({ cluster, topic }: { cluster: string; topic: st
         ))}
       </div>
       <div className="min-h-0 flex-1">
-        {tab === 'Messages' && <MessagesTab cluster={cluster} topic={topic} partitionIds={detail.data?.partitions.map((p) => p.id)} />}
+        {/* Keyed on cluster/topic so switching topics mounts a fresh
+            Timeline (fresh timelineStore + page/tail streams) instead of
+            reusing stale state across topics. */}
+        {tab === 'Messages' && (
+          <Timeline
+            key={`${cluster}/${topic}`}
+            cluster={cluster}
+            topic={topic}
+            partitionIds={detail.data?.partitions.map((p) => p.id)}
+          />
+        )}
         {tab === 'Partitions' && (
           <div className="h-full overflow-y-auto">
             <Panel
