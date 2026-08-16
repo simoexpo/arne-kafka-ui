@@ -11,7 +11,11 @@ pub enum Filter {
     /// value side keeps the same decode-error exclusion as `ValueContains`
     /// (a base64-of-raw-bytes blob is not real content); the key side
     /// matches whenever the key decoded at all (a `None` key never matches,
-    /// same convention as `KeyEquals`/`KeyContains`).
+    /// same convention as `KeyEquals`/`KeyContains`). Holds the needle
+    /// already lower-cased at parse time (`Filter::parse`), not the raw
+    /// query text — `matches` is called once per decoded record in the
+    /// merge loop, so lower-casing here once beats re-lowering on every
+    /// record.
     Contains(String),
 }
 
@@ -21,7 +25,7 @@ impl Filter {
             "key_eq" => Ok(Filter::KeyEquals(q.to_string())),
             "key_contains" => Ok(Filter::KeyContains(q.to_string())),
             "value_contains" => Ok(Filter::ValueContains(q.to_string())),
-            "contains" => Ok(Filter::Contains(q.to_string())),
+            "contains" => Ok(Filter::Contains(q.to_lowercase())),
             "json_eq" => path
                 .map(|p| Filter::JsonPathEquals { path: p.to_string(), value: q.to_string() })
                 .ok_or_else(|| "filter json_eq requires a path parameter".to_string()),
@@ -70,10 +74,9 @@ pub fn matches(filter: &Filter, msg: &MessageOut) -> bool {
                     .unwrap_or(false)
         }),
         Filter::Contains(q) => {
-            let q = q.to_lowercase();
-            let key_hit = msg.key.as_ref().is_some_and(|k| k.text.to_lowercase().contains(&q));
+            let key_hit = msg.key.as_ref().is_some_and(|k| k.text.to_lowercase().contains(q.as_str()));
             let value_hit = msg.value.as_ref().is_some_and(|v| {
-                v.encoding != Encoding::DecodeError && v.text.to_lowercase().contains(&q)
+                v.encoding != Encoding::DecodeError && v.text.to_lowercase().contains(q.as_str())
             });
             key_hit || value_hit
         }
@@ -174,9 +177,12 @@ mod tests {
 
     #[test]
     fn contains_is_case_insensitive() {
+        // Built via `Filter::parse`, like every real call site — `Contains`
+        // holds its needle already lower-cased (see its own doc comment), so
+        // a query built any other way isn't guaranteed to be case-insensitive.
         let m = msg(Some("Order-42"), "Hello KAFKA World", Encoding::Utf8);
-        assert!(matches(&Filter::Contains("ORDER".into()), &m));
-        assert!(matches(&Filter::Contains("kafka".into()), &m));
+        assert!(matches(&Filter::parse("contains", "ORDER", None).unwrap(), &m));
+        assert!(matches(&Filter::parse("contains", "kafka", None).unwrap(), &m));
     }
 
     #[test]
