@@ -177,13 +177,19 @@ interface SlidingWindowStore {
    */
   edges(): { top: string | null; bottom: string | null }
   /**
-   * The store's real, ungasked attachment state (fix round 1, C1) — use
-   * this (or `InsertOutcome.attached`) to decide whether the window is
-   * genuinely attached to the tail; `edges().top === null` is NOT a safe
+   * The store's real, ungasked attachment state (fix round 1, C1) — same
+   * value as `InsertOutcome.attached`; `edges().top === null` is NOT a safe
    * proxy for it (see `InsertOutcome.attached`'s own doc comment).
+   *
+   * Test/introspection surface only: every production call site already has
+   * an `InsertOutcome` in hand and reads `.attached` off that instead — see
+   * `Timeline.tsx`'s own commit path. Kept on the interface for the test
+   * suite's convenience (asserting attachment without threading an outcome
+   * through).
    */
   isAttached(): boolean
   clear(): void
+  /** Test/introspection surface only — no production caller (Timeline.tsx reads `rows().length`). */
   totalCount(): number
 }
 
