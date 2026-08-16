@@ -994,6 +994,9 @@ export function Timeline({
       case 'beginning':
         anchorContextRef.current = 'beginning'
         pauseReasonRef.current = 'auto'
+        // attach: false is a no-op here (opts.attach only ever matters on a
+        // back-direction anchor page — see insertPage's own doc comment) —
+        // passed anyway so every call site states its intent explicitly.
         runPage('forward', withFilter({ direction: 'forward', limit: PAGE_LIMIT, anchor: 'beginning' }), {
           resetIteration: true,
           attach: false,
@@ -1009,6 +1012,7 @@ export function Timeline({
         // used to be.
         anchorContextRef.current = 'default'
         pauseReasonRef.current = 'auto'
+        // attach: false is a no-op here — see the 'beginning' case above.
         runPage(
           'forward',
           withFilter({ direction: 'forward', limit: PAGE_LIMIT, anchor: 'offset', partition: target.partition, offset: target.offset }),
@@ -1022,6 +1026,7 @@ export function Timeline({
         // direction, so no backend change was needed here.
         anchorContextRef.current = 'default'
         pauseReasonRef.current = 'auto'
+        // attach: false is a no-op here — see the 'beginning' case above.
         runPage('forward', withFilter({ direction: 'forward', limit: PAGE_LIMIT, anchor: 'timestamp', ts_ms: target.ts_ms }), {
           resetIteration: true,
           attach: false,
