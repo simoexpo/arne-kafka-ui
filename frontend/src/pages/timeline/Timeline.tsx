@@ -70,23 +70,11 @@ type Direction = TimelineDirection
 // itself resumes it.
 type PauseReason = 'none' | 'auto' | 'explicit'
 
-// Which anchor the currently loaded window was bootstrapped from (task 3;
-// supersedes the v1.3-era 'default' | 'beginning' pair). Carries the FULL
-// anchor params, not just a kind tag: a settled filter change re-reads from
-// this same context (unchanged from v1.3 — only 'beginning' gets its own
-// re-anchor, everything else falls back to back/latest). Task 3 also used
-// this to re-derive `loadNewer`'s forward-anchor fallback for a BACK-
-// anchored offset/timestamp bootstrap whose top map was never seeded — that
-// fallback was deleted (2026-08-15 review ruling) as unreachable, untested
-// dead code once 'offset'/'timestamp' jumps became forward-anchored
-// bootstraps themselves (see `handleJump`'s 'offset'/'timestamp' cases and
-// `loadNewer`'s own comment); a future call site reintroducing a
-// back-anchored bootstrap would need to re-derive it from this context.
-type AnchorContext =
-  | { kind: 'default' }
-  | { kind: 'beginning' }
-  | { kind: 'offset'; partition: number; offset: number }
-  | { kind: 'timestamp'; ts_ms: number }
+// Which anchor context the currently loaded window was bootstrapped from —
+// only ever consulted as beginning-vs-not: a settled filter change re-reads
+// from 'beginning' when that's the current context, and falls back to
+// back/latest for every other jump kind (including offset/timestamp jumps).
+type AnchorContext = 'default' | 'beginning'
 
 export function Timeline({
   cluster,
@@ -133,7 +121,7 @@ export function Timeline({
   // auto-continued page — must resend it via withFilter for the filter to
   // stay in effect until the user changes or clears it.
   const activeFilterApiRef = useRef<FilterQueryApi | null>(null)
-  const anchorContextRef = useRef<AnchorContext>({ kind: 'default' })
+  const anchorContextRef = useRef<AnchorContext>('default')
 
   const pendingDirectionRef = useRef<Direction | null>(null)
   // Task 3: each in-flight page's own rows, accumulated per-generation
@@ -669,7 +657,7 @@ export function Timeline({
   // re-reads back/latest, same as no jump at all — unchanged from v1.3.
   const baseAnchorParams = useCallback(
     (): TimelinePageParams =>
-      anchorContextRef.current.kind === 'beginning'
+      anchorContextRef.current === 'beginning'
         ? { direction: 'forward', limit: PAGE_LIMIT, anchor: 'beginning' }
         : { direction: 'back', limit: PAGE_LIMIT, anchor: 'latest' },
     [],
@@ -705,12 +693,12 @@ export function Timeline({
       // timestamp jump reads from latest, not from the old jump target) —
       // clears any stale offset/timestamp memory a later loadNewer
       // fallback (see its own comment) might otherwise wrongly reuse.
-      if (anchorContextRef.current.kind !== 'beginning') anchorContextRef.current = { kind: 'default' }
+      if (anchorContextRef.current !== 'beginning') anchorContextRef.current = 'default'
       // The settled window's anchor decides attached/detached exactly like a
       // jump would: re-reading from 'beginning' is a historical window
       // (detached, and the store's own bootstrap opt below matches); every
       // other context is attached (back/latest).
-      const attach = anchorContextRef.current.kind !== 'beginning'
+      const attach = anchorContextRef.current !== 'beginning'
       setAttached(false)
       runPage(base.direction, withFilter(base), { resetIteration: true, attach })
       bump()
@@ -996,7 +984,7 @@ export function Timeline({
     pendingScrollEdgeRef.current = target.kind === 'now' ? 'top' : 'bottom'
     switch (target.kind) {
       case 'now':
-        anchorContextRef.current = { kind: 'default' }
+        anchorContextRef.current = 'default'
         // Forced to 'none' regardless of any prior explicit pause — jumping
         // to now is an intentional resume-live action (v1.3). The store
         // isn't confirmed attached yet (fresh clear()), so this alone can't
@@ -1008,7 +996,7 @@ export function Timeline({
         })
         break
       case 'beginning':
-        anchorContextRef.current = { kind: 'beginning' }
+        anchorContextRef.current = 'beginning'
         pauseReasonRef.current = 'auto'
         runPage('forward', withFilter({ direction: 'forward', limit: PAGE_LIMIT, anchor: 'beginning' }), {
           resetIteration: true,
@@ -1023,7 +1011,7 @@ export function Timeline({
         // `Anchor::OffsetForwardAligned` in `backend/src/message/
         // timeline.rs`), so this is no longer the "reads as broken" jump it
         // used to be.
-        anchorContextRef.current = { kind: 'offset', partition: target.partition, offset: target.offset }
+        anchorContextRef.current = 'default'
         pauseReasonRef.current = 'auto'
         runPage(
           'forward',
@@ -1036,7 +1024,7 @@ export function Timeline({
         // as 'offset' above — the backend's timestamp anchor already
         // resolves every partition's starting position independent of
         // direction, so no backend change was needed here.
-        anchorContextRef.current = { kind: 'timestamp', ts_ms: target.ts_ms }
+        anchorContextRef.current = 'default'
         pauseReasonRef.current = 'auto'
         runPage('forward', withFilter({ direction: 'forward', limit: PAGE_LIMIT, anchor: 'timestamp', ts_ms: target.ts_ms }), {
           resetIteration: true,
