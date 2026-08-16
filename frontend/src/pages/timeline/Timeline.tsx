@@ -99,16 +99,12 @@ export function Timeline({
   const storeRef = useRef(createSlidingWindowStore(windowCap))
   const [, bump] = useReducer((c: number) => c + 1, 0)
 
-  // `cursors` (per-direction raw page_end cursors) is deliberately NOT
-  // destructured here: task 3 moved the store commit into runPage's own
-  // synchronous `onPageEnd` callback (see its comment), which receives the
-  // just-landed page's cursor directly as an argument — reading it via
-  // `cursors[direction]` a render later would reintroduce the exact
-  // staleness problem that synchronous callback exists to avoid.
-  // `state.exhausted`/`state.loading`/`state.progress`/`state.error` remain
-  // the source of truth for the auto-continue effect below; pagination
-  // itself (loadOlder/loadNewer/continueScan) now reads the store's own
-  // `edges()` exclusively.
+  // `state.exhausted`/`state.loading`/`state.progress`/`state.error` are the
+  // source of truth for the auto-continue effect below; pagination itself
+  // (loadOlder/loadNewer/continueScan) reads the store's own `edges()`
+  // exclusively — the just-landed page's own cursor reaches the store
+  // directly via runPage's synchronous `onPageEnd` callback (see its
+  // comment).
   const { loadPage, state, reset, cancel } = useTimelinePage(cluster, topic)
 
   // The live-tail predicate: starts as match-all, replaced immediately (no
@@ -972,9 +968,9 @@ export function Timeline({
     bottomTrimmedSinceRef.current = false
     topTrimmedSinceRef.current = false
     // A jump invalidates BOTH pagination directions, not just the one being
-    // (re)loaded: the old cursors describe a window the user is leaving
-    // entirely. reset() clears both cursors/exhausted flags (and kills any
-    // in-flight page) synchronously, BEFORE runPage starts the new one.
+    // (re)loaded: the old edge cursors describe a window the user is leaving
+    // entirely. reset() clears both exhausted flags (and kills any in-flight
+    // page) synchronously, BEFORE runPage starts the new one.
     reset()
     setAttached(false)
     // Owner ruling 2026-08-15: 'beginning', 'offset', and 'timestamp' ALL

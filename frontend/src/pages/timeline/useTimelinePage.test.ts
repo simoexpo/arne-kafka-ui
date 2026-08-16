@@ -68,30 +68,30 @@ describe('useTimelinePage', () => {
     expect(onMatches.mock.calls[1][0]).toHaveLength(5)
   })
 
-  it('page_end updates the direction-matching cursor and exhausted flag', () => {
+  it('page_end reports the cursor via onPageEnd and updates the direction-matching exhausted flag', () => {
     const { result } = renderHook(() => useTimelinePage('prod', 'orders'))
+    const onPageEnd = vi.fn()
     act(() => {
-      result.current.loadPage({ direction: 'back', limit: 100, anchor: 'latest' }, vi.fn())
+      result.current.loadPage({ direction: 'back', limit: 100, anchor: 'latest' }, vi.fn(), onPageEnd)
     })
     act(() => {
       FakeEventSource.instances[0].emit('page_end', { cursor: 'c-back', exhausted: false })
     })
-    expect(result.current.cursors.back).toBe('c-back')
-    expect(result.current.cursors.forward).toBeNull()
+    expect(onPageEnd).toHaveBeenCalledWith('c-back', false)
     expect(result.current.state.exhausted.back).toBe(false)
     expect(result.current.state.exhausted.forward).toBe(false)
   })
 
-  it('a forward page_end never touches the back cursor/exhausted flag', () => {
+  it('a forward page_end never touches the back exhausted flag', () => {
     const { result } = renderHook(() => useTimelinePage('prod', 'orders'))
+    const onPageEnd = vi.fn()
     act(() => {
-      result.current.loadPage({ direction: 'forward', limit: 100, anchor: 'beginning' }, vi.fn())
+      result.current.loadPage({ direction: 'forward', limit: 100, anchor: 'beginning' }, vi.fn(), onPageEnd)
     })
     act(() => {
       FakeEventSource.instances[0].emit('page_end', { cursor: 'c-fwd', exhausted: false })
     })
-    expect(result.current.cursors.forward).toBe('c-fwd')
-    expect(result.current.cursors.back).toBeNull()
+    expect(onPageEnd).toHaveBeenCalledWith('c-fwd', false)
     expect(result.current.state.exhausted.forward).toBe(false)
     expect(result.current.state.exhausted.back).toBe(false)
   })
@@ -99,13 +99,14 @@ describe('useTimelinePage', () => {
   it('an empty page with a non-null cursor delivers zero matches, no error, and leaves exhausted false', () => {
     const { result } = renderHook(() => useTimelinePage('prod', 'orders'))
     const onMatches = vi.fn()
+    const onPageEnd = vi.fn()
     act(() => {
-      result.current.loadPage({ direction: 'forward', limit: 100, cursor: 'c0' }, onMatches)
+      result.current.loadPage({ direction: 'forward', limit: 100, cursor: 'c0' }, onMatches, onPageEnd)
     })
     act(() => {
       FakeEventSource.instances[0].emit('page_end', { cursor: 'c1', exhausted: false })
     })
-    expect(result.current.cursors.forward).toBe('c1')
+    expect(onPageEnd).toHaveBeenCalledWith('c1', false)
     expect(result.current.state.exhausted.forward).toBe(false)
     expect(result.current.state.error).toBeNull()
     // Never called with matches, but the page resolved cleanly (no crash,
@@ -115,13 +116,14 @@ describe('useTimelinePage', () => {
 
   it('exhausted: true with a null cursor is the only end-of-data signal', () => {
     const { result } = renderHook(() => useTimelinePage('prod', 'orders'))
+    const onPageEnd = vi.fn()
     act(() => {
-      result.current.loadPage({ direction: 'forward', limit: 100, anchor: 'beginning' }, vi.fn())
+      result.current.loadPage({ direction: 'forward', limit: 100, anchor: 'beginning' }, vi.fn(), onPageEnd)
     })
     act(() => {
       FakeEventSource.instances[0].emit('page_end', { cursor: null, exhausted: true })
     })
-    expect(result.current.cursors.forward).toBeNull()
+    expect(onPageEnd).toHaveBeenCalledWith(null, true)
     expect(result.current.state.exhausted.forward).toBe(true)
   })
 
@@ -145,10 +147,9 @@ describe('useTimelinePage', () => {
       FakeEventSource.instances[0].emit('page_end', { cursor: 'c-raw', exhausted: false })
     })
     expect(seenDuringCallback).toEqual([{ cursor: 'c-raw', exhausted: false, stateLoading: true }])
-    // By the NEXT render (after the callback returns), state/cursors do
-    // reflect it — proving the callback ran strictly before, not after.
+    // By the NEXT render (after the callback returns), state does reflect
+    // it — proving the callback ran strictly before, not after.
     expect(result.current.state.loading).toBe(false)
-    expect(result.current.cursors.back).toBe('c-raw')
   })
 
   it('onPageEnd does not fire on a page error or a transport error', () => {
@@ -285,10 +286,13 @@ describe('useTimelinePage', () => {
 
   it('a loadPage started synchronously from onMatches (during the outer page_end flush) is not stomped by the outer trailing state updates', () => {
     const { result } = renderHook(() => useTimelinePage('prod', 'orders'))
+    let secondCursor: string | null = null
     act(() => {
       result.current.loadPage({ direction: 'back', limit: 100, anchor: 'latest' }, (msgs) => {
         if (msgs.some((m) => m.offset === 1)) {
-          result.current.loadPage({ direction: 'forward', limit: 100, anchor: 'beginning' }, vi.fn())
+          result.current.loadPage({ direction: 'forward', limit: 100, anchor: 'beginning' }, vi.fn(), (cursor) => {
+            secondCursor = cursor
+          })
         }
       })
     })
@@ -303,13 +307,12 @@ describe('useTimelinePage', () => {
     const secondEs = FakeEventSource.instances[1]
     expect(secondEs).toBeDefined()
     expect(result.current.state.loading).toBe(true)
-    expect(result.current.cursors.back).toBe('c-first')
 
     act(() => {
       secondEs.emit('page_end', { cursor: 'c-second', exhausted: true })
     })
     expect(result.current.state.loading).toBe(false)
-    expect(result.current.cursors.forward).toBe('c-second')
+    expect(secondCursor).toBe('c-second')
     expect(result.current.state.exhausted.forward).toBe(true)
   })
 
@@ -347,15 +350,16 @@ describe('useTimelinePage', () => {
     expect(FakeEventSource.instances[1]).toBeDefined() // the nested loadPage did start
   })
 
-  it('reset() clears both cursors, exhausted flags, error, progress, loading, and closes any in-flight stream', () => {
+  it('reset() clears exhausted flags, error, progress, loading, and closes any in-flight stream', () => {
     const { result } = renderHook(() => useTimelinePage('prod', 'orders'))
+    const onPageEnd = vi.fn()
     act(() => {
-      result.current.loadPage({ direction: 'back', limit: 100, anchor: 'latest' }, vi.fn())
+      result.current.loadPage({ direction: 'back', limit: 100, anchor: 'latest' }, vi.fn(), onPageEnd)
     })
     act(() => {
       FakeEventSource.instances[0].emit('page_end', { cursor: 'c-back', exhausted: false })
     })
-    expect(result.current.cursors.back).toBe('c-back')
+    expect(onPageEnd).toHaveBeenCalledWith('c-back', false)
 
     // Start a second, still in-flight page (forward), then reset mid-flight.
     act(() => {
@@ -367,7 +371,6 @@ describe('useTimelinePage', () => {
     act(() => {
       result.current.reset()
     })
-    expect(result.current.cursors).toEqual({ back: null, forward: null })
     expect(result.current.state.exhausted).toEqual({ back: false, forward: false })
     expect(result.current.state.error).toBeNull()
     expect(result.current.state.progress).toBeNull()
@@ -377,27 +380,28 @@ describe('useTimelinePage', () => {
 
   it('reset() kills the in-flight generation: a stale page_end after reset is ignored', () => {
     const { result } = renderHook(() => useTimelinePage('prod', 'orders'))
+    const onPageEnd = vi.fn()
     act(() => {
-      result.current.loadPage({ direction: 'back', limit: 100, anchor: 'latest' }, vi.fn())
+      result.current.loadPage({ direction: 'back', limit: 100, anchor: 'latest' }, vi.fn(), onPageEnd)
     })
     const es = FakeEventSource.instances[0]
     act(() => {
       result.current.reset()
     })
     const stateBefore = result.current.state
-    const cursorsBefore = result.current.cursors
     act(() => {
       es.emit('page_end', { cursor: 'ignored', exhausted: true })
     })
     expect(result.current.state).toBe(stateBefore)
-    expect(result.current.cursors).toBe(cursorsBefore)
+    expect(onPageEnd).not.toHaveBeenCalled()
   })
 
   it('events on a superseded (closed) stream are ignored, even if the transport still fires them', () => {
     const { result } = renderHook(() => useTimelinePage('prod', 'orders'))
     const onMatchesA = vi.fn()
+    const onPageEndA = vi.fn()
     act(() => {
-      result.current.loadPage({ direction: 'back', limit: 100, anchor: 'latest' }, onMatchesA)
+      result.current.loadPage({ direction: 'back', limit: 100, anchor: 'latest' }, onMatchesA, onPageEndA)
     })
     const esA = FakeEventSource.instances[0]
     act(() => {
@@ -406,13 +410,12 @@ describe('useTimelinePage', () => {
     expect(esA.closed).toBe(true)
 
     const stateBefore = result.current.state
-    const cursorsBefore = result.current.cursors
     act(() => {
       esA.emit('match', mk(1))
       esA.emit('page_end', { cursor: 'stale-cursor', exhausted: true })
     })
     expect(onMatchesA).not.toHaveBeenCalled()
+    expect(onPageEndA).not.toHaveBeenCalled()
     expect(result.current.state).toBe(stateBefore)
-    expect(result.current.cursors).toBe(cursorsBefore)
   })
 })

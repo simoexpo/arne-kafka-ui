@@ -27,16 +27,11 @@ interface TimelineState {
   error: ApiError | Error | null
 }
 
-interface TimelineCursors {
-  back: string | null
-  forward: string | null
-}
-
 export interface UseTimelinePage {
   /**
    * `onPageEnd`, if given, fires SYNCHRONOUSLY inside the very same event
    * handler that processes the SSE `page_end` event — the same tick as the
-   * internal `cursors`/`state.loading` updates, not a render later (task 3:
+   * internal `state.loading` update, not a render later (task 3:
    * a caller that commits a page's rows to its own store needs that
    * mutation to land in the SAME render as `state.loading` flipping false,
    * or ref-based DOM handles reading the store — e.g. a scroll-position
@@ -51,14 +46,13 @@ export interface UseTimelinePage {
     onPageEnd?: (cursor: string | null, exhausted: boolean) => void,
   ): void
   state: TimelineState
-  cursors: TimelineCursors
   cancel(): void
   // Full viewport reset for a jump: unlike loadPage (which only clears the
   // exhaustion flag for the direction it's (re)loading), a jump invalidates
-  // BOTH directions at once — the old cursors describe a window the user is
-  // leaving entirely, not one they're paging within. Closing/bumping the
-  // generation here (same as cancel()) additionally guarantees a stale
-  // in-flight page from before the jump can never resurrect stale cursor
+  // BOTH directions at once — the old exhausted flags describe a window the
+  // user is leaving entirely, not one they're paging within. Closing/
+  // bumping the generation here (same as cancel()) additionally guarantees a
+  // stale in-flight page from before the jump can never resurrect stale
   // state after the jump's own loadPage has started.
   reset(): void
 }
@@ -70,7 +64,6 @@ export function useTimelinePage(cluster: string, topic: string): UseTimelinePage
     exhausted: { back: false, forward: false },
     error: null,
   })
-  const [cursors, setCursors] = useState<TimelineCursors>({ back: null, forward: null })
   const handleRef = useRef<{ close: () => void } | null>(null)
   // Bumped by every loadPage (and by cancel) — each page's handler closures
   // capture the generation they were created under and no-op once it's
@@ -86,9 +79,10 @@ export function useTimelinePage(cluster: string, topic: string): UseTimelinePage
     handleRef.current?.close()
     handleRef.current = null
     // A bare cancel (unlike reset()) is meant to stop an in-flight page
-    // while leaving whatever already loaded intact — cursors/exhausted/rows
-    // are untouched. But `loading` must still flip back to false, or a
-    // consumer driving a "cancel this scan" affordance off `state.loading`
+    // while leaving whatever already loaded intact — exhausted flags and the
+    // caller's own store are untouched. But `loading` must still flip back
+    // to false, or a consumer driving a "cancel this scan" affordance off
+    // `state.loading`
     // (Task 9's filtered-scan Cancel button) would be stuck showing it
     // forever, since no further terminal event will ever arrive for a
     // generation that's just been superseded.
@@ -100,7 +94,6 @@ export function useTimelinePage(cluster: string, topic: string): UseTimelinePage
 
   const reset = useCallback(() => {
     cancel()
-    setCursors({ back: null, forward: null })
     setState({ loading: false, progress: null, exhausted: { back: false, forward: false }, error: null })
   }, [cancel])
 
@@ -157,12 +150,11 @@ export function useTimelinePage(cluster: string, topic: string): UseTimelinePage
           // the caller: flush() invokes the caller's onMatches synchronously,
           // and a caller that starts another loadPage from inside onMatches
           // (e.g. auto-advancing to the next page) must see its own
-          // loading:true/cursors survive — not get overwritten by this
-          // handler's own trailing updates running after the fact. The
+          // loading:true survive — not get overwritten by this handler's
+          // own trailing updates running after the fact. The
           // generation guard above additionally protects against the
           // (structurally impossible here, but defensive) case where this
           // handler fires after being superseded.
-          setCursors((prev) => ({ ...prev, [params.direction]: cursor }))
           setState((prev) => ({
             ...prev,
             loading: false,
@@ -182,7 +174,7 @@ export function useTimelinePage(cluster: string, topic: string): UseTimelinePage
           // After the internal state updates + the final flush (so a
           // trailing partial batch has already reached the caller's
           // `onMatches`) — see this callback's own doc comment for why this
-          // must be synchronous rather than observed via `state`/`cursors`.
+          // must be synchronous rather than observed via `state`.
           onPageEnd?.(cursor, exhausted)
         },
         onError: (e) => {
@@ -214,5 +206,5 @@ export function useTimelinePage(cluster: string, topic: string): UseTimelinePage
     [cluster, topic],
   )
 
-  return { loadPage, state, cursors, cancel, reset }
+  return { loadPage, state, cancel, reset }
 }
