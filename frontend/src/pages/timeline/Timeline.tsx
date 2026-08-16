@@ -141,7 +141,7 @@ export function Timeline({
   // this from double-counting the page currently in flight.
   const gestureScannedRef = useRef(0)
   const gestureMatchesRef = useRef(0)
-  // B-2 fix: whether a gesture (a user-issued page plus every
+  // Whether a gesture (a user-issued page plus every
   // auto-continued empty page that follows it) is still running — as
   // opposed to `state.loading`, which is only true for the CURRENT page and
   // flips false/true at every page boundary. The show-delayed progress row
@@ -380,7 +380,7 @@ export function Timeline({
 
   // Resends the currently active filter's server-side params (a no-op when
   // unfiltered) onto any page request — see activeFilterApiRef. Moved above
-  // `runPage` (fix round 1, C3): `runPage`'s own `onPageEnd` callback now
+  // `runPage`: `runPage`'s own `onPageEnd` callback now
   // needs it directly, to re-issue a rejected-stale page with the filter
   // still attached — and a `useCallback`'s dependency array is evaluated
   // immediately, so it can only ever list something already declared by
@@ -431,13 +431,13 @@ export function Timeline({
         (msgs: MessageOut[]) => {
           matchedRef.current = true
           pageMatchesRef.current += msgs.length
-          // Scroll anchoring, per BATCH (fix round 2, N5 — review of
-          // 000fd9f): a forward scan's overlay (see pendingAnchorRef's own
-          // comment, and M2 below) prepends each new batch above whatever
-          // the reader is currently looking at, exactly like the final
-          // commit does — without this, an intermediate overlay update
-          // would silently relocate the reader the same way M1 originally
-          // fixed for the commit itself. Capture the row CURRENTLY at the
+          // Scroll anchoring, per BATCH: a forward scan's overlay (see
+          // pendingAnchorRef's own comment, and the previewWithOverlay merge
+          // below) prepends each new batch above whatever the reader is
+          // currently looking at, exactly like the final commit does —
+          // without this, an intermediate overlay update would silently
+          // relocate the reader the same way scroll anchoring fixes for the
+          // commit itself. Capture the row CURRENTLY at the
           // top of the overlay (index 0 — see pendingAnchorRef's own
           // comment on why that index specifically) before adding this
           // batch; the layout effect below finds that same row's new index
@@ -459,15 +459,15 @@ export function Timeline({
             }
           }
           pageRowsRef.current.push(...msgs)
-          // No store COMMIT here (task 3, unlike the old per-batch
-          // `store.insert` calls): a page's rows are committed to the store
+          // No store COMMIT here (unlike an old per-batch
+          // `store.insert` design): a page's rows are committed to the store
           // ATOMICALLY, once, by `onPageEnd` below via `insertPage` — the
           // store's own contract takes the full page's rows plus a single
           // start/continuation cursor pair, not a per-batch trickle (an
           // anchor bootstrap's opposite-side seed in particular needs every
           // row this page ever delivers, not just one batch's worth).
           //
-          // Fix round 1, M2: matches must still STREAM to the reader as
+          // Matches must still STREAM to the reader as
           // they arrive (product charter: "stream results"), even though
           // the store commit itself waits for page-end — `bump()` here
           // re-renders with `pageRowsRef.current` now longer, and the
@@ -488,8 +488,8 @@ export function Timeline({
         (cursor) => {
           const rows = pageRowsRef.current
           pageRowsRef.current = []
-          // Scroll anchoring is captured per-BATCH now (fix round 2, N5 —
-          // see the `onMatches` callback above, which always runs, via
+          // Scroll anchoring is captured per-BATCH (see the `onMatches`
+          // callback above, which always runs, via
           // `flush()`, before this callback does) — there is deliberately
           // no separate capture here: `flush()`'s own trailing call already
           // set `pendingAnchorRef` for this exact commit, and capturing
@@ -527,7 +527,7 @@ export function Timeline({
           const outcome = storeRef.current.insertPage(rows, direction, pendingStartPositionsRef.current, cursor, {
             attach: pendingAttachRef.current,
           })
-          // Fix round 1, C3: a CONCURRENT trim (typically a live insert)
+          // A CONCURRENT trim (typically a live insert)
           // can advance the same-side edge map PAST what this now-landing
           // page assumed when it was issued — the store detects this and
           // rejects the page wholesale (see its own doc comment) rather
@@ -535,7 +535,7 @@ export function Timeline({
           // detach/reattach — an ACCEPTED page is what re-earns those,
           // never a rejected one.
           if (outcome.rejectedStale) {
-            // Fix round 2, N6: this REJECTED page's own SSE response may
+            // This REJECTED page's own SSE response may
             // still have reported `exhausted: true` to `useTimelinePage`'s
             // internal state (e.g. a genuinely-reached topic start that
             // arrived just as a concurrent trim invalidated it) — mark
@@ -551,7 +551,7 @@ export function Timeline({
             if (direction === 'back') bottomTrimmedSinceRef.current = true
             else topTrimmedSinceRef.current = true
             const freshCursor = edgeCursorFor(direction)
-            // Fix round 2, N3 (charter: no zombie scans): a retry consumes
+            // Charter ("no zombie scans"): a retry consumes
             // an iteration-cap slot just like an empty-page auto-continue
             // does — a pathological storm of concurrent trims invalidating
             // one retry after another must eventually land on the SAME
@@ -796,8 +796,8 @@ export function Timeline({
     }
   }, [jumpLandingFallingEdge])
 
-  // Scroll anchoring (row-identity rewrite, fix round 1 M1; per-batch, fix
-  // round 2 N5): consumes whatever the LAST `onMatches` call captured (see
+  // Scroll anchoring (row-identity rewrite, captured per-batch): consumes
+  // whatever the LAST `onMatches` call captured (see
   // pendingAnchorRef's own comment — every batch captures, including the
   // final one, via `flush()` always running before `onPageEnd`) after the
   // corresponding rows have rendered, finds the SAME junction row's NEW
@@ -842,7 +842,7 @@ export function Timeline({
     onChange: bump,
   })
 
-  // Fix round 1, M2: display the committed store rows merged with whatever
+  // Display the committed store rows merged with whatever
   // the CURRENT in-flight page has accumulated so far (a display-only
   // overlay — see `previewWithOverlay`'s own doc comment). The fast path
   // (no accumulated rows: nothing in flight, or an in-flight page that
@@ -911,7 +911,7 @@ export function Timeline({
   }
 
   // Scroll is the only pagination affordance (no load-older/load-newer
-  // buttons). Task 3: both read the store's OWN minted edge cursor directly
+  // buttons). Both read the store's OWN minted edge cursor directly
   // — no drop-flag/reposition machinery needed anymore, since every trim
   // leaves behind a real, followable cursor by construction (the whole
   // point of the sliding-window redesign). `bottomTrimmedSinceRef`/
@@ -1023,7 +1023,7 @@ export function Timeline({
   // BEFORE cancel() makes that effect's "direction === null" guard bail out
   // on the loading:true -> false edge cancel() itself triggers.
   //
-  // Fix round 1, M2: also drops this page's uncommitted display overlay —
+  // Also drops this page's uncommitted display overlay —
   // `onPageEnd` never got to run (the page never reached page_end), so
   // nothing here was ever going to be committed; leaving its matches
   // visible after an explicit cancel would be dishonest (the store's own
@@ -1075,7 +1075,7 @@ export function Timeline({
       : `scanned ${progressScanned} of ${knownBudget} records · ${progressMatches} matches — continue`
     : 'scanned far, nothing found here — continue'
 
-  // B-2 fix: gates on the GESTURE (a user-issued page plus every auto-continued empty page that follows it), not on
+  // Gates on the GESTURE (a user-issued page plus every auto-continued empty page that follows it), not on
   // any single page's own `state.loading` — an auto-continued page flips `state.loading` false then true again at
   // every page boundary, which previously reset the show-delay on every boundary too, letting a scan made of quick
   // pages run indefinitely without ever rendering anything.
