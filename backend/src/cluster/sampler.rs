@@ -66,6 +66,41 @@ pub fn spawn_sampler(handle: Arc<ClusterHandle>, interval: Duration) -> tokio::t
     })
 }
 
+/// For each non-internal topic, sums its partitions' high watermarks via
+/// `fetch_hi`, tolerating a per-topic failure the same way
+/// `admin::assemble_topic_estimate` does: one failed partition drops that
+/// topic's sample entirely rather than reporting a partial/misleading
+/// total (`complete` is all-or-nothing). Internal (`__`-prefixed) topics
+/// are skipped WITHOUT ever calling `fetch_hi` — mirrors `admin::
+/// list_topics`'s own skip, e.g. `__transaction_state` alone can carry 50
+/// partitions on a cluster with transactional producers — so the
+/// *recurring* sampler never pays their watermark-fetch tax on any tick,
+/// not just on the one-off inventory load `list_topics` already avoids it
+/// for.
+fn topic_totals<'a>(
+    topics: impl IntoIterator<Item = (&'a str, &'a [i32])>,
+    mut fetch_hi: impl FnMut(&str, i32) -> Result<i64, ()>,
+) -> Vec<(String, i64)> {
+    let mut out = Vec::new();
+    for (name, partitions) in topics {
+        if name.starts_with("__") {
+            continue;
+        }
+        let mut total = 0i64;
+        let mut complete = true;
+        for &p in partitions {
+            match fetch_hi(name, p) {
+                Ok(hi) => total += hi,
+                Err(()) => { complete = false; break; }
+            }
+        }
+        if complete {
+            out.push((name.to_string(), total));
+        }
+    }
+    out
+}
+
 fn sample_once(handle: &ClusterHandle, timeout: Duration) {
     let now = crate::util::now_ms();
     let md = match handle.consumer().fetch_metadata(None, timeout) {
@@ -80,24 +115,64 @@ fn sample_once(handle: &ClusterHandle, timeout: Duration) {
             return;
         }
     };
-    for t in md.topics() {
-        let mut total = 0i64;
-        let mut complete = true;
-        for p in t.partitions() {
-            match handle.consumer().fetch_watermarks(t.name(), p.id(), timeout) {
-                Ok((_, hi)) => total += hi,
-                Err(_) => { complete = false; break; }
-            }
-        }
-        if complete {
-            handle.sampler.record(t.name(), TopicSample { ts_ms: now, total_msgs: total });
-        }
+    // Owned (name, partition_ids) pairs — `topic_totals` borrows from this,
+    // so the partition-id vectors need somewhere to live past the `map`
+    // that builds them; the actual skip/tolerate-failure policy is entirely
+    // in `topic_totals` itself.
+    let topics: Vec<(String, Vec<i32>)> = md.topics().iter()
+        .map(|t| (t.name().to_string(), t.partitions().iter().map(|p| p.id()).collect()))
+        .collect();
+    let topics_ref = topics.iter().map(|(name, ids)| (name.as_str(), ids.as_slice()));
+    let totals = topic_totals(topics_ref, |name, partition| {
+        handle.consumer().fetch_watermarks(name, partition, timeout).map(|(_, hi)| hi).map_err(|_| ())
+    });
+    for (name, total) in totals {
+        handle.sampler.record(&name, TopicSample { ts_ms: now, total_msgs: total });
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::RefCell;
+
+    /// Mirrors `admin::list_topics`'s own internal-topic skip (and its
+    /// `assemble_topic_estimate` test style): `__`-prefixed topics can carry
+    /// dozens of partitions on a cluster with transactional producers, and
+    /// are hidden from the topics UI by default — the *recurring* sampler
+    /// must not pay their watermark-fetch tax every tick any more than the
+    /// one-off inventory load does. Proven here by pointer-free means: the
+    /// fetch closure is never invoked for the internal topic's partitions
+    /// at all (a call counter stays at the real topic's count), not merely
+    /// that its result gets discarded afterward.
+    #[test]
+    fn internal_topics_are_skipped_without_a_watermark_fetch() {
+        let calls = RefCell::new(0);
+        let topics = [("__consumer_offsets", &[0, 1, 2, 3][..]), ("orders", &[0][..])];
+        let totals = topic_totals(topics, |_name, _partition| {
+            *calls.borrow_mut() += 1;
+            Ok(10)
+        });
+        assert_eq!(totals, vec![("orders".to_string(), 10)]);
+        assert_eq!(*calls.borrow(), 1, "only the real topic's one partition may be fetched");
+    }
+
+    #[test]
+    fn a_topic_with_a_failed_partition_yields_no_sample() {
+        let totals = topic_totals([("orders", &[0, 1][..])], |_name, partition| {
+            if partition == 1 { Err(()) } else { Ok(5) }
+        });
+        assert!(totals.is_empty(), "an incomplete topic must not report a partial/misleading total");
+    }
+
+    #[test]
+    fn multiple_real_topics_are_all_sampled() {
+        let totals = topic_totals(
+            [("a", &[0][..]), ("b", &[0, 1][..])],
+            |_name, _partition| Ok(7),
+        );
+        assert_eq!(totals, vec![("a".to_string(), 7), ("b".to_string(), 14)]);
+    }
 
     #[test]
     fn rate_is_delta_msgs_over_delta_seconds() {
