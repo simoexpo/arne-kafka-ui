@@ -659,10 +659,32 @@ export function Timeline({
     [],
   )
 
+  // Drops the loaded window wholesale: store, pending scroll anchor, jump
+  // highlight, live buffer, stale-exhausted flags, both pagination
+  // directions (reset() also kills any in-flight page), and UI attachment.
+  // Both call sites — a settled filter change (applyFilter) and any jump
+  // (handleJump) — discard the whole viewport, so they must stay in
+  // lockstep. `nextJumpTarget` is the new window's jump highlight (only an
+  // offset jump sets one; every other caller passes null).
+  const resetWindow = useCallback(
+    (nextJumpTarget: { partition: number; offset: number } | null) => {
+      storeRef.current.clear()
+      pendingAnchorRef.current = null
+      setJumpTarget(nextJumpTarget)
+      bufferRef.current = []
+      bufferReceivedRef.current = 0
+      bufferOverflowRef.current = false
+      bottomTrimmedSinceRef.current = false
+      topTrimmedSinceRef.current = false
+      reset()
+      setAttached(false)
+    },
+    [reset, setAttached],
+  )
+
   // A settled filter change (see the debounce effect below): switches the
-  // live-tail predicate immediately, drops the current viewport (store +
-  // any buffered live messages — same as a jump, since the loaded window no
-  // longer reflects the new filter), resets both pagination directions, and
+  // live-tail predicate immediately, drops the current viewport (same as a
+  // jump, since the loaded window no longer reflects the new filter), and
   // reloads the first page from the current anchor context with the parsed
   // filter attached.
   const applyFilter = useCallback(
@@ -670,19 +692,7 @@ export function Timeline({
       const parsed = parseFilterQuery(text)
       predicateRef.current = parsed.predicate
       activeFilterApiRef.current = parsed.api
-      storeRef.current.clear()
-      // A pending scroll-anchor capture belongs to the window being
-      // discarded — applying it to the fresh one would yank the viewport.
-      pendingAnchorRef.current = null
-      // The old window's jump highlight (if any) belongs to the window
-      // being discarded too — see jumpTarget's own comment.
-      setJumpTarget(null)
-      bufferRef.current = []
-      bufferReceivedRef.current = 0
-      bufferOverflowRef.current = false
-      bottomTrimmedSinceRef.current = false
-      topTrimmedSinceRef.current = false
-      reset()
+      resetWindow(null)
       const base = baseAnchorParams()
       // A re-read from anything other than 'beginning' collapses to the
       // 'default' context (matches v1.3: refiltering after an offset/
@@ -695,11 +705,10 @@ export function Timeline({
       // (detached, and the store's own bootstrap opt below matches); every
       // other context is attached (back/latest).
       const attach = anchorContextRef.current !== 'beginning'
-      setAttached(false)
       runPage(base.direction, withFilter(base), { resetIteration: true, attach })
       bump()
     },
-    [reset, runPage, baseAnchorParams, withFilter, setAttached],
+    [resetWindow, runPage, baseAnchorParams, withFilter],
   )
 
   const [filterText, setFilterText] = useState('')
@@ -953,26 +962,10 @@ export function Timeline({
   // windows enter paused-auto (the pill counts; while detached, top-pinning
   // does NOT resume live — only re-attaching does).
   const handleJump = (target: JumpTarget) => {
-    storeRef.current.clear()
-    // A pending scroll-anchor capture belongs to the window being left —
-    // never let it adjust the post-jump viewport (defense-in-depth: today
-    // capture and consumption share one commit, but that's implicit).
-    pendingAnchorRef.current = null
     // Every jump belongs to a fresh window — the previous jump's own
     // highlight (if any) never carries forward. Only the 'offset' case
-    // below re-sets it for the new target; every other kind leaves it null.
-    setJumpTarget(target.kind === 'offset' ? { partition: target.partition, offset: target.offset } : null)
-    bufferRef.current = []
-    bufferReceivedRef.current = 0
-    bufferOverflowRef.current = false
-    bottomTrimmedSinceRef.current = false
-    topTrimmedSinceRef.current = false
-    // A jump invalidates BOTH pagination directions, not just the one being
-    // (re)loaded: the old edge cursors describe a window the user is leaving
-    // entirely. reset() clears both exhausted flags (and kills any in-flight
-    // page) synchronously, BEFORE runPage starts the new one.
-    reset()
-    setAttached(false)
+    // sets a new one; every other kind passes null.
+    resetWindow(target.kind === 'offset' ? { partition: target.partition, offset: target.offset } : null)
     // Owner ruling 2026-08-15: 'beginning', 'offset', and 'timestamp' ALL
     // land reading forward, the target as the OLDEST row of the loaded
     // window — the bottom (oldest-visible) edge is the meaningful anchor
