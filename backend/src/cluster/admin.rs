@@ -7,7 +7,9 @@ use rdkafka::topic_partition_list::TopicPartitionList;
 use rdkafka::Offset;
 use serde::Serialize;
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::Arc;
+#[cfg(feature = "test-hooks")]
+use std::sync::{Mutex, OnceLock};
 
 #[derive(Debug, Serialize)]
 pub struct TopicSummary {
@@ -208,19 +210,28 @@ pub struct GroupDetail {
 }
 
 /// Per-`(cluster, topic_filter)` count of real `fetch_metadata` calls made
-/// while building a group-lag topic-partition list. Test-only
-/// observability, scoped by key exactly like `fetch::fetch_call_count`, so
-/// it stays meaningful when other tests' group-lag lookups run
-/// concurrently against the shared test broker: proves metadata is fetched
-/// once per `/groups` or `/topics/{t}/consumers` request and shared across
-/// every group in that request's loop, not refetched per group.
+/// while building a group-lag topic-partition list. Genuinely test-only now
+/// (M7): compiled only under the `test-hooks` feature — see
+/// `fetch::FETCH_CALLS`'s doc comment for how `cargo test` always carries
+/// it — so a release build never allocates this map or pays its mutex lock
+/// on any real request. Scoped by key so it stays meaningful when other
+/// tests' group-lag lookups run concurrently against the shared test
+/// broker: proves metadata is fetched once per `/groups` or
+/// `/topics/{t}/consumers` request and shared across every group in that
+/// request's loop, not refetched per group.
+#[cfg(feature = "test-hooks")]
 static GROUP_METADATA_FETCHES: OnceLock<Mutex<HashMap<String, u64>>> = OnceLock::new();
 
+#[cfg(feature = "test-hooks")]
 fn record_group_metadata_fetch(topic_filter: Option<&str>) {
     let calls = GROUP_METADATA_FETCHES.get_or_init(|| Mutex::new(HashMap::new()));
     *calls.lock().unwrap().entry(topic_filter.unwrap_or("*").to_string()).or_insert(0) += 1;
 }
+/// No-op outside `test-hooks` builds — see `GROUP_METADATA_FETCHES`'s doc comment.
+#[cfg(not(feature = "test-hooks"))]
+fn record_group_metadata_fetch(_topic_filter: Option<&str>) {}
 
+#[cfg(feature = "test-hooks")]
 pub fn group_metadata_fetch_count(topic_filter: Option<&str>) -> u64 {
     GROUP_METADATA_FETCHES.get()
         .and_then(|m| m.lock().unwrap().get(topic_filter.unwrap_or("*")).copied())
@@ -228,16 +239,23 @@ pub fn group_metadata_fetch_count(topic_filter: Option<&str>) -> u64 {
 }
 
 /// Per-topic count of real (cache-miss) `fetch_watermarks` calls made while
-/// resolving group lag. Test-only observability, scoped like
-/// `fetch::fetch_call_count`: proves a partition read by several groups in
-/// the same request is watermarked once, not once per group.
+/// resolving group lag. Genuinely test-only now (M7): compiled only under
+/// the `test-hooks` feature — see `fetch::FETCH_CALLS`'s doc comment.
+/// Proves a partition read by several groups in the same request is
+/// watermarked once, not once per group.
+#[cfg(feature = "test-hooks")]
 static GROUP_WATERMARK_FETCHES: OnceLock<Mutex<HashMap<String, u64>>> = OnceLock::new();
 
+#[cfg(feature = "test-hooks")]
 fn record_group_watermark_fetch(topic: &str) {
     let calls = GROUP_WATERMARK_FETCHES.get_or_init(|| Mutex::new(HashMap::new()));
     *calls.lock().unwrap().entry(topic.to_string()).or_insert(0) += 1;
 }
+/// No-op outside `test-hooks` builds — see `GROUP_WATERMARK_FETCHES`'s doc comment.
+#[cfg(not(feature = "test-hooks"))]
+fn record_group_watermark_fetch(_topic: &str) {}
 
+#[cfg(feature = "test-hooks")]
 pub fn group_watermark_fetch_count(topic: &str) -> u64 {
     GROUP_WATERMARK_FETCHES.get().and_then(|m| m.lock().unwrap().get(topic).copied()).unwrap_or(0)
 }
