@@ -48,7 +48,7 @@ export function JumpControl({ onJump }: { onJump: (target: JumpTarget) => void }
   }
 
   return (
-    <div className="flex items-center gap-1 text-xs">
+    <div className="flex items-center gap-1 text-sm">
       <div role="group" aria-label="jump to" className="flex items-center gap-1 rounded-full border border-zinc-300 p-0.5 dark:border-zinc-700">
         <button
           type="button"
