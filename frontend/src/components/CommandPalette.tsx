@@ -30,7 +30,7 @@ export function PaletteView({ items, onNavigate, onClose }: {
         <input
           autoFocus
           role="combobox"
-          aria-expanded="true"
+          aria-expanded={matches.length > 0}
           aria-controls="palette-list"
           value={query}
           onChange={(e) => setQuery(e.target.value)}
