@@ -102,12 +102,13 @@ try {
     undefined,
     { timeout: 5000 },
   )
-  const newestBeforeLive = await page.getByTestId('message-row').first().textContent()
-  await page.waitForFunction(
-    (prev) => document.querySelector('[data-testid="message-row"]')?.textContent !== prev,
-    newestBeforeLive,
-    { timeout: 30000 }, // the demo producers emit roughly one message every few seconds
-  )
+  // Inspection pause (spec v1.7): an expanded row means live arrivals BUFFER
+  // into the pill instead of changing the top row. Wait for the pill to
+  // count one (proves buffering), then flush via the pill — inspections
+  // survive a flush by spec, and the flush is what triggers the prepend
+  // whose row-stacking integrity we assert below.
+  await page.getByTestId('live-pill').waitFor({ timeout: 30000 })
+  await page.getByTestId('live-pill').click()
   const stacking = await scroller.evaluate((el) => {
     const rows = [...el.querySelectorAll('[data-testid="message-row"]')]
       .map((row) => ({
