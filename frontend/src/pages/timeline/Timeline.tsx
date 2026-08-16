@@ -98,6 +98,10 @@ export function Timeline({
   // no reset-on-prop-change logic needed here.
   const storeRef = useRef(createSlidingWindowStore(windowCap))
   const [, bump] = useReducer((c: number) => c + 1, 0)
+  // The store's edge cursor a given direction reads FROM next: 'back'
+  // reads older rows, which live at the store's 'bottom' edge; 'forward'
+  // reads newer rows, from the 'top' edge.
+  const edgeCursorFor = (d: Direction) => storeRef.current.edges()[d === 'back' ? 'bottom' : 'top']
 
   // `state.exhausted`/`state.loading`/`state.progress`/`state.error` are the
   // source of truth for the auto-continue effect below; pagination itself
@@ -585,7 +589,7 @@ export function Timeline({
             // no need for a separate one.
             if (direction === 'back') bottomTrimmedSinceRef.current = true
             else topTrimmedSinceRef.current = true
-            const freshCursor = storeRef.current.edges()[direction === 'back' ? 'bottom' : 'top']
+            const freshCursor = edgeCursorFor(direction)
             // Fix round 2, N3 (charter: no zombie scans): a retry consumes
             // an iteration-cap slot just like an empty-page auto-continue
             // does — a pathological storm of concurrent trims invalidating
@@ -788,7 +792,7 @@ export function Timeline({
       }
       return
     }
-    const nextCursor = storeRef.current.edges()[direction === 'back' ? 'bottom' : 'top']
+    const nextCursor = edgeCursorFor(direction)
     if (nextCursor === null) return
     if (iterationRef.current >= ITERATION_CAP) {
       setContinueDirection(direction)
@@ -1154,7 +1158,7 @@ export function Timeline({
 
   const continueScan = () => {
     if (continueDirection === null) return
-    const cursor = storeRef.current.edges()[continueDirection === 'back' ? 'bottom' : 'top']
+    const cursor = edgeCursorFor(continueDirection)
     if (cursor === null) return
     // resetGesture: false — continuing past the cap is the SAME gesture,
     // not a new one; only the cap counter itself restarts.
