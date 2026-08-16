@@ -90,7 +90,7 @@ export function Sidebar({ cluster, clusters, active }: {
 
 function HealthDot({ status }: { status?: ClusterHealth['status'] }) {
   const color = status === 'healthy' ? 'bg-emerald-500' : status === 'unreachable' ? 'bg-red-500' : 'bg-zinc-400'
-  return <span className={`inline-block h-2 w-2 rounded-full ${color}`} />
+  return <span title={status ?? 'unknown'} className={`inline-block h-2 w-2 rounded-full ${color}`} />
 }
 
 function SunIcon({ active }: { active: boolean }) {
