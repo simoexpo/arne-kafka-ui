@@ -308,11 +308,11 @@ interface SlidingWindowStore {
  *    is itself ≥ every offset already in the window for that partition,
  *    which is itself ≥ `bottomMap[p]` (the exclusive upper bound for
  *    reading older — always at or below the window's own oldest-held
- *    offset by construction of rule 3 below). A live row can therefore
- *    never legally arrive below `bottomMap[p]`; there is no lower boundary
- *    for it to invalidate. (One cheap defensive line remains anyway — see
- *    `insertLive`'s own comment — purely as a belt-and-suspenders against a
- *    future caller bug, not because this invariant is expected to need it.)
+ *    offset by construction of rule 3 below). A NEWLY-arriving live row can
+ *    therefore never legally sit below `bottomMap[p]` — but `insertLive`
+ *    still filters against it anyway; see its own comment for why that
+ *    filter is load-bearing for the re-attach buffer flush, not merely
+ *    defensive.
  *
  *    **Re-attach buffer flush** (v1.3 semantics, modeled here explicitly):
  *    when a detached window re-attaches (a forward page reports
