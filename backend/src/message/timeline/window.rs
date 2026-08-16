@@ -85,9 +85,9 @@ pub(super) fn clamp_positions(positions: &[(i32, i64)], watermarks: &[(i32, i64,
 /// (`w.end`), so the adjacent record is the highest offset in the window,
 /// `w.end - 1` — the *top* of the window. For `Forward`, the position is
 /// the window's *inclusive lower bound* (`w.start`), so the adjacent record
-/// is `w.start` itself — the *bottom*. `run_page`'s short-read guard looks
-/// for exactly this offset among an incomplete partition's fetched records
-/// (see `run_page`'s doc comment, step 2).
+/// is `w.start` itself — the *bottom*. `select_partition_streams`' short-read
+/// guard looks for exactly this offset among an incomplete partition's
+/// fetched records to decide whether the whole window can be trusted.
 pub(super) fn adjacent_offset(w: &PartitionRange, direction: Direction) -> i64 {
     match direction {
         Direction::Back => w.end - 1,

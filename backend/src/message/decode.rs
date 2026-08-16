@@ -49,7 +49,7 @@ pub async fn decode_payload(bytes: Option<&[u8]>, sr: Option<&SchemaRegistry>) -
     let result = match schema.schema_type {
         // Avro/Protobuf decoding needs the *parsed* schema artifact, not
         // the raw string — `sr.parsed` parses it once per schema id and
-        // caches the result, instead of re-parsing on every message (I3).
+        // caches the result, instead of re-parsing on every message.
         SchemaType::Avro | SchemaType::Protobuf => match sr.parsed(schema_id).await {
             Err(e) => Err(e),
             Ok(parsed) => match &*parsed {

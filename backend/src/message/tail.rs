@@ -16,12 +16,10 @@ use tokio::sync::mpsc;
 /// normal and must not be mistaken for a stalled one.
 const STALL_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// C1 fix: tail's SSE stream now carries an explicit event enum (mirroring
-/// search's `SearchEvent`) instead of only ever emitting `MessageOut`s.
-/// Previously, a consumer create/assign failure or a run of poll errors was
-/// swallowed silently — the task just returned, the channel closed, and the
-/// SSE stream ended with no event at all, so an `EventSource` client would
-/// reconnect forever with nothing to show the user.
+/// A tail's SSE stream carries an explicit event enum rather than only ever
+/// emitting `MessageOut`s, so a consumer create/assign failure or a stalled
+/// poll loop (see `drive_tail_poll`) reaches the client as a real event
+/// instead of the channel just closing with nothing to show.
 #[derive(Debug, Serialize)]
 #[serde(untagged)]
 pub enum TailEvent {
@@ -72,8 +70,8 @@ enum PollOutcome {
 /// received message *with only poll errors in between* — a quiet topic
 /// (poll returning "no message" over and over) never counts, since an idle
 /// tail is the normal, expected state and must not be reported as an error.
-/// This is the extracted seam the C1 fix's stall-detection unit tests drive
-/// directly, without any real Kafka consumer.
+/// Extracted as a plain closure-driven loop so the stall-detection tests
+/// below can drive it directly, without any real Kafka consumer.
 fn drive_tail_poll(
     mut poll: impl FnMut() -> PollOutcome,
     cancel: &AtomicBool,
@@ -97,13 +95,11 @@ fn drive_tail_poll(
                     return Err(format!("tail stalled: {e}"));
                 }
             }
-            // B6 fix: a quiet poll is not a poll error — it must reset the
-            // streak exactly like a successfully received message does (see
-            // this function's own doc comment: "with only poll errors in
-            // between"). Otherwise two isolated, transient error blips
-            // separated by an arbitrarily long quiet (healthy, idle) period
-            // still sum toward the same stall, misreporting a healthy
-            // broker as stalled.
+            // A quiet poll is not a poll error — it resets the streak
+            // exactly like a successfully received message does (this
+            // function's own doc comment: "with only poll errors in
+            // between"), so two isolated, transient error blips separated by
+            // an arbitrarily long idle period never sum toward one stall.
             PollOutcome::Empty => {
                 error_streak_since = None;
             }
@@ -114,8 +110,8 @@ fn drive_tail_poll(
 
 /// Builds the tail consumer, assigns it to the end of every partition in
 /// `watermarks`, and drives the poll loop. Both `.create()` and `.assign()`
-/// failures are now reported (previously: `return;`, silently ending the
-/// task with no event at all — C1a).
+/// failures are reported as an `Err`, never swallowed into a silent early
+/// return.
 fn run_consumer_blocking(
     cc: ClientConfig,
     topic: &str,
