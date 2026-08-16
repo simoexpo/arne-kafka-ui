@@ -1202,6 +1202,20 @@ export function Timeline({
     return () => clearTimeout(id)
   }, [scanRunning])
 
+  // The forward-continue and back-continue affordances are the same button
+  // (S-9) — the two render sites (above/below MessageList, one per
+  // direction) are mutually exclusive on `continueDirection`, so the shared
+  // `data-testid` is never ambiguous.
+  const continueScanButton = (
+    <button
+      data-testid="continue-scan"
+      onClick={continueScan}
+      className="w-full rounded border border-amber-400 py-1 text-xs text-amber-600 dark:border-amber-600 dark:text-amber-400"
+    >
+      {continueScanLabel}
+    </button>
+  )
+
   return (
     // Flex column filling whatever height TopicDetailPage's tab-body slot
     // hands it (owner feedback 2026-08-15): every row of chrome here (header,
@@ -1284,15 +1298,7 @@ export function Timeline({
       {tailErrorText && (
         <p className="text-sm text-amber-600 dark:text-amber-400">{`live stopped — ${tailErrorText}`}</p>
       )}
-      {continueDirection === 'forward' && (
-        <button
-          data-testid="continue-scan"
-          onClick={continueScan}
-          className="w-full rounded border border-amber-400 py-1 text-xs text-amber-600 dark:border-amber-600 dark:text-amber-400"
-        >
-          {continueScanLabel}
-        </button>
-      )}
+      {continueDirection === 'forward' && continueScanButton}
       <Panel
         className="flex min-h-0 flex-1 flex-col overflow-hidden"
         error={state.error}
@@ -1302,13 +1308,7 @@ export function Timeline({
         <MessageList ref={listRef} messages={rows} onScroll={handleScroll} jumpTarget={jumpTarget} />
       </Panel>
       {continueDirection === 'back' ? (
-        <button
-          data-testid="continue-scan"
-          onClick={continueScan}
-          className="w-full rounded border border-amber-400 py-1 text-xs text-amber-600 dark:border-amber-600 dark:text-amber-400"
-        >
-          {continueScanLabel}
-        </button>
+        continueScanButton
       ) : (
         // Captions (design spec v1.6): "beginning of topic" only when the
         // bottom edge is genuinely the topic start — exhausted AND not
