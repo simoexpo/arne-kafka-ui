@@ -7,8 +7,6 @@ import { FilterHelp } from '../../components/FilterHelp'
 import { MessageList } from '../../components/messages/MessageList'
 import type { MessageListHandle } from '../../components/messages/MessageList'
 import { Panel } from '../../components/Panel'
-import { StalenessChip } from '../../components/StalenessChip'
-import { TimeZoneToggle } from '../../components/TimeZoneToggle'
 import { parseFilterQuery, type FilterQueryApi } from '../../lib/filterQuery'
 import { formatWindowRange } from '../../lib/format'
 import { decodeCursor } from '../../lib/timelineCursor'
@@ -24,8 +22,8 @@ import { stepSettling, type SettlingState } from '../../lib/timeline/settling'
 import { useFallingEdge } from './useFallingEdge'
 import { ContinueScanButton } from './ContinueScanButton'
 import { JumpControl } from './JumpControl'
-import { LivePill, PlayPauseToggle } from './LivePill'
 import { useTimelinePage } from './useTimelinePage'
+import { TimelineHeader } from './TimelineHeader'
 
 const PAGE_LIMIT = 100
 // ~20 auto-continues per gesture, per the design spec; the policy lives in
@@ -943,57 +941,19 @@ export function Timeline({
     // internal scroller ends up the ONE scroller on this tab — see its own
     // comment on the className it's given.
     <div className="flex h-full flex-col gap-3">
-      <div className="flex items-center justify-between">
-        <h2 className="text-sm font-medium text-zinc-500 dark:text-zinc-400" data-testid="window-range">
-          {rows.length === 0
-            ? 'no messages loaded'
-            : formatWindowRange(rows.at(-1)!.timestamp_ms, rows[0].timestamp_ms, timeDisplayMode)}
-        </h2>
-        {/* Owner feedback (stability): the pill/live-dot are the VOLATILE
-            members of this cluster — they pop in and out with network
-            activity, which used to shove the clickable controls (play/pause,
-            the zone toggle) sideways underneath the reader's cursor. Fixed
-            by ANCHORING from the right rather than relying on ordering
-            alone: this row's parent is `justify-between` with exactly two
-            children (the `h2` and this div), so this div's own right edge
-            sits flush against the header line's right edge regardless of
-            its content width — and within it, plain flex-row order means
-            the LAST child is flush against THAT edge. Placing the zone
-            toggle last (rightmost/outermost) and the play/pause-or-staleness
-            slot immediately before it (second-to-last) pins both at a fixed
-            distance from that right edge no matter what the volatile
-            elements to their left do; the volatile pill/dot come FIRST
-            (closest to the free space between the two `h2`/controls
-            children), so their own appearing/disappearing only ever grows
-            or shrinks that free space, never the position of anything to
-            their right. See Timeline.test.tsx's "stable header controls"
-            suite for the pixel-stability assertion. */}
-        <div className="flex items-center gap-2">
-          <LivePill count={liveBufferRef.current.received} capped={liveBufferRef.current.overflowed} attached={attached} onClick={handlePillClick} />
-          {live && attached && !paused && <span className="animate-pulse text-emerald-500">● live</span>}
-          {attached ? (
-            live ? (
-              // Attached: the normal live play/pause toggle.
-              <PlayPauseToggle paused={paused} onClick={handlePlayPauseToggle} />
-            ) : (
-              // Attached but live has died: this alarm is honest (new data
-              // is genuinely missing) — keep today's aging/alarm tiers.
-              <StalenessChip asOf={rows[0]?.timestamp_ms ?? null} failed={false} />
-            )
-          ) : (
-            // Detached (design spec v1.3, owner ruling 2026-08-15): the
-            // toggle IS the mode signal — always shown lit paused (live
-            // rendering is off by definition while detached, regardless of
-            // pauseReason, which keeps driving buffering underneath), no
-            // pulsing "● live", and no staleness chip — a historical page is
-            // immutable, there is nothing to be stale about. Clicking the
-            // toggle here jumps to now (handlePlayPauseToggle), same as the
-            // pill.
-            <PlayPauseToggle paused onClick={handlePlayPauseToggle} />
-          )}
-          <TimeZoneToggle />
-        </div>
-      </div>
+      <TimelineHeader
+        rangeLabel={
+          rows.length === 0 ? 'no messages loaded' : formatWindowRange(rows.at(-1)!.timestamp_ms, rows[0].timestamp_ms, timeDisplayMode)
+        }
+        bufferCount={liveBufferRef.current.received}
+        bufferCapped={liveBufferRef.current.overflowed}
+        attached={attached}
+        tailAlive={live}
+        paused={paused}
+        newestTsMs={rows[0]?.timestamp_ms ?? null}
+        onPillClick={handlePillClick}
+        onPlayPauseClick={handlePlayPauseToggle}
+      />
       <div className="flex flex-wrap items-center gap-3">
         <div className="min-w-0 flex-1">
           <FilterInput value={filterText} onChange={setFilterText} placeholder="filter messages…" ariaLabel="filter messages" className="w-full" fullWidth />
