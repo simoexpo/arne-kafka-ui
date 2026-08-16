@@ -5,7 +5,8 @@ use super::cursor::Direction;
 /// Computes, per partition, a window of up to `span` records adjacent to
 /// `positions` in `direction`, clamped to that partition's watermarks.
 /// Partitions with nothing available in that direction (already at the
-/// edge) are omitted, matching `range::window_ranges`'s convention.
+/// edge) are omitted — the resulting `range::PartitionRange`s always have
+/// `end > start`.
 pub fn page_windows(
     positions: &[(i32, i64)],
     watermarks: &[(i32, i64, i64)],

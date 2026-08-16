@@ -193,11 +193,6 @@ pub(crate) mod tests {
         assert!(err.contains("999"), "got: {err}");
     }
 
-    /// I6 regression: without negative caching, every lookup of a
-    /// permanently-failing schema id pays a full HTTP round trip — under an
-    /// unreachable/misbehaving registry this stampedes it on every message.
-    /// Two lookups of the same failing id within the negative-cache TTL must
-    /// hit the registry once.
     /// I3 regression: decoding re-parsed the schema string (rebuilding the
     /// Avro `Schema` / protobuf `FileDescriptor` from scratch) on every
     /// single message, even though schemas are immutable per id and already
@@ -223,6 +218,11 @@ pub(crate) mod tests {
         assert!(matches!(&*p1, ParsedSchema::Protobuf(_)));
     }
 
+    /// I6 regression: without negative caching, every lookup of a
+    /// permanently-failing schema id pays a full HTTP round trip — under an
+    /// unreachable/misbehaving registry this stampedes it on every message.
+    /// Two lookups of the same failing id within the negative-cache TTL must
+    /// hit the registry once.
     #[tokio::test]
     async fn failing_lookup_is_negatively_cached_within_ttl() {
         let hits = Arc::new(AtomicUsize::new(0));

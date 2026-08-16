@@ -16,10 +16,11 @@ pub enum Direction {
 
 impl Default for Direction {
     /// Arbitrary. `Cursor.direction` is informational only (see `Cursor`'s
-    /// doc comment) — the backend never reads it back for anything besides
-    /// debugging/logging — so this only exists to give `#[serde(default)]`
-    /// something to produce when a client-constructed cursor omits the
-    /// field entirely, which the documented wire format explicitly allows.
+    /// doc comment, `:44-46`) — the backend never enforces it against
+    /// anything; nothing reads it back at all — so this only exists to give
+    /// `#[serde(default)]` something to produce when a client-constructed
+    /// cursor omits the field entirely, which the documented wire format
+    /// explicitly allows.
     fn default() -> Self {
         Direction::Forward
     }

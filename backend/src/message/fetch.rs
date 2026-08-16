@@ -119,7 +119,7 @@ pub struct FetchOutcome {
 /// returns what it delivered plus which partitions it finished (see
 /// `FetchOutcome`).
 ///
-/// Three independent bounds stop the loop, and only the first is about
+/// Four independent bounds stop the loop, and only the first is about
 /// having the data: every requested range is done; `FETCH_DEADLINE` wall
 /// clock elapsed; `cap` records collected; or `cancelled` is set (a client
 /// disconnect — honoring it here is what stops an in-flight scan instead of

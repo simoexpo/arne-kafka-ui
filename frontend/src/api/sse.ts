@@ -3,8 +3,9 @@ import type { MessageOut, SseErrorData } from './types'
 const enc = encodeURIComponent
 
 // Review finding, 2026-08-15: the backend's own error events are wire-named
-// "app_error", never "error" — see `TimelineEvent`/`TailEvent::name`'s own
-// comment in `backend/src/message/{timeline,tail}.rs`. A server-sent SSE
+// "app_error", never "error" — see `TimelineEvent::name`'s own comment in
+// `backend/src/message/timeline/event.rs` (mirrored by `TailEvent::name` in
+// `backend/src/message/tail.rs`). A server-sent SSE
 // frame with `event: error` collides with `EventSource`'s OWN reserved
 // connection-level error type in a real browser: BOTH `addEventListener(
 // 'error', ...)` and the `onerror` IDL handler below fire for it, and the
