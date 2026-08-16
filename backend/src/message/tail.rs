@@ -34,10 +34,10 @@ impl TailEvent {
         match self {
             TailEvent::Message(_) => "message",
             // Deliberately NOT "error" — see `TimelineEvent::name`'s own
-            // comment (`message/timeline.rs`): that literal name collides
-            // with `EventSource`'s own reserved connection-error event in a
-            // real browser (a 2026-08-15 review finding), so both this and
-            // the timeline event use "app_error" instead.
+            // comment (`message/timeline/event.rs`): that literal name
+            // collides with `EventSource`'s reserved connection-error event
+            // in a real browser, so both this and the timeline event use
+            // "app_error" instead.
             TailEvent::Error { .. } => "app_error",
         }
     }
@@ -45,7 +45,7 @@ impl TailEvent {
 
 /// Shapes a terminal error event to match the `ApiError` JSON envelope used
 /// everywhere else in the API — mirrors `impl From<ApiError> for
-/// TimelineEvent` (`message/timeline.rs`).
+/// TimelineEvent` (`message/timeline/event.rs`).
 impl From<&ApiError> for TailEvent {
     fn from(err: &ApiError) -> Self {
         TailEvent::Error {

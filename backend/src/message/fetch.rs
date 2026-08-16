@@ -17,9 +17,10 @@ use std::time::{Duration, Instant};
 /// i.e. calls that actually built a `BaseConsumer`, not the early-return for
 /// an already-empty range set. Test-only observability: a client-disconnect
 /// integration test uses this to prove a cancelled scan stops minting fresh
-/// consumers rather than spinning forever (the C1 zombie-scan bug). Scoped
-/// per-topic (not a single global count) so it stays meaningful even when
-/// other tests' fetches run concurrently against the shared test broker.
+/// consumers rather than spinning forever (the "no zombie scans"
+/// guarantee). Scoped per-topic (not a single global count) so it stays
+/// meaningful even when other tests' fetches run concurrently against the
+/// shared test broker.
 static FETCH_CALLS: OnceLock<Mutex<HashMap<String, u64>>> = OnceLock::new();
 
 fn record_fetch_call(topic: &str) {
@@ -67,11 +68,12 @@ impl RawRecord {
     }
 }
 
-/// Fetches fresh per-partition low/high watermarks for `topic`. Shared by
-/// every caller that needs them — `api::messages`'s browse/search anchor
-/// resolution and `message::timeline::run_page` alike (fix round 1, M4) —
-/// so there's exactly one implementation of "ask Kafka for a topic's
-/// current bounds", not a copy per call site.
+/// Fetches fresh per-partition low/high watermarks for `topic`. The single
+/// implementation of "ask Kafka for a topic's current bounds", shared by
+/// every caller that needs them, so no call site can drift into its own
+/// copy. `api::messages` calls it once per timeline request and hands the
+/// result to `message::timeline::run_page`, which never re-reads it
+/// mid-page.
 pub fn watermarks_blocking(handle: &ClusterHandle, topic: &str) -> Result<Vec<(i32, i64, i64)>, ApiError> {
     let md = handle.consumer()
         .fetch_metadata(Some(topic), ADMIN_TIMEOUT)
@@ -95,23 +97,36 @@ pub fn watermarks_blocking(handle: &ClusterHandle, topic: &str) -> Result<Vec<(i
 /// opposed to stopping early because of this function's own deadline or
 /// `cap`.
 ///
-/// Fix round 3, N4: this distinction matters because Kafka topics
-/// legitimately have offset holes that carry no message at all —
-/// transaction control records (a committed transaction's own commit
-/// marker consumes a real offset, typically the last one before the
-/// partition's high watermark), aborted-transaction ranges, and compacted
-/// tombstones. A partition marked complete here had its *entire* requested
-/// range scanned, so any offsets in that range absent from `records` are
-/// confirmed, legitimate holes — never mistaken for data that might still
-/// be sitting behind a slow poll. A partition *not* marked complete
-/// stopped for an unknown reason (deadline, `cap`, cancellation) and its
-/// gaps (if any) cannot be trusted the same way.
+/// The distinction matters because Kafka topics legitimately have offset
+/// holes that carry no message at all — transaction control records (a
+/// committed transaction's own commit marker consumes a real offset,
+/// typically the last one before the partition's high watermark),
+/// aborted-transaction ranges, and compacted tombstones. A partition marked
+/// complete had its *entire* requested range scanned, so any offsets in
+/// that range absent from `records` are confirmed, legitimate holes — never
+/// data that might still be sitting behind a slow poll. A partition *not*
+/// marked complete stopped for an unknown reason (deadline, `cap`,
+/// cancellation) and its gaps cannot be trusted the same way. `run_page`'s
+/// short-read guard and its cursor advance both hinge on this flag.
 #[derive(Debug)]
 pub struct FetchOutcome {
     pub records: Vec<RawRecord>,
     pub complete: HashSet<i32>,
 }
 
+/// Scans the requested half-open `[start, end)` offset ranges, one poll
+/// loop over a throwaway consumer assigned to all of them at once, and
+/// returns what it delivered plus which partitions it finished (see
+/// `FetchOutcome`).
+///
+/// Three independent bounds stop the loop, and only the first is about
+/// having the data: every requested range is done; `FETCH_DEADLINE` wall
+/// clock elapsed; `cap` records collected; or `cancelled` is set (a client
+/// disconnect — honoring it here is what stops an in-flight scan instead of
+/// leaving a zombie poll loop running). Stopping for any reason other than
+/// finishing a partition's range simply leaves that partition out of
+/// `complete`; it is never an error, and the caller decides what an
+/// incomplete partition means.
 pub fn fetch_ranges_blocking(
     cfg: &ClusterConfig,
     topic: &str,
@@ -185,15 +200,15 @@ pub fn fetch_ranges_blocking(
 }
 
 /// Fetches exactly one record at `(partition, offset)` — a bounded,
-/// single-record read. Owner ruling 2026-08-15: this is how a forward
-/// offset-anchor jump resolves the anchored message's own timestamp (so
-/// every OTHER partition can align at that same moment — see
-/// `Anchor::OffsetForwardAligned` in `timeline.rs`). Same consumer
-/// discipline as every other fetch here (`fetch_ranges_blocking`, its own
-/// throwaway consumer, the same internal deadline) — not a special,
-/// unbounded path. Returns `None` if there's no message at that exact
-/// position (already past the high watermark, or the offset lands on a
-/// hole — a compacted/tombstoned record).
+/// single-record read. This is how a forward offset-anchor jump resolves
+/// the anchored message's own timestamp, so every OTHER partition can align
+/// at that same moment (see `timeline::Anchor::OffsetForwardAligned`).
+/// Deliberately built on `fetch_ranges_blocking`, so it inherits the same
+/// consumer discipline every other fetch here has — throwaway consumer,
+/// same internal deadline — rather than being a special unbounded path.
+/// Returns `None` if there's no message at that exact position (already
+/// past the high watermark, or the offset lands on a hole — a
+/// compacted/tombstoned record).
 pub fn fetch_one_record_blocking(
     cfg: &ClusterConfig,
     topic: &str,
