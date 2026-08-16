@@ -6,13 +6,8 @@ use super::cursor::Direction;
 /// True if `candidate` should be selected over `current_best` as the next
 /// record taken in `run_page`'s k-way merge (see its doc comment): `Back`
 /// prefers the higher timestamp, `Forward` the lower. Ties break by
-/// partition ascending, then — per the design — offset in the direction's
-/// own sense (`Back`: higher wins; `Forward`: lower wins). In practice a
-/// partition-level tie can't arise within one merge step (each partition
-/// contributes at most one candidate at a time, so equal partition already
-/// means it's the same stream), but the offset tie-break is kept for a
-/// fully deterministic order and to mirror the same convention used
-/// elsewhere (e.g. the final display sort below).
+/// partition ascending — each partition contributes at most one candidate
+/// per merge step, so a partition-level tie cannot arise.
 pub(super) fn merge_prefers(direction: Direction, candidate: &RawRecord, current_best: &RawRecord) -> bool {
     let (ct, bt) = (candidate.timestamp_ms.unwrap_or(i64::MIN), current_best.timestamp_ms.unwrap_or(i64::MIN));
     let ts_favors_candidate = match direction {
@@ -22,14 +17,7 @@ pub(super) fn merge_prefers(direction: Direction, candidate: &RawRecord, current
     if ct != bt {
         return ts_favors_candidate;
     }
-    match candidate.partition.cmp(&current_best.partition) {
-        std::cmp::Ordering::Less => true,
-        std::cmp::Ordering::Greater => false,
-        std::cmp::Ordering::Equal => match direction {
-            Direction::Back => candidate.offset > current_best.offset,
-            Direction::Forward => candidate.offset < current_best.offset,
-        },
-    }
+    candidate.partition < current_best.partition
 }
 
 /// Owner's ordering ruling (spec v1.2 §Out-of-order policy): within one
@@ -138,14 +126,4 @@ mod tests {
         assert!(!merge_prefers(Direction::Forward, &newer, &older));
     }
 
-    #[test]
-    fn merge_prefers_ties_break_by_offset_per_direction() {
-        // Same partition, same timestamp: only one of these two records can
-        // ever be a merge candidate at once in practice (see `merge_prefers`'s
-        // doc comment), but the tie-break must still be well-defined.
-        let higher_offset = raw(0, 5, Some(100));
-        let lower_offset = raw(0, 3, Some(100));
-        assert!(merge_prefers(Direction::Back, &higher_offset, &lower_offset), "Back prefers the higher offset on a tie");
-        assert!(merge_prefers(Direction::Forward, &lower_offset, &higher_offset), "Forward prefers the lower offset on a tie");
-    }
 }
