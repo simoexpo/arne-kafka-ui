@@ -442,7 +442,7 @@ async fn timeline_bad_direction_is_an_in_stream_error_not_a_400() {
         "/api/clusters/test/topics/x/timeline?direction=sideways&limit=10&anchor=latest",
         20,
     ).await;
-    let (_, err) = events.iter().find(|(n, _)| n == "app_error").expect("an in-stream error event: {events:?}").clone();
+    let (_, err) = events.iter().find(|(n, _)| n == "app_error").unwrap_or_else(|| panic!("an in-stream error event: {events:?}")).clone();
     assert_eq!(err["code"], "bad_request", "{err}");
 }
 
@@ -835,7 +835,7 @@ async fn timeline_offset_anchor_forward_at_a_hole_reports_an_in_stream_error_not
     ).await;
     assert!(events.iter().all(|(n, _)| n != "match"), "no message exists at the hole: {events:?}");
     assert!(!events.iter().any(|(n, _)| n == "page_end"), "must end in error, not page_end: {events:?}");
-    let (_, err) = events.iter().find(|(n, _)| n == "app_error").expect("an in-stream error event: {events:?}").clone();
+    let (_, err) = events.iter().find(|(n, _)| n == "app_error").unwrap_or_else(|| panic!("an in-stream error event: {events:?}")).clone();
     assert_eq!(err["code"], "bad_request", "{err}");
     assert!(
         err["message"].as_str().unwrap().contains("partition 0 offset 5"),
@@ -866,7 +866,7 @@ async fn timeline_offset_anchor_forward_past_the_high_watermark_reports_an_in_st
         20,
     ).await;
     assert!(events.iter().all(|(n, _)| n != "match"), "no wrong record may be silently returned: {events:?}");
-    let (_, err) = events.iter().find(|(n, _)| n == "app_error").expect("an in-stream error event: {events:?}").clone();
+    let (_, err) = events.iter().find(|(n, _)| n == "app_error").unwrap_or_else(|| panic!("an in-stream error event: {events:?}")).clone();
     assert_eq!(err["code"], "bad_request", "{err}");
     assert!(
         err["message"].as_str().unwrap().contains("partition 0 offset 5000"),
@@ -951,7 +951,7 @@ async fn timeline_limit_zero_is_an_in_stream_error_not_a_400() {
         "/api/clusters/test/topics/x/timeline?direction=back&limit=0&anchor=latest",
         20,
     ).await;
-    let (_, err) = events.iter().find(|(n, _)| n == "app_error").expect("an in-stream error event: {events:?}").clone();
+    let (_, err) = events.iter().find(|(n, _)| n == "app_error").unwrap_or_else(|| panic!("an in-stream error event: {events:?}")).clone();
     assert_eq!(err["code"], "bad_request", "{err}");
 }
 
@@ -969,7 +969,7 @@ async fn timeline_bad_params_on_unknown_cluster_reports_the_param_error() {
         "/api/clusters/ghost/topics/x/timeline?direction=sideways&limit=10&anchor=latest",
         20,
     ).await;
-    let (_, err) = events.iter().find(|(n, _)| n == "app_error").expect("an in-stream error event: {events:?}").clone();
+    let (_, err) = events.iter().find(|(n, _)| n == "app_error").unwrap_or_else(|| panic!("an in-stream error event: {events:?}")).clone();
     assert_eq!(err["code"], "bad_request", "{err}");
 }
 
@@ -985,7 +985,7 @@ async fn timeline_bad_cursor_is_an_in_stream_error() {
         "/api/clusters/test/topics/x/timeline?direction=back&limit=10&cursor=not-valid-base64-json",
         20,
     ).await;
-    let (_, err) = events.iter().find(|(n, _)| n == "app_error").expect("an in-stream error event: {events:?}").clone();
+    let (_, err) = events.iter().find(|(n, _)| n == "app_error").unwrap_or_else(|| panic!("an in-stream error event: {events:?}")).clone();
     assert_eq!(err["code"], "bad_request", "{err}");
     assert!(err["message"].as_str().unwrap().contains("bad cursor"), "{err}");
 }
@@ -1004,7 +1004,7 @@ async fn timeline_non_numeric_limit_is_an_in_stream_error_not_text_plain() {
         "/api/clusters/test/topics/x/timeline?direction=back&limit=abc&anchor=latest",
         20,
     ).await;
-    let (_, err) = events.iter().find(|(n, _)| n == "app_error").expect("an in-stream error event: {events:?}").clone();
+    let (_, err) = events.iter().find(|(n, _)| n == "app_error").unwrap_or_else(|| panic!("an in-stream error event: {events:?}")).clone();
     assert_eq!(err["code"], "bad_request", "{err}");
 }
 
@@ -1020,7 +1020,7 @@ async fn timeline_missing_direction_is_an_in_stream_error_not_text_plain() {
         "/api/clusters/test/topics/x/timeline?limit=5&anchor=latest",
         20,
     ).await;
-    let (_, err) = events.iter().find(|(n, _)| n == "app_error").expect("an in-stream error event: {events:?}").clone();
+    let (_, err) = events.iter().find(|(n, _)| n == "app_error").unwrap_or_else(|| panic!("an in-stream error event: {events:?}")).clone();
     assert_eq!(err["code"], "bad_request", "{err}");
 }
 
@@ -1114,7 +1114,7 @@ async fn timeline_bad_filter_params_are_an_in_stream_error() {
         "/api/clusters/test/topics/x/timeline?direction=back&limit=10&anchor=latest&filter=sideways&q=x",
         20,
     ).await;
-    let (_, err) = events.iter().find(|(n, _)| n == "app_error").expect("unknown filter kind: {events:?}").clone();
+    let (_, err) = events.iter().find(|(n, _)| n == "app_error").unwrap_or_else(|| panic!("unknown filter kind: {events:?}")).clone();
     assert_eq!(err["code"], "bad_request", "{err}");
 
     let events = collect_sse(
@@ -1122,7 +1122,7 @@ async fn timeline_bad_filter_params_are_an_in_stream_error() {
         "/api/clusters/test/topics/x/timeline?direction=back&limit=10&anchor=latest&filter=contains",
         20,
     ).await;
-    let (_, err) = events.iter().find(|(n, _)| n == "app_error").expect("missing q: {events:?}").clone();
+    let (_, err) = events.iter().find(|(n, _)| n == "app_error").unwrap_or_else(|| panic!("missing q: {events:?}")).clone();
     assert_eq!(err["code"], "bad_request", "{err}");
 
     let events = collect_sse(
@@ -1130,7 +1130,7 @@ async fn timeline_bad_filter_params_are_an_in_stream_error() {
         "/api/clusters/test/topics/x/timeline?direction=back&limit=10&anchor=latest&filter=json_eq&q=42",
         20,
     ).await;
-    let (_, err) = events.iter().find(|(n, _)| n == "app_error").expect("json_eq missing path: {events:?}").clone();
+    let (_, err) = events.iter().find(|(n, _)| n == "app_error").unwrap_or_else(|| panic!("json_eq missing path: {events:?}")).clone();
     assert_eq!(err["code"], "bad_request", "{err}");
 }
 
