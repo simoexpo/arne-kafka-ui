@@ -130,7 +130,7 @@ export function JumpControl({ onJump, partitionIds = [] }: { onJump: (target: Ju
             value={offsetText}
             onChange={(e) => setOffsetText(e.target.value)}
             onKeyDown={(e) => e.key === 'Enter' && applyOffset()}
-            className="w-20 rounded border border-zinc-300 px-1 py-0.5 dark:border-zinc-700 dark:bg-zinc-900"
+            className="w-36 rounded border border-zinc-300 px-1 py-0.5 dark:border-zinc-700 dark:bg-zinc-900"
           />
           <button
             type="button"
