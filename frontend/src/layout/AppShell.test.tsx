@@ -33,6 +33,14 @@ describe('Sidebar', () => {
     expect(screen.getByAltText('Betrachtung logo')).toHaveAttribute('src', '/logo.svg')
   })
 
+  it('surfaces a clusters-fetch failure honestly instead of silently rendering as zero other clusters', async () => {
+    await renderWithRouter(
+      <Sidebar cluster="prod" clusters={[]} active="topics" error={new Error('Failed to fetch')} />,
+      { initialPath: '/c/prod/topics' },
+    )
+    expect(screen.getByText(/connection to betrachtung lost/i)).toBeInTheDocument()
+  })
+
   // The UTC/local toggle moved out of the sidebar into the Messages tab's
   // Timeline header (see TimeZoneToggle.tsx / Timeline.tsx) — its effect
   // (rewriting the window-range/row timestamps) is only ever visible there,

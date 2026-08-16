@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { Link, Outlet, useLocation, useParams } from '@tanstack/react-router'
 import { getClusters } from '../api/client'
+import { describeError } from '../api/errors'
 import type { ClusterHealth } from '../api/types'
 import { CommandPalette } from '../components/CommandPalette' // Task 11 stub
 
@@ -34,10 +35,15 @@ export function sectionFromPathname(pathname: string, cluster: string): Section 
   return segment === 'topics' || segment === 'groups' ? segment : 'overview'
 }
 
-export function Sidebar({ cluster, clusters, active }: {
+export function Sidebar({ cluster, clusters, active, error }: {
   cluster: string
   clusters: ClusterHealth[]
   active: Section
+  // The clusters-list query failing is not "zero other clusters" — silently
+  // rendering an empty switcher would look identical to a healthy single-
+  // cluster setup. Surface it the same way Panel does: a real headline via
+  // describeError, not a bare "error" string.
+  error?: unknown
 }) {
   return (
     <aside className="flex w-56 flex-col gap-6 border-r border-zinc-200 p-4 dark:border-zinc-800">
@@ -68,23 +74,34 @@ export function Sidebar({ cluster, clusters, active }: {
           {cluster}
         </div>
         <div className="mt-2 flex flex-col gap-1">
-          {clusters.filter((c) => c.name !== cluster).map((c) => (
-            <Link
-              key={c.name}
-              to={SECTION_PATHS[active]}
-              params={{ cluster: c.name }}
-              className="flex items-center gap-2 rounded px-1 py-0.5 text-sm text-zinc-600 hover:bg-zinc-100 dark:text-zinc-400 dark:hover:bg-zinc-900"
-            >
-              <HealthDot status={c.status} />
-              {c.name}
-            </Link>
-          ))}
+          {error
+            ? <ClustersFailure error={error} />
+            : clusters.filter((c) => c.name !== cluster).map((c) => (
+              <Link
+                key={c.name}
+                to={SECTION_PATHS[active]}
+                params={{ cluster: c.name }}
+                className="flex items-center gap-2 rounded px-1 py-0.5 text-sm text-zinc-600 hover:bg-zinc-100 dark:text-zinc-400 dark:hover:bg-zinc-900"
+              >
+                <HealthDot status={c.status} />
+                {c.name}
+              </Link>
+            ))}
         </div>
         <div className="mt-4 flex items-center gap-2">
           <ThemeToggle />
         </div>
       </div>
     </aside>
+  )
+}
+
+function ClustersFailure({ error }: { error: unknown }) {
+  const { headline } = describeError(error)
+  return (
+    <p data-testid="sidebar-clusters-error" className="text-xs text-red-600 dark:text-red-400">
+      {headline ?? 'failed to load clusters'}
+    </p>
   )
 }
 
@@ -161,12 +178,12 @@ export function ThemeToggle() {
 export function AppShell() {
   const params = useParams({ strict: false }) as { cluster?: string }
   const cluster = params.cluster ?? ''
-  const { data } = useClusters()
+  const { data, error } = useClusters()
   const { pathname } = useLocation()
   const active = sectionFromPathname(pathname, cluster)
   return (
     <div className="flex h-dvh bg-white text-zinc-900 dark:bg-zinc-950 dark:text-zinc-100">
-      {cluster && <Sidebar cluster={cluster} clusters={data?.clusters ?? []} active={active} />}
+      {cluster && <Sidebar cluster={cluster} clusters={data?.clusters ?? []} active={active} error={error} />}
       {/* Viewport-fixed shell (owner feedback 2026-08-15): the app itself
           never scrolls — `main` is a bounded-height flex item (h-dvh ->
           flex stretch) with overflow-hidden, so document/body can't scroll
