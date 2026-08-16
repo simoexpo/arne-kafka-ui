@@ -15,36 +15,35 @@ use super::event::TimelineEvent;
 use super::merge::{chunk_display_order, merge_prefers};
 use super::window::{adjacent_offset, at_edge, cap_windows_to_budget, clamp_positions, page_windows};
 
-/// Fix round 3, N4 (refines round 2's N2/N3 guard): a page "made no
-/// progress" only when nothing was taken, the scan wasn't cancelled, *and*
-/// at least one window belonged to a partition that was **not** completely
-/// scanned (a genuine short read — fetch's internal deadline or `cap`, not
-/// a legitimate Kafka hole).
+/// A chunk "made no progress" only when nothing was taken, the scan wasn't
+/// cancelled, *and* at least one window belonged to a partition that was
+/// **not** scanned to completion — a genuine short read (fetch's internal
+/// deadline or `cap`), not a legitimate Kafka hole. That case leaves a
+/// partition's data genuinely unknown, and must never be reported as
+/// "nothing here" nor as an unadvanced, non-exhausted `page_end` (the first
+/// loses data, the second loops the client forever): `run_page` turns it
+/// into a terminal `error` instead.
 ///
-/// This is narrower than round 2's version, which fired on `windows
-/// non-empty && taken empty` alone. That was wrong given N4: a partition
-/// whose window is entirely legitimate holes (e.g. only a transaction
-/// control record) is completely scanned, contributes zero taken records,
-/// *and that's correct* — its position still advances to the window
-/// boundary in `run_page` (nothing was missed, we just confirmed there was
-/// nothing there). Firing this guard on that case would turn ordinary,
-/// hole-only pages into spurious errors. The real failure mode this guards
-/// against is unchanged from round 2: a short read (or a compaction/
-/// retention race) leaving a partition's data genuinely unknown, which must
-/// never be silently reported as "nothing here" nor as an unadvanced,
-/// non-exhausted `page_end` (both would either lose data or loop the client
-/// forever) — it must surface as a terminal `error` instead.
+/// All three conditions are load-bearing:
+///
+/// - **Nothing taken alone is not an error.** A window that is entirely
+///   legitimate holes (say, only a transaction control record) is scanned
+///   to completion, contributes zero taken records, and is correct — its
+///   position still advances to the window boundary in `run_page`, because
+///   nothing was missed; the range was confirmed empty. Firing here on that
+///   case would turn ordinary hole-only chunks into spurious errors.
+/// - **Cancellation is carved out.** A client disconnect mid-scan can
+///   legitimately leave nothing taken; that's not a broker anomaly.
 fn page_made_no_progress(taken_is_empty: bool, any_incomplete_window: bool, cancelled: bool) -> bool {
     taken_is_empty && any_incomplete_window && !cancelled
 }
 
-/// Per-partition span of one scan iteration ("chunk") once a page needs to
-/// keep looking past its first window — either because it's hunting for
-/// filter matches, or (this task's amendment) crossing a hole-dominated
-/// region on an unfiltered page. Deliberately much larger than a typical
-/// `limit` (100-500): a chunk's job is to make real progress against
-/// sparse matches/holes without round-tripping to the broker for every few
-/// records.
+/// Per-partition span of one scan iteration ("chunk") whenever a page needs
+/// to keep looking past its first window — hunting for filter matches, or
+/// crossing a hole-dominated region on an unfiltered page. Deliberately much
+/// larger than a typical `limit` (100-500): a chunk's job is to make real
+/// progress against sparse matches/holes without round-tripping to the
+/// broker for every few records.
 const CHUNK_SPAN: u64 = 5_000;
 
 /// How often (in records popped) a mid-chunk `progress` event goes out —
@@ -52,22 +51,17 @@ const CHUNK_SPAN: u64 = 5_000;
 const PROGRESS_INTERVAL: u64 = 2_000;
 
 /// Whether the `records_popped_this_chunk`-th record popped in the current
-/// chunk (a plain running count, 1-indexed, reset only when a new chunk
-/// starts) is due a mid-chunk `progress` emission, and if so, the `scanned`
-/// value to report.
-///
-/// B1 fix: fires every `PROGRESS_INTERVAL` records, reporting
+/// chunk is due a mid-chunk `progress` emission, and if so, the `scanned`
+/// value to report: every `PROGRESS_INTERVAL` records, reporting
 /// `total_scanned` (every earlier chunk's already-committed, offset-based
-/// charge) plus how far *this* chunk has gotten so far. Critically,
-/// `records_popped_this_chunk` is cumulative for the whole chunk and is
-/// never reset between calls — the pre-fix version reset its counter to 0
-/// after every emission, so the first emit in a chunk reported
-/// `total_scanned + PROGRESS_INTERVAL` and the second, `PROGRESS_INTERVAL`
-/// records later in that SAME chunk, reported `total_scanned +
-/// PROGRESS_INTERVAL` again: an identical number, i.e. a progress bar that
-/// visibly freezes then jumps at chunk boundaries. Reporting the running
-/// total instead makes every mid-chunk emission strictly greater than the
-/// last.
+/// charge) plus how far *this* chunk has gotten so far.
+///
+/// Invariant: consecutive emissions within one chunk are strictly
+/// increasing. That depends on `records_popped_this_chunk` being a running
+/// count for the whole chunk (1-indexed, reset only when a new chunk
+/// starts) — a counter reset after each emission would report
+/// `total_scanned + PROGRESS_INTERVAL` every time, i.e. a progress bar that
+/// freezes mid-chunk and jumps only at chunk boundaries.
 fn mid_chunk_progress(total_scanned: u64, records_popped_this_chunk: u64) -> Option<u64> {
     (records_popped_this_chunk > 0 && records_popped_this_chunk.is_multiple_of(PROGRESS_INTERVAL))
         .then_some(total_scanned + records_popped_this_chunk)
@@ -75,117 +69,118 @@ fn mid_chunk_progress(total_scanned: u64, records_popped_this_chunk: u64) -> Opt
 
 /// Runs one timeline page — filtered or not, `filter: None` behaving as
 /// match-everything (the design's "filter-off = match-all, same code
-/// path"). Fetches fresh-enough windows, scans and decodes them, and emits
-/// `TimelineEvent`s over an mpsc channel until `limit` matches are found,
-/// the topic edge is truly reached, or the per-request scan `budget` is
-/// spent.
+/// path"). Scans and decodes windows of `topic` starting from `positions`,
+/// emitting `TimelineEvent`s over an mpsc channel until `limit` matches are
+/// found, the topic edge is truly reached, or the per-request scan `budget`
+/// is spent. `watermarks` and `positions` are resolved by the caller
+/// (`api::messages`); nothing here re-reads them mid-page.
 ///
-/// Fix round 2 replaced simple truncation with **contiguous selection**:
-/// each partition can only ever contribute a *contiguous prefix* of its
-/// window, walked strictly outward from the position, so a partition's own
-/// progress and "how much of its window got used" can't come apart (this
-/// is what killed round 1's N1 livelock). Fix round 3 (N4) extends that
-/// model to real Kafka: a partition's window frequently has legitimate
-/// offset holes with no message at all — a committed transaction's own
-/// commit marker consumes a real offset (typically the one right below the
-/// high watermark), as do aborted-transaction ranges and compacted
-/// tombstones — and round 2 could not tell those apart from a genuine short
-/// read (fetch's own deadline cutting a scan short), producing spurious
-/// errors or `exhausted: false` on perfectly healthy, hole-having topics.
+/// A page is a loop of **chunks**. One chunk scans one window of up to
+/// `CHUNK_SPAN` records per still-active partition — except the first chunk
+/// of an *unfiltered* page, which uses at most `limit`, so an ordinary
+/// "give me the latest 100" costs one small fetch instead of 5,000 records
+/// per partition on the off chance a hole is nearby. Every span is
+/// additionally capped by that partition's share of the remaining budget,
+/// and the chunk's windows as a set are capped to the remaining budget
+/// outright (`cap_windows_to_budget`), so a chunk can never overspend it.
+/// One chunk does the following.
 ///
-/// Task 3 turns the single-window pass into a **chunked scan loop**: each
-/// iteration below is a "chunk" — one window of up to `CHUNK_SPAN` records
-/// per partition (the very first chunk of an *unfiltered* page instead uses
-/// exactly `limit`, matching this engine's original one-shot behavior and
-/// its performance: an ordinary "give me the latest 100" page must not
-/// suddenly fetch 5,000 records per partition just in case there's a hole
-/// nearby). One chunk:
+/// 1. **Adjacent-first ordering.** Each partition's fetched records are
+///    ordered nearest-to-position first: `Back` descending by offset (the
+///    position is the window's exclusive upper bound), `Forward` ascending
+///    (the position is its inclusive lower bound — also the records'
+///    natural fetch order). Because the merge below always pops from the
+///    front, a partition can only ever contribute a *contiguous prefix* of
+///    its delivered records, walked strictly outward from the position.
+///    That is what keeps a partition's own progress and "how much of its
+///    window got used" from coming apart, which the cursor math in step 4
+///    relies on.
+/// 2. **Completeness, not adjacency, gates trust.** Kafka ranges
+///    legitimately contain offsets carrying no message at all: a committed
+///    transaction's commit marker consumes a real offset (typically the one
+///    just below the high watermark), as do aborted-transaction ranges and
+///    compacted tombstones. So a missing offset is only meaningful together
+///    with how far the fetch actually got. `fetch_ranges_blocking` reports
+///    (`FetchOutcome::complete`) which partitions it scanned to the *end of
+///    their requested range* (`PartitionEOF` or offset ≥ end) rather than
+///    stopping early for its own deadline, `cap`, or cancellation. A
+///    **complete** partition's records are trusted as-is, holes and all —
+///    the whole range was scanned, so a gap is confirmed, not suspicious.
+///    For an **incomplete** partition a hole is indistinguishable from data
+///    that simply hasn't arrived, so the short-read guard applies: unless
+///    its records include the position-adjacent offset (`adjacent_offset`),
+///    the entire window is discarded for this chunk — it contributes
+///    nothing and its position does not move.
+/// 3. **k-way merge, decode as you go.** Repeatedly compare the head (next
+///    unconsumed, adjacent-most record) of every partition's stream and take
+///    the one `merge_prefers` picks — best timestamp for the direction, see
+///    its doc comment for the tie-break — decoding and filtering that record
+///    immediately. Decoding record-by-record rather than batch-at-the-end is
+///    what lets the loop's stopping condition depend on the filter's
+///    verdict. Every popped record advances that partition's cursor
+///    bookkeeping whether it matched or not; only matches are queued for
+///    emission. The loop stops once accumulated matches (this chunk's plus
+///    every earlier chunk's in this request) reach `limit`, or every stream
+///    is empty.
+/// 4. **Cursor advance is offset-exact, never a record count.** A
+///    *complete* partition whose stream ends the chunk fully drained —
+///    every delivered record taken, or it started empty because the window
+///    was nothing but holes — jumps straight to the **window boundary**
+///    (`w.start` for `Back`, `w.end` for `Forward`): completeness confirms
+///    the entire range is accounted for, real records and holes alike, so
+///    there is nothing left to wait for, including a trailing hole past the
+///    last real record. A partition that is complete but still has records
+///    left in its stream (the merge hit the match target first) must NOT
+///    take that shortcut — it would skip pending data. Otherwise, a
+///    partition with records taken this chunk advances to
+///    `min(taken offsets)` for `Back` (the position is an exclusive upper
+///    bound, so the lowest offset actually taken *is* the new bound) or
+///    `max(taken offsets) + 1` for `Forward` (inclusive lower bound, so one
+///    past the highest). Counting records instead of using offsets would
+///    break on holes: "4 records taken" can span 5 offsets, and the cursor
+///    would land 1 offset short of where the scan really got — reporting
+///    `exhausted: false` on a fully drained window and re-serving
+///    already-taken records on the next page. A partition with nothing
+///    taken and not complete-and-drained keeps its old position: the safe
+///    default, whether it lost every merge comparison (real data still
+///    pending) or was incomplete (unknown state).
 ///
-/// 1. Per partition, order its fetched window records *adjacent-first*:
-///    `Back` sorts offset descending (nearest-to-position first, since the
-///    position is the window's upper bound); `Forward` sorts offset
-///    ascending (nearest-to-position first, since the position is the
-///    window's lower bound — this is simply the records' natural fetch
-///    order).
-/// 2. **N4 completeness, not adjacency, gates trust**: `fetch_ranges_blocking`
-///    now reports (`FetchOutcome::complete`) which partitions it scanned to
-///    the *end of their requested range* (`PartitionEOF` or offset ≥ end),
-///    as opposed to stopping early for an unrelated reason (its own
-///    deadline, `cap`, cancellation). A **complete** partition's delivered
-///    records are trusted as-is, holes and all — a missing offset there is
-///    confirmed, not suspicious, since the whole range was scanned. Only
-///    for an **incomplete** partition does round 2's original guard still
-///    apply: if its fetched records don't include the position-adjacent
-///    offset (`adjacent_offset`), the entire window is discarded for this
-///    chunk (contributes nothing, position doesn't move) — because for an
-///    incomplete partition we genuinely can't tell a hole from data that
-///    just hasn't arrived yet.
-/// 3. **k-way merge, decode-as-you-go**: repeatedly compare the current head
-///    (next unconsumed, adjacent-most record) of every partition's stream
-///    and take the one `merge_prefers` (best timestamp for the direction;
-///    see its doc comment for the tie-break), decoding and filtering it
-///    immediately — this record-by-record decode (as opposed to decoding
-///    the whole taken batch at the end, task 2's shape) is what lets the
-///    loop's stopping condition depend on the filter's verdict. Every
-///    popped record (matching or not) still advances that partition's
-///    cursor bookkeeping below; only matches are queued for emission. The
-///    inner loop stops once accumulated matches (this chunk's plus every
-///    earlier chunk's, this request) reach `limit`, or every stream is
-///    empty.
-/// 4. **Cursor (N6: by offset, not count)**: a *complete* partition whose
-///    stream ends this chunk fully drained — every delivered record was
-///    taken, or it started empty (a window that was nothing but holes) —
-///    jumps straight to the **window boundary** (`w.start`/`w.end`):
-///    completeness already confirms the *entire* range, real records and
-///    holes alike, has been accounted for, so there's nothing left to wait
-///    for, including any trailing hole past the last real record (a
-///    committed transaction's control record, say). Otherwise, a partition
-///    with records taken this chunk advances only to `min(taken offsets)`
-///    (`Back`) or `max(taken offsets) + 1` (`Forward`) — the position bound
-///    is exclusive-upper for `Back`, so the lowest offset actually taken
-///    *is* the new bound; inclusive-lower for `Forward`, so one past the
-///    highest. This must be offset-exact, not a record *count*: with holes,
-///    "4 records taken" can span a 5-offset range (one hole in it), and
-///    subtracting the count would strand the cursor 1 offset short of where
-///    it actually got to — reporting `exhausted: false` on a fully-drained
-///    window and, worse, re-serving already-taken records on the next
-///    page. A partition with nothing taken and *not* complete-and-drained
-///    keeps its old position unchanged — the safe default, whether it lost
-///    every merge comparison (real data still pending) or is incomplete
-///    (unknown state). The **scan budget** is charged by the exact offset
-///    span each partition's position advanced this chunk (`old.abs_diff(new)`,
-///    summed) — not by matches or even by delivered records — precisely so
-///    that a chunk whose window is nothing but holes (zero delivered
-///    records) still spends budget proportional to the ground it covered;
-///    otherwise an unfiltered page could cross an unbounded hole region for
-///    free, defeating the whole point of a *scan* budget.
-/// 5. Each chunk's matches (already ≤ remaining `limit`, already loss-free,
-///    already overlap-free) are put into **display** order by
-///    `chunk_display_order` — a k-way merge per spec v1.2's Out-of-order
-///    policy: within one partition, offset order ALWAYS; across partitions,
-///    merge by timestamp (ties: smaller partition id; null ts = i64::MIN) —
-///    and emitted before moving to the next chunk. This cannot invert a
-///    partition's own offset order the way a pure-timestamp sort could
-///    under non-monotonic producer timestamps. Chunk-to-chunk, the display
-///    order is only as good as each chunk's own merge — that's exactly the
-///    page-boundary "fuzz" the design doc already licenses, now also
-///    licensed *within* one request's chunks.
-/// 6. **Progress guarantee** (`page_made_no_progress`, narrowed by N4): a
-///    chunk that took nothing, wasn't cancelled, and had at least one
-///    genuinely *incomplete* window (a true short read) reports a terminal
-///    `error` rather than an unadvanced, non-exhausted `page_end`. A chunk
-///    that took nothing only because every window was complete-and-holes
-///    is *not* an error — it simply advances past the hole and (step 7)
-///    the outer loop tries another chunk.
+///    The **scan budget** is charged by the exact offset span each
+///    partition's position advanced this chunk (`old.abs_diff(new)`,
+///    summed) — not by matches, not even by delivered records — so that a
+///    chunk whose window is all holes (zero records delivered) still spends
+///    budget proportional to the ground it covered. Otherwise an unfiltered
+///    page could cross an unbounded hole region for free, defeating the
+///    point of a *scan* budget.
+/// 5. **Display order, then emit.** Each chunk's matches (already ≤ the
+///    remaining `limit`, already loss-free and overlap-free by steps 1-4)
+///    go through `chunk_display_order` before being sent: a k-way merge per
+///    spec v1.2's Out-of-order policy — within one partition, offset order
+///    ALWAYS; across partitions, merge by timestamp (ties: smaller
+///    partition id; null ts = `i64::MIN`). Unlike a pure-timestamp sort,
+///    this cannot invert a partition's own offset order under non-monotonic
+///    producer timestamps. Ordering holds *within* a chunk only; across
+///    chunks it is as good as each chunk's own merge — the same
+///    page-boundary "fuzz" the design doc licenses, applying equally to one
+///    request's chunks.
+/// 6. **Progress guarantee** (`page_made_no_progress`): a chunk that took
+///    nothing, wasn't cancelled, and had at least one genuinely *incomplete*
+///    window reports a terminal `error` instead of an unadvanced,
+///    non-exhausted `page_end`. Taking nothing because every window was
+///    complete-and-holes is not an error — the positions advance past the
+///    holes and the outer loop tries another chunk.
 ///
-/// The **outer loop** keeps running chunks until: accumulated matches reach
-/// `limit`; the scan budget is spent (`page_end` reports `exhausted:
-/// false`, never a silent stop — the client can request another page from
-/// the returned cursor); or every partition has truly reached its
-/// low/high watermark edge (`exhausted: true`, the only end-of-data
-/// signal). This is what makes a hole-dominated region — filtered or not —
-/// get crossed within one request instead of one near-empty page per
-/// `limit` offsets.
+/// The **outer loop** keeps running chunks until accumulated matches reach
+/// `limit`; the scan budget is spent; or every partition has truly reached
+/// its low/high watermark edge in `direction`. Only that last case ends the
+/// page with `exhausted: true` and no cursor — it is the sole end-of-data
+/// signal. The other two end with `exhausted: false` and a cursor to resume
+/// from, and a page ending that way may legitimately carry ZERO matches
+/// (budget spent crossing holes or non-matching records): an empty page is
+/// never a silent stop, and the client continues from the returned cursor.
+/// Chunking is what lets a hole-dominated or match-sparse region — filtered
+/// or not — be crossed within one request instead of one near-empty page
+/// per `limit` offsets.
 #[allow(clippy::too_many_arguments)] // one request's worth of parameters, six of eight are the request itself
 pub fn run_page(
     handle: Arc<ClusterHandle>,
@@ -202,8 +197,9 @@ pub fn run_page(
     let cancel = cancelled.clone();
 
     tokio::spawn(async move {
-        // C4/N5: clamp before anything else sees `positions` (see the doc
-        // comment on `clamp_positions`).
+        // Harden the caller's positions before anything else sees them —
+        // they may come from a client-minted cursor (see the doc comment on
+        // `clamp_positions`).
         let mut cur_positions = clamp_positions(&positions, &watermarks);
         let limit_u64 = limit as u64;
         let budget = budget.max(1);
@@ -219,12 +215,12 @@ pub fn run_page(
             if total_matches >= limit_u64 || total_scanned >= budget {
                 break;
             }
-            // C1: a client disconnect (`CancelOnDrop`) sets this flag but a
+            // Stop on client disconnect (`CancelOnDrop` sets this flag). A
             // cancelled fetch always reports zero progress (see
-            // `page_made_no_progress`'s cancellation carve-out) — positions,
-            // budget, and `exhausted` all stay frozen, so without this check
-            // the loop below would spin forever, minting a fresh
-            // `BaseConsumer` every pass instead of stopping.
+            // `page_made_no_progress`'s cancellation carve-out), so
+            // positions, budget, and `exhausted` all stay frozen — without
+            // this check the loop would spin forever, minting a fresh
+            // `BaseConsumer` every pass. No zombie scans.
             if cancelled.load(Ordering::SeqCst) {
                 return;
             }
@@ -311,11 +307,11 @@ pub fn run_page(
             let mut streams: Vec<VecDeque<RawRecord>> = Vec::with_capacity(windows.len());
             for (w, &partition_complete) in windows.iter().zip(&is_complete) {
                 let fetched = by_partition.remove(&w.partition).unwrap_or_default();
-                // N4: a complete partition's holes (if any) are confirmed
+                // A complete partition's holes (if any) are confirmed
                 // legitimate — trust its delivered records as-is. Only an
-                // incomplete partition still needs the N3 short-read guard:
-                // without the position-adjacent offset, we can't tell a
-                // real hole from data that simply hasn't arrived yet.
+                // incomplete partition needs the short-read guard: without
+                // the position-adjacent offset, a real hole is
+                // indistinguishable from data that hasn't arrived yet.
                 let trust_as_is = partition_complete || fetched.iter().any(|r| r.offset == adjacent_offset(w, direction));
                 let ordered: VecDeque<RawRecord> = if trust_as_is {
                     match direction {
@@ -369,14 +365,14 @@ pub fn run_page(
                 // can span thousands of records (`CHUNK_SPAN`), and a
                 // filtered scan hunting a sparse needle must not go quiet
                 // for that long. `mid_chunk_progress` reports a running
-                // total (see its own doc comment, B1 fix) so consecutive
-                // emissions within one chunk are never the same number.
+                // total (see its own doc comment) so consecutive emissions
+                // within one chunk are never the same number.
                 records_popped_this_chunk += 1;
                 if let Some(scanned) = mid_chunk_progress(total_scanned, records_popped_this_chunk) {
-                    // C1: a failed send means the client is gone — stop
-                    // right here instead of ignoring the error and looping
-                    // on regardless (the belt-and-braces half of the fix,
-                    // alongside the top-of-loop cancellation check above).
+                    // A failed send means the client is gone — stop right
+                    // here rather than ignoring the error and scanning on;
+                    // this is the mid-chunk half of the disconnect
+                    // handling, alongside the top-of-loop flag check.
                     if tx.send(TimelineEvent::Progress {
                         scanned,
                         matches: total_matches + chunk_matches.len() as u64,
@@ -387,7 +383,7 @@ pub fn run_page(
                 }
             }
 
-            // Step 4: N6 exact offset-based cursor math (see doc comment
+            // Step 4: exact offset-based cursor math (see doc comment
             // above). A complete partition whose stream is now fully
             // drained (every delivered record taken, or it started empty —
             // a window that was nothing but holes) has had its *entire*
@@ -455,7 +451,7 @@ pub fn run_page(
                 }
             }
             if tx.send(TimelineEvent::Progress { scanned: total_scanned, matches: total_matches, budget }).await.is_err() {
-                return; // C1: client disconnected — stop, don't loop on regardless
+                return; // client disconnected — stop, don't scan on regardless
             }
 
             if exhausted {
@@ -474,12 +470,11 @@ pub fn run_page(
 mod tests {
     use super::*;
 
-    /// B1 regression: two mid-chunk progress emissions in the SAME chunk
-    /// must report strictly increasing `scanned` values. The pre-fix
-    /// arithmetic reset its counter to 0 after every emission, so the first
-    /// emit reported `total_scanned + 2000` and the second (2000 records
-    /// later, same chunk) reported `total_scanned + 2000` again — an
-    /// identical number, i.e. a progress bar that visibly freezes.
+    /// Two mid-chunk progress emissions in the SAME chunk must report
+    /// strictly increasing `scanned` values. The trap this pins: a counter
+    /// reset to 0 after each emission makes both emits report
+    /// `total_scanned + 2000` — an identical number, i.e. a progress bar
+    /// that visibly freezes mid-chunk.
     #[test]
     fn mid_chunk_progress_fires_every_2000_and_never_repeats_within_a_chunk() {
         assert_eq!(mid_chunk_progress(0, 1_999), None);
@@ -498,9 +493,9 @@ mod tests {
         assert_eq!(mid_chunk_progress(10_000, 2_000), Some(12_000));
     }
 
-    /// Fix round 3, N4 (narrows round 2's N2/N3 guard): nothing taken, a
-    /// genuinely incomplete (short-read) window, not cancelled ⇒ a real "no
-    /// progress" condition that must surface as an error.
+    /// Nothing taken, a genuinely incomplete (short-read) window, not
+    /// cancelled ⇒ a real "no progress" condition that must surface as an
+    /// error.
     #[test]
     fn page_made_no_progress_true_when_nothing_taken_and_a_window_is_incomplete() {
         assert!(page_made_no_progress(true, true, false));
@@ -511,10 +506,10 @@ mod tests {
         assert!(!page_made_no_progress(false, true, false));
     }
 
-    /// N4's key new case: nothing taken, but every window was scanned to
-    /// *completion* — e.g. a page whose only content was legitimate holes
-    /// (transaction control records, compaction). That's confirmed, not
-    /// suspicious, and must never be reported as an error.
+    /// The case that keeps healthy topics quiet: nothing taken, but every
+    /// window was scanned to *completion* — e.g. a chunk whose only content
+    /// was legitimate holes (transaction control records, compaction).
+    /// That's confirmed, not suspicious, and must never be an error.
     #[test]
     fn page_made_no_progress_false_when_every_window_is_complete() {
         assert!(!page_made_no_progress(true, false, false));
