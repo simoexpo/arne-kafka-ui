@@ -490,8 +490,10 @@ describe('Timeline', () => {
     // though useLiveTail sets it, and it's the opposite of errors.ts's
     // generic "retrying automatically" hint — reconnecting the tail really
     // is manual (no auto-reconnect exists), so it must still be visible.
+    // The reason carries only what the headline doesn't already say:
+    // "Connection to Betrachtung lost — connection lost — …" stuttered.
     expect(
-      screen.getByText('live stopped — Connection to Betrachtung lost — connection lost — retrying is manual'),
+      screen.getByText('live stopped — Connection to Betrachtung lost — retrying is manual'),
     ).toBeInTheDocument()
   })
 

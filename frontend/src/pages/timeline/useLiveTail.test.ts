@@ -148,7 +148,9 @@ describe('useLiveTail', () => {
     expect(result.current.alive).toBe(false)
     expect(result.current.error).not.toBeInstanceOf(ApiError)
     expect(result.current.error).toBeInstanceOf(Error)
-    expect(result.current.error?.message).toBe('connection lost — retrying is manual')
+    // Only what describeError's connection-lost headline doesn't already
+    // say — a "connection lost" prefix here rendered twice in the banner.
+    expect(result.current.error?.message).toBe('retrying is manual')
     expect(handles[0].close).toHaveBeenCalledTimes(1)
   })
 

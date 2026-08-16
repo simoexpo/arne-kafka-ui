@@ -63,7 +63,11 @@ export function useLiveTail(
       },
       onTransportError: () => {
         setAlive(false)
-        setError(new Error('connection lost — retrying is manual'))
+        // A plain Error always renders under describeError's
+        // connection-lost headline, so the reason carries only what that
+        // headline doesn't already say — no "connection lost" prefix here,
+        // or the composed banner stutters it twice.
+        setError(new Error('retrying is manual'))
         tailHandleRef.current?.close()
         tailHandleRef.current = null
       },
