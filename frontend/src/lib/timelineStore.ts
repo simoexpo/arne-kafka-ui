@@ -482,7 +482,11 @@ export function createSlidingWindowStore(cap = 2000): SlidingWindowStore {
     seen.delete(partitionKey(msg.partition, msg.offset))
   }
 
-  /** Inserts (deduped) rows, returning the min/max NEWLY inserted offset per partition — used only for anchor opposite-side seeding. */
+  /**
+   * Inserts (deduped) rows, returning the min/max NEWLY inserted offset per
+   * partition — used for anchor opposite-side seeding, the same-direction
+   * row-derived floor/ceiling, and `insertLive`'s ceiling.
+   */
   function insertRows(rows: MessageOut[]): { insertedMin: Map<number, number>; insertedMax: Map<number, number> } {
     const insertedMin = new Map<number, number>()
     const insertedMax = new Map<number, number>()
