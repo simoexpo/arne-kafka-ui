@@ -9,6 +9,7 @@ export function TimelineHeader({
   attached,
   tailAlive,
   paused,
+  inspecting,
   newestTsMs,
   onPillClick,
   onPlayPauseClick,
@@ -19,6 +20,7 @@ export function TimelineHeader({
   attached: boolean
   tailAlive: boolean
   paused: boolean
+  inspecting: boolean
   newestTsMs: number | null
   onPillClick: () => void
   onPlayPauseClick: () => void
@@ -49,11 +51,11 @@ export function TimelineHeader({
           suite for the pixel-stability assertion. */}
       <div className="flex items-center gap-2">
         <LivePill count={bufferCount} capped={bufferCapped} attached={attached} onClick={onPillClick} />
-        {tailAlive && attached && !paused && <span className="animate-pulse text-emerald-500">● live</span>}
+        {tailAlive && attached && !paused && !inspecting && <span className="animate-pulse text-emerald-500">● live</span>}
         {attached ? (
           tailAlive ? (
             // Attached: the normal live play/pause toggle.
-            <PlayPauseToggle paused={paused} onClick={onPlayPauseClick} />
+            <PlayPauseToggle paused={paused || inspecting} title={inspecting ? 'paused while inspecting — closing the message resumes' : undefined} onClick={onPlayPauseClick} />
           ) : (
             // Attached but live has died: this alarm is honest (new data
             // is genuinely missing) — keep today's aging/alarm tiers.

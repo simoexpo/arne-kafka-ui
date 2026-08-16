@@ -1031,6 +1031,7 @@ export function Timeline({
         attached={attached}
         tailAlive={live}
         paused={paused}
+        inspecting={inspectingRef.current}
         newestTsMs={rows[0]?.timestamp_ms ?? null}
         onPillClick={handlePillClick}
         onPlayPauseClick={handlePlayPauseToggle}

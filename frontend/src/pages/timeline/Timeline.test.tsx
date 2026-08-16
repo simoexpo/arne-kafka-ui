@@ -702,6 +702,26 @@ describe('Timeline', () => {
   // the pill/toggle remain available as explicit overrides throughout, and
   // never close an inspection themselves.
   describe('inspection pause', () => {
+    it('header shows effective state while inspecting: no live pulse, toggle amber with explanation', async () => {
+      const tail = mockTail()
+      const user = userEvent.setup()
+      render(<Timeline cluster="prod" topic="orders" />)
+      await emit(0, 'match', mk(2))
+      await emit(0, 'page_end', { cursor: null, exhausted: true })
+      expect(screen.getByText('● live')).toBeInTheDocument()
+
+      await user.click(screen.getAllByTestId('message-row')[0])
+      expect(screen.queryByText('● live')).not.toBeInTheDocument()
+      const toggle = screen.getByTestId('play-pause-toggle')
+      expect(toggle).toHaveAttribute('aria-pressed', 'true')
+      expect(toggle).toHaveAttribute('title', expect.stringMatching(/inspecting/))
+
+      await user.click(screen.getAllByTestId('message-row')[0])
+      expect(screen.getByText('● live')).toBeInTheDocument()
+      expect(screen.getByTestId('play-pause-toggle')).toHaveAttribute('aria-pressed', 'false')
+      void tail
+    })
+
     function scrollTo(scrollTop: number) {
       fireEvent.scroll(screen.getByTestId('timeline-scroll'), { target: { scrollTop } })
     }

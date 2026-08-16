@@ -65,11 +65,12 @@ function PlayIcon({ active }: { active: boolean }) {
 // that reading order. `aria-label` stays action-based (what clicking does)
 // and `aria-pressed` mirrors `paused` — this is a pressed/unpressed toggle,
 // not two separate buttons.
-export function PlayPauseToggle({ paused, onClick }: { paused: boolean; onClick: () => void }) {
+export function PlayPauseToggle({ paused, title, onClick }: { paused: boolean; title?: string; onClick: () => void }) {
   return (
     <button
       type="button"
       data-testid="play-pause-toggle"
+      title={title}
       aria-label={paused ? 'resume live updates' : 'pause live updates'}
       aria-pressed={paused}
       onClick={onClick}
