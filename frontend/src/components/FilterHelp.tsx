@@ -42,8 +42,8 @@ export function FilterHelp() {
           <h3 className="mb-2 text-sm font-medium text-zinc-500 dark:text-zinc-400">Filter syntax</h3>
           <dl className="space-y-1.5">
             <div><dt className="inline font-mono text-sky-800 dark:text-sky-300">anything</dt><dd className="inline text-zinc-600 dark:text-zinc-400"> — messages whose key or value contains it (case-insensitive)</dd></div>
-            <div><dt className="inline font-mono text-sky-800 dark:text-sky-300">key:foo</dt><dd className="inline text-zinc-600 dark:text-zinc-400"> — key contains foo</dd></div>
-            <div><dt className="inline font-mono text-sky-800 dark:text-sky-300">value:foo</dt><dd className="inline text-zinc-600 dark:text-zinc-400"> — value contains foo</dd></div>
+            <div><dt className="inline font-mono text-sky-800 dark:text-sky-300">key:foo</dt><dd className="inline text-zinc-600 dark:text-zinc-400"> — key contains foo (case-sensitive)</dd></div>
+            <div><dt className="inline font-mono text-sky-800 dark:text-sky-300">value:foo</dt><dd className="inline text-zinc-600 dark:text-zinc-400"> — value contains foo (case-sensitive)</dd></div>
             <div><dt className="inline font-mono text-sky-800 dark:text-sky-300">path.to.field=42</dt><dd className="inline text-zinc-600 dark:text-zinc-400"> — JSON field equals the value</dd></div>
           </dl>
         </div>

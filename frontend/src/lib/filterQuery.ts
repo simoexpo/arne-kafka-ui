@@ -40,6 +40,8 @@ function jsonAtPath(root: unknown, path: string): { found: true; value: unknown 
   return { found: true, value: current }
 }
 
+// key:/value: are case-SENSITIVE, unlike bare contains below — mirrors the
+// server exactly (backend/src/message/filter.rs:62,66 vs :76).
 function keyContainsPredicate(q: string) {
   return (m: MessageOut) => !!m.key && m.key.text.includes(q)
 }
