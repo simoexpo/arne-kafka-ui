@@ -4,6 +4,7 @@ import { Link, Outlet, useLocation, useParams } from '@tanstack/react-router'
 import { getClusters } from '../api/client'
 import type { ClusterHealth } from '../api/types'
 import { CommandPalette } from '../components/CommandPalette' // Task 11 stub
+import { zoneSuffix } from '../lib/format'
 import { setTimeDisplayMode, useTimeDisplayMode } from '../lib/timeDisplayMode'
 
 export function useClusters() {
@@ -167,8 +168,15 @@ export function ThemeToggle() {
 // display: flipping it only changes how already-loaded epoch-ms values are
 // FORMATTED (see `lib/timeDisplayMode` and `formatTimestamp`/
 // `formatWindowRange`) — nothing here re-fetches anything.
+//
+// Owner ruling 2026-08-17: the word "local" disappears everywhere — this
+// button's local half now reads the CURRENT numeric UTC offset dynamically
+// (e.g. "UTC+2"), same `zoneSuffix` family every other display uses,
+// computed off "now" since the button represents an ongoing preference, not
+// any one loaded timestamp.
 export function TimeZoneToggle() {
   const mode = useTimeDisplayMode()
+  const localLabel = zoneSuffix(Date.now(), 'local')
   return (
     <button
       type="button"
@@ -193,7 +201,7 @@ export function TimeZoneToggle() {
             : 'text-zinc-400 dark:text-zinc-600'
         }`}
       >
-        local
+        {localLabel}
       </span>
     </button>
   )

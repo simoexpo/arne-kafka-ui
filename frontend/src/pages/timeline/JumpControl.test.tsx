@@ -181,7 +181,7 @@ describe('JumpControl', () => {
       render(<JumpControl onJump={vi.fn()} />)
       await user.click(screen.getByTestId('jump-timestamp'))
       await user.type(screen.getByTestId('jump-timestamp-input'), String(Date.UTC(2026, 7, 15, 18, 32, 10)))
-      expect(screen.getByTestId('jump-timestamp-preview')).toHaveTextContent('2026-08-15T18:32:10')
+      expect(screen.getByTestId('jump-timestamp-preview')).toHaveTextContent('2026-08-15 18:32:10.000 UTC')
     })
 
     // UTC/local display toggle (owner ruling 2026-08-15): the preview
@@ -196,8 +196,9 @@ describe('JumpControl', () => {
       render(<JumpControl onJump={vi.fn()} />)
       await user.click(screen.getByTestId('jump-timestamp'))
       await user.type(screen.getByTestId('jump-timestamp-input'), String(Date.UTC(2026, 7, 15, 18, 32, 10)))
-      // Same instant as above (2026-08-15T18:32:10Z), now shown local.
-      expect(screen.getByTestId('jump-timestamp-preview')).toHaveTextContent('2026-08-15 14:32:10.000 local')
+      // Same instant as above (2026-08-15T18:32:10Z), now shown local
+      // (America/New_York, EDT: UTC-4).
+      expect(screen.getByTestId('jump-timestamp-preview')).toHaveTextContent('2026-08-15 14:32:10.000 UTC-4')
     })
 
     it('typing an epoch-ms value directly also seeds the popover to match (bidirectional sync, local mode)', async () => {

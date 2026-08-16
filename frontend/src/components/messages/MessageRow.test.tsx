@@ -63,14 +63,14 @@ describe('MessageRow', () => {
 
     it('shows UTC by default (unchanged historical behavior)', () => {
       render(<MessageRow message={msg({ timestamp_ms: 1_704_067_205_000 })} />)
-      expect(screen.getByText(new Date(1_704_067_205_000).toISOString())).toBeInTheDocument()
+      expect(screen.getByText('2024-01-01 00:00:05.000 UTC')).toBeInTheDocument()
     })
 
-    it('shows the browser\'s local zone, explicitly labelled, once the toggle is set to local', () => {
+    it('shows the browser\'s local zone, suffixed with its numeric offset, once the toggle is set to local', () => {
       setTimeDisplayMode('local')
       render(<MessageRow message={msg({ timestamp_ms: 1_704_067_205_000 })} />)
       // 2024-01-01T00:00:05Z == 2023-12-31 19:00:05 America/New_York (EST, UTC-5)
-      expect(screen.getByText('2023-12-31 19:00:05.000 local')).toBeInTheDocument()
+      expect(screen.getByText('2023-12-31 19:00:05.000 UTC-5')).toBeInTheDocument()
     })
   })
 })

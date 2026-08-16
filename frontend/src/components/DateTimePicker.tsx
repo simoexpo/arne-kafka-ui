@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type UIEvent } from 'react'
+import { zoneSuffix } from '../lib/format'
 import { useTimeDisplayMode, type TimeDisplayMode } from '../lib/timeDisplayMode'
 
 // Owner ruling 2026-08-15 (picker2, superseding an earlier native-popup
@@ -346,6 +347,11 @@ export function DateTimePicker({
   textPlaceholder: string
 }) {
   const mode = useTimeDisplayMode()
+  // This wording is intentionally left as "UTC"/"local" (owner ruling
+  // 2026-08-17 scoped the "no word 'local'" change to DISPLAYED values —
+  // the popover's zone badge (`zoneBadgeLabel` below) and every rendered
+  // timestamp — not this accessible-name-only mode indicator, which isn't a
+  // timestamp or a zone value, just which MODE the trigger is in.
   const modeLabel = mode === 'utc' ? 'UTC' : 'local'
   const [open, setOpen] = useState(false)
   const containerRef = useRef<HTMLDivElement>(null)
@@ -504,6 +510,21 @@ export function DateTimePicker({
   const monthLen = daysInMonth(viewYear, viewMonth)
   const leadBlanks = leadingBlankCount(viewYear, viewMonth)
   const today = decompose(Date.now(), mode)
+
+  // The popover's own zone badge (owner ruling 2026-08-17: the word "local"
+  // disappears everywhere — this adopts the same numeric, DST-honest
+  // `zoneSuffix` family the rest of the app now uses). Derived from the
+  // instant CURRENTLY BEING EDITED (the picked fields composed back to an
+  // epoch), not "now" — browsing from an August date to a January one
+  // flips EDT/EST honestly as you navigate, same as any other timestamp
+  // display in the app.
+  const zoneBadgeLabel = zoneSuffix(
+    compose(
+      { year: viewYear, month: viewMonth, day: pickedDay, hour: pickedHour, minute: pickedMinute, second: pickedSecond, millis: pickedMillis },
+      mode,
+    ),
+    mode,
+  )
   const isToday = (day: number) =>
     today.year === viewYear && today.month === viewMonth && today.day === day
 
@@ -541,7 +562,7 @@ export function DateTimePicker({
               data-testid="datetime-picker-zone-label"
               className="rounded bg-zinc-100 px-1 py-0.5 text-[9px] font-medium uppercase tracking-wide text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400"
             >
-              {modeLabel}
+              {zoneBadgeLabel}
             </span>
           </div>
           <div className="flex gap-2">

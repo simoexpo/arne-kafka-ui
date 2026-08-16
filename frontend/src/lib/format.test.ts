@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
-import { formatAgo, formatCount, formatRetentionValue, formatTimestamp, formatWindowRange, retentionMsHint } from './format'
+import { formatAgo, formatCount, formatRetentionValue, formatTimestamp, formatWindowRange, retentionMsHint, zoneSuffix } from './format'
 
 // `@types/node` isn't in this app's tsconfig `types` (browser app) — declared
 // locally for the fixed-TZ tests below rather than widening ambient types.
@@ -51,20 +51,21 @@ describe('formatWindowRange', () => {
     expect(formatWindowRange(null, null)).toBe('—')
   })
 
-  // UTC/local display toggle (owner ruling 2026-08-15): a third, optional
-  // mode argument re-renders the exact same instants in the reader's own
-  // browser zone instead, explicitly labelled so it's never mistaken for
-  // UTC. Fixed non-UTC TZ so a mode that silently fell back to UTC math
-  // would fail these.
+  // Owner ruling 2026-08-17: ONE format family in both modes — same layout,
+  // only the zone SUFFIX differs. The word "local" is gone; local mode
+  // instead carries a NUMERIC, per-timestamp, DST-honest UTC offset (e.g.
+  // "UTC-5" / "UTC+5:30"). Fixed non-UTC TZ so a mode that silently fell
+  // back to UTC math (or hardcoded a single offset regardless of DST) would
+  // fail these.
   describe('local mode (fixed TZ=America/New_York)', () => {
     const ORIGINAL_TZ = process.env.TZ
     beforeAll(() => { process.env.TZ = 'America/New_York' })
     afterAll(() => { process.env.TZ = ORIGINAL_TZ })
 
-    it('shows the shared LOCAL date once, then oldest -> newest LOCAL time, labelled "local"', () => {
+    it('shows the shared LOCAL date once, then oldest -> newest LOCAL time, suffixed with the numeric UTC offset', () => {
       // 2024-01-01T00:00:05Z .. 2024-01-01T00:01:05Z == 2023-12-31 19:00:05 .. 19:01:05 America/New_York (EST, UTC-5)
       expect(formatWindowRange(1_704_067_205_000, 1_704_067_265_000, 'local')).toBe(
-        '2023-12-31 19:00 → 19:01 local',
+        '2023-12-31 19:00 → 19:01 UTC-5',
       )
     })
 
@@ -79,13 +80,57 @@ describe('formatTimestamp', () => {
   beforeAll(() => { process.env.TZ = 'America/New_York' })
   afterAll(() => { process.env.TZ = ORIGINAL_TZ })
 
-  it('utc mode matches the historical toISOString() row rendering', () => {
-    expect(formatTimestamp(1_704_067_205_000, 'utc')).toBe(new Date(1_704_067_205_000).toISOString())
+  // Owner ruling 2026-08-17: one format family for both modes —
+  // "yyyy-mm-dd hh:mm:ss.mmm <ZONE>" — only the trailing zone suffix
+  // differs ("UTC" vs a numeric per-timestamp offset). This REPLACES the
+  // historical bare `toISOString()` row rendering (`T`/`Z` ISO shape).
+  it('utc mode: the shared family, suffixed "UTC"', () => {
+    expect(formatTimestamp(1_704_067_205_000, 'utc')).toBe('2024-01-01 00:00:05.000 UTC')
   })
 
-  it('local mode renders the browser\'s own zone, explicitly labelled so it is never mistaken for UTC', () => {
+  it('local mode: the same family in local wall-clock time, suffixed with a NUMERIC offset — never the word "local"', () => {
     // 2024-01-01T00:00:05Z == 2023-12-31 19:00:05 America/New_York (EST, UTC-5)
-    expect(formatTimestamp(1_704_067_205_000, 'local')).toBe('2023-12-31 19:00:05.000 local')
+    expect(formatTimestamp(1_704_067_205_000, 'local')).toBe('2023-12-31 19:00:05.000 UTC-5')
+  })
+
+  it('the offset is honest per-timestamp: DST and non-DST instants in the same zone carry different offsets', () => {
+    // Aug 15 2026 America/New_York is EDT (UTC-4).
+    expect(formatTimestamp(Date.UTC(2026, 7, 15, 12, 0, 0), 'local')).toBe('2026-08-15 08:00:00.000 UTC-4')
+    // Jan 15 2026 America/New_York is EST (UTC-5).
+    expect(formatTimestamp(Date.UTC(2026, 0, 15, 12, 0, 0), 'local')).toBe('2026-01-15 07:00:00.000 UTC-5')
+  })
+
+  it('millis:false omits the trailing .mmm (the compact header uses this)', () => {
+    expect(formatTimestamp(1_704_067_205_000, 'utc', { millis: false })).toBe('2024-01-01 00:00:05 UTC')
+  })
+})
+
+describe('zoneSuffix', () => {
+  const ORIGINAL_TZ = process.env.TZ
+  beforeAll(() => { process.env.TZ = 'America/New_York' })
+  afterAll(() => { process.env.TZ = ORIGINAL_TZ })
+
+  it('is always "UTC" in utc mode', () => {
+    expect(zoneSuffix(1_704_067_205_000, 'utc')).toBe('UTC')
+  })
+
+  it('is a numeric, sign-prefixed offset in local mode', () => {
+    expect(zoneSuffix(Date.UTC(2026, 7, 15, 12, 0, 0), 'local')).toBe('UTC-4') // EDT
+    expect(zoneSuffix(Date.UTC(2026, 0, 15, 12, 0, 0), 'local')).toBe('UTC-5') // EST
+  })
+
+  it('formats half-hour zone offsets with minutes (e.g. UTC+5:30)', () => {
+    // A half-hour-offset zone doesn't depend on the fixed America/New_York
+    // TZ above — this stubs getTimezoneOffset directly to prove the minutes
+    // branch, independent of any real IANA zone being available in CI.
+    const ms = Date.UTC(2026, 7, 15, 12, 0, 0)
+    const original = Date.prototype.getTimezoneOffset
+    Date.prototype.getTimezoneOffset = () => -330 // UTC+5:30 (e.g. India)
+    try {
+      expect(zoneSuffix(ms, 'local')).toBe('UTC+5:30')
+    } finally {
+      Date.prototype.getTimezoneOffset = original
+    }
   })
 })
 

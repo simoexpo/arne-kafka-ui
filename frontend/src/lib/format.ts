@@ -4,28 +4,57 @@ function pad(n: number, len = 2): string {
   return String(n).padStart(len, '0')
 }
 
-// Local-zone equivalent of `.toISOString()` — same precision (down to the
-// millisecond), but read off the `Date` object's own LOCAL getters (not the
-// UTC ones `toISOString` uses), and explicitly suffixed "local" so it's
-// never mistaken for the UTC rendering `formatTimestamp(ms, 'utc')` (and
-// historically, every row) produces.
-function isoLocal(ms: number): string {
+// ONE format family for both modes (owner ruling 2026-08-17), replacing the
+// prior split between a bare `toISOString()` for UTC (`T`/`Z` ISO shape) and
+// a differently-laid-out, word-labelled "local" string: same
+// "yyyy-mm-dd hh:mm:ss[.mmm] <ZONE>" layout in both modes — only the
+// trailing zone SUFFIX differs (see `zoneSuffix` below). This is the one
+// place per-component date math for DISPLAY is allowed to live; every
+// caller (rows, the window-range header, the picker's zone badge) goes
+// through here or `zoneSuffix` rather than re-deriving fields itself.
+function dateAndTime(ms: number, mode: TimeDisplayMode, millis: boolean): string {
   const d = new Date(ms)
-  return (
-    `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ` +
-    `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}.${pad(d.getMilliseconds(), 3)}`
-  )
+  const y = mode === 'utc' ? d.getUTCFullYear() : d.getFullYear()
+  const mo = mode === 'utc' ? d.getUTCMonth() : d.getMonth()
+  const day = mode === 'utc' ? d.getUTCDate() : d.getDate()
+  const h = mode === 'utc' ? d.getUTCHours() : d.getHours()
+  const mi = mode === 'utc' ? d.getUTCMinutes() : d.getMinutes()
+  const s = mode === 'utc' ? d.getUTCSeconds() : d.getSeconds()
+  const date = `${y}-${pad(mo + 1)}-${pad(day)}`
+  const time = `${pad(h)}:${pad(mi)}:${pad(s)}`
+  if (!millis) return `${date} ${time}`
+  const ms3 = mode === 'utc' ? d.getUTCMilliseconds() : d.getMilliseconds()
+  return `${date} ${time}.${pad(ms3, 3)}`
+}
+
+// The zone suffix half of the format family: always "UTC" in utc mode; in
+// local mode, a NUMERIC, per-timestamp, DST-honest offset ("UTC-5",
+// "UTC+5:30" for half-hour zones) derived from THIS timestamp's own
+// `getTimezoneOffset()` — never the word "local" (owner ruling 2026-08-17).
+// Per-timestamp (not "now") on purpose: two rows a DST transition apart
+// carry different, both-correct offsets. `getTimezoneOffset()` is minutes to
+// ADD to local time to reach UTC, so the DISPLAYED offset is its negation.
+export function zoneSuffix(ms: number, mode: TimeDisplayMode): string {
+  if (mode === 'utc') return 'UTC'
+  const totalMin = -new Date(ms).getTimezoneOffset()
+  if (totalMin === 0) return 'UTC'
+  const sign = totalMin < 0 ? '-' : '+'
+  const abs = Math.abs(totalMin)
+  const hours = Math.floor(abs / 60)
+  const mins = abs % 60
+  return mins === 0 ? `UTC${sign}${hours}` : `UTC${sign}${hours}:${pad(mins)}`
 }
 
 // UTC/local display toggle (owner ruling 2026-08-15, `lib/timeDisplayMode`):
-// formats one absolute instant for direct display — message rows and the
-// jump-timestamp preview both render already-loaded/already-computed
-// epoch-ms values through this single function, so both zones are always
-// computed exactly the same way. 'utc' matches the historical per-row
-// `toISOString()` convention (unlabelled beyond its own trailing `Z`,
-// exactly as today); 'local' is always explicitly labelled.
-export function formatTimestamp(ms: number, mode: TimeDisplayMode): string {
-  return mode === 'utc' ? new Date(ms).toISOString() : `${isoLocal(ms)} local`
+// formats one absolute instant for direct display — message rows, the
+// window-range header, and the jump-timestamp preview all render
+// already-loaded/already-computed epoch-ms values through this single
+// function, so every zone is computed exactly the same way everywhere.
+// `millis` defaults to true (rows keep their millisecond precision); the
+// compact window-range header passes `{ millis: false }`.
+export function formatTimestamp(ms: number, mode: TimeDisplayMode, opts: { millis?: boolean } = {}): string {
+  const { millis = true } = opts
+  return `${dateAndTime(ms, mode, millis)} ${zoneSuffix(ms, mode)}`
 }
 
 export function formatAgo(asOfMs: number, nowMs: number): string {
@@ -44,53 +73,52 @@ export function formatCount(n: number): string {
   return `${(n / 1_000_000_000).toFixed(1)}B`
 }
 
+function dateOnly(ms: number, mode: TimeDisplayMode): string {
+  const d = new Date(ms)
+  return mode === 'utc'
+    ? `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())}`
+    : `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
+}
+
+function timeOnly(ms: number, mode: TimeDisplayMode): string {
+  const d = new Date(ms)
+  return mode === 'utc'
+    ? `${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}`
+    : `${pad(d.getHours())}:${pad(d.getMinutes())}`
+}
+
 // Compact oldest -> newest range for the currently loaded window (owner
 // feedback 2026-08-15: replaces the raw "{n} messages" count, which
-// saturated — and lied — at the store's 2000-row cap). UTC, not local time
-// (matches MessageRow's own per-row `toISOString()` convention, and stays
-// deterministic regardless of the reader's or CI's timezone).
+// saturated — and lied — at the store's 2000-row cap).
 //
 // The date is NEVER omitted (owner feedback, same day: "having just the
-// time could be misleading") — a same-UTC-day window shows the shared date
-// ONCE, then bare oldest -> newest times (e.g. "2026-08-15 09:12 → 17:40
-// UTC"); a window spanning a day boundary gives each side its own full
-// date + time (e.g. "2023-12-31 23:59 → 2024-01-01 00:01 UTC"). Minute
-// precision (no seconds): this is a compact header, not a precise log —
-// matches the owner's own suggested format.
-// `mode` (owner ruling 2026-08-15, UTC/local display toggle): defaults to
-// 'utc' — every existing caller predates the toggle and keeps rendering
-// exactly as before. 'local' repeats the same shared-date-once / day-
-// boundary logic against the browser's own zone instead, labelled "local"
-// rather than "UTC" so the two are never confused.
+// time could be misleading") — a same-day window shows the shared date ONCE,
+// then bare oldest -> newest times (e.g. "2026-08-15 09:12 → 17:40 UTC"); a
+// window spanning a day boundary gives each side its own full date + time
+// (e.g. "2023-12-31 23:59 → 2024-01-01 00:01 UTC"). Minute precision (no
+// seconds/millis): this is a compact header, not a precise log — matches the
+// owner's own suggested format, and is why it calls `formatTimestamp`'s
+// shared building blocks directly rather than `formatTimestamp` itself
+// (which always carries seconds).
+//
+// `mode` (owner ruling 2026-08-15, UTC/local display toggle; suffix family
+// unified 2026-08-17): defaults to 'utc' — every existing caller predates
+// the toggle and keeps rendering exactly as before. 'local' repeats the same
+// shared-date-once / day-boundary logic against the browser's own zone
+// instead, suffixed with the numeric offset (`zoneSuffix`, honest per the
+// NEWEST timestamp) rather than the word "local".
 export function formatWindowRange(
   oldestMs: number | null,
   newestMs: number | null,
   mode: TimeDisplayMode = 'utc',
 ): string {
   if (oldestMs === null || newestMs === null) return '—'
-  if (mode === 'utc') {
-    const oldestIso = new Date(oldestMs).toISOString()
-    const newestIso = new Date(newestMs).toISOString()
-    const oldestDate = oldestIso.slice(0, 10)
-    const newestDate = newestIso.slice(0, 10)
-    const time = (iso: string) => iso.slice(11, 16)
-    return oldestDate === newestDate
-      ? `${oldestDate} ${time(oldestIso)} → ${time(newestIso)} UTC`
-      : `${oldestDate} ${time(oldestIso)} → ${newestDate} ${time(newestIso)} UTC`
-  }
-  const localDate = (ms: number) => {
-    const d = new Date(ms)
-    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
-  }
-  const localTime = (ms: number) => {
-    const d = new Date(ms)
-    return `${pad(d.getHours())}:${pad(d.getMinutes())}`
-  }
-  const oldestDate = localDate(oldestMs)
-  const newestDate = localDate(newestMs)
+  const oldestDate = dateOnly(oldestMs, mode)
+  const newestDate = dateOnly(newestMs, mode)
+  const suffix = zoneSuffix(newestMs, mode)
   return oldestDate === newestDate
-    ? `${oldestDate} ${localTime(oldestMs)} → ${localTime(newestMs)} local`
-    : `${oldestDate} ${localTime(oldestMs)} → ${newestDate} ${localTime(newestMs)} local`
+    ? `${oldestDate} ${timeOnly(oldestMs, mode)} → ${timeOnly(newestMs, mode)} ${suffix}`
+    : `${oldestDate} ${timeOnly(oldestMs, mode)} → ${newestDate} ${timeOnly(newestMs, mode)} ${suffix}`
 }
 
 export function formatRetentionValue(raw: string | null): string {

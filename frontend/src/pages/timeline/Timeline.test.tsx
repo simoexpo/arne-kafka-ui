@@ -258,8 +258,8 @@ describe('Timeline', () => {
       act(() => setTimeDisplayMode('local'))
 
       // 2024-01-01 00:00:05/00:01:05 Z == 2023-12-31 19:00/19:01 America/New_York (EST, UTC-5)
-      expect(screen.getByTestId('window-range')).toHaveTextContent('2023-12-31 19:00 → 19:01 local')
-      expect(screen.getAllByTestId('message-row')[0]).toHaveTextContent('2023-12-31 19:01:05.000 local')
+      expect(screen.getByTestId('window-range')).toHaveTextContent('2023-12-31 19:00 → 19:01 UTC-5')
+      expect(screen.getAllByTestId('message-row')[0]).toHaveTextContent('2023-12-31 19:01:05.000 UTC-5')
       expect(FakeEventSource.instances.length).toBe(requestsBefore)
     })
   })

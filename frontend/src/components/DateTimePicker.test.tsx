@@ -192,7 +192,7 @@ describe('DateTimePicker', () => {
     })
 
     describe('local mode (toggled on)', () => {
-      it('opens seeded with the value read as local wall-clock: month/day/time/textbox/zone-label all local', async () => {
+      it('opens seeded with the value read as local wall-clock: month/day/time/textbox/zone-label all local, badge showing the numeric offset (never the word "local")', async () => {
         setTimeDisplayMode('local')
         const user = userEvent.setup()
         render(<Picker valueMs={SEED_MS} onChange={vi.fn()} />)
@@ -205,7 +205,8 @@ describe('DateTimePicker', () => {
         expect(screen.getByTestId('datetime-picker-minute-32')).toHaveAttribute('aria-pressed', 'true')
         expect(screen.getByTestId('datetime-picker-second-10')).toHaveAttribute('aria-pressed', 'true')
         expect(screen.getByTestId('datetime-picker-text')).toHaveValue('2026-08-15 14:32:10.000')
-        expect(screen.getByTestId('datetime-picker-zone-label')).toHaveTextContent('local')
+        // Aug 15 America/New_York is EDT (UTC-4).
+        expect(screen.getByTestId('datetime-picker-zone-label')).toHaveTextContent('UTC-4')
       })
 
       it('picking a day and time columns, then Apply, converts local wall-clock to the correct epoch ms and closes', async () => {
@@ -263,7 +264,8 @@ describe('DateTimePicker', () => {
         expect(screen.getByTestId('datetime-picker-day-14')).toHaveAttribute('aria-pressed', 'true')
         expect(screen.getByTestId('datetime-picker-hour-22')).toHaveAttribute('aria-pressed', 'true')
         expect(screen.getByTestId('datetime-picker-text')).toHaveValue('2026-08-14 22:00:00.000')
-        expect(screen.getByTestId('datetime-picker-zone-label')).toHaveTextContent('local')
+        // Still August (EDT, UTC-4) — never the word "local".
+        expect(screen.getByTestId('datetime-picker-zone-label')).toHaveTextContent('UTC-4')
 
         // Nothing else touched — Apply must reproduce the exact same epoch.
         await user.click(screen.getByTestId('datetime-picker-apply'))
