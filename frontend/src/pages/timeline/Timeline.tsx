@@ -1233,10 +1233,16 @@ export function Timeline({
         <div className="flex items-center gap-2">
           <LivePill count={bufferReceivedRef.current} capped={bufferOverflowRef.current} attached={attached} onClick={handlePillClick} />
           {live && attached && !paused && <span className="animate-pulse text-emerald-500">● live</span>}
-          {live && attached ? (
-            // Attached: the normal live play/pause toggle.
-            <PlayPauseToggle paused={paused} onClick={handlePlayPauseToggle} />
-          ) : !attached ? (
+          {attached ? (
+            live ? (
+              // Attached: the normal live play/pause toggle.
+              <PlayPauseToggle paused={paused} onClick={handlePlayPauseToggle} />
+            ) : (
+              // Attached but live has died: this alarm is honest (new data
+              // is genuinely missing) — keep today's aging/alarm tiers.
+              <StalenessChip asOf={rows[0]?.timestamp_ms ?? null} failed={false} />
+            )
+          ) : (
             // Detached (design spec v1.3, owner ruling 2026-08-15): the
             // toggle IS the mode signal — always shown lit paused (live
             // rendering is off by definition while detached, regardless of
@@ -1245,11 +1251,7 @@ export function Timeline({
             // immutable, there is nothing to be stale about. Clicking the
             // toggle here jumps to now (handlePlayPauseToggle), same as the
             // pill.
-            <PlayPauseToggle paused={!attached || paused} onClick={handlePlayPauseToggle} />
-          ) : (
-            // Attached but live has died: this alarm is honest (new data
-            // is genuinely missing) — keep today's aging/alarm tiers.
-            <StalenessChip asOf={rows[0]?.timestamp_ms ?? null} failed={false} />
+            <PlayPauseToggle paused onClick={handlePlayPauseToggle} />
           )}
           <TimeZoneToggle />
         </div>
