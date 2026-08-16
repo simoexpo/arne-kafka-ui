@@ -171,7 +171,9 @@ function GroupRow({ group }: { group: TopicGroupLag }) {
       <summary className="flex cursor-pointer items-center gap-3 text-sm">
         <span className="font-mono font-medium">{group.group_id}</span>
         <span className="text-xs text-zinc-500">{group.state}</span>
-        <span className="ml-auto">lag <span className="font-semibold">{formatCount(group.total_lag)}</span></span>
+        <span className="ml-auto">
+          lag <span className={group.total_lag > 0 ? 'font-semibold' : 'text-zinc-400'}>{formatCount(group.total_lag)}</span>
+        </span>
       </summary>
       {open && (
         <table className="mt-2 w-full text-left font-mono text-sm">
@@ -184,7 +186,7 @@ function GroupRow({ group }: { group: TopicGroupLag }) {
                 <td className="py-1">{p.partition}</td>
                 <td>{p.committed_offset}</td>
                 <td>{p.end_offset}</td>
-                <td>{p.lag}</td>
+                <td className={p.lag > 0 ? 'font-semibold' : 'text-zinc-400'}>{p.lag}</td>
               </tr>
             ))}
           </tbody>
