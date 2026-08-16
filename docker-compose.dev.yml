@@ -52,17 +52,17 @@ services:
         i=0
         while true; do
           i=$$((i+1))
-          echo "order-$$i:{\"order_id\":$$i,\"amount\":$$((i*3)).50}" | \
+          printf "source:demo-producer,seq:$$i\torder-$$i:{\"order_id\":$$i,\"amount\":$$((i*3)).50}\n" | \
             /opt/kafka/bin/kafka-console-producer.sh --bootstrap-server kafka:19092 --topic demo-orders \
-              --property parse.key=true --property key.separator=: >/dev/null
+              --property parse.key=true --property key.separator=: --property parse.headers=true >/dev/null
           u=$$(( (i % 5) + 1 ))
-          echo "user-$$u:{\"user_id\":$$u,\"seq\":$$i}" | \
+          printf "source:demo-producer,seq:$$i\tuser-$$u:{\"user_id\":$$u,\"seq\":$$i}\n" | \
             /opt/kafka/bin/kafka-console-producer.sh --bootstrap-server kafka:19092 --topic demo-users \
-              --property parse.key=true --property key.separator=: >/dev/null
+              --property parse.key=true --property key.separator=: --property parse.headers=true >/dev/null
           a=$$((i % 10))
-          echo "audit-$$a:{\"audit_id\":$$a,\"seq\":$$i}" | \
+          printf "source:demo-producer,seq:$$i\taudit-$$a:{\"audit_id\":$$a,\"seq\":$$i}\n" | \
             /opt/kafka/bin/kafka-console-producer.sh --bootstrap-server kafka:19092 --topic demo-audit \
-              --property parse.key=true --property key.separator=: >/dev/null
+              --property parse.key=true --property key.separator=: --property parse.headers=true >/dev/null
           sleep 2
         done
 
@@ -79,17 +79,17 @@ services:
         i=0
         while true; do
           i=$$((i+1))
-          echo "order-$$i:{\"order_id\":$$i,\"amount\":$$((i*3)).50}" | \
+          printf "source:demo-producer,seq:$$i\torder-$$i:{\"order_id\":$$i,\"amount\":$$((i*3)).50}\n" | \
             /opt/kafka/bin/kafka-console-producer.sh --bootstrap-server kafka2:19092 --topic demo-orders \
-              --property parse.key=true --property key.separator=: >/dev/null
+              --property parse.key=true --property key.separator=: --property parse.headers=true >/dev/null
           u=$$(( (i % 5) + 1 ))
-          echo "user-$$u:{\"user_id\":$$u,\"seq\":$$i}" | \
+          printf "source:demo-producer,seq:$$i\tuser-$$u:{\"user_id\":$$u,\"seq\":$$i}\n" | \
             /opt/kafka/bin/kafka-console-producer.sh --bootstrap-server kafka2:19092 --topic demo-users \
-              --property parse.key=true --property key.separator=: >/dev/null
+              --property parse.key=true --property key.separator=: --property parse.headers=true >/dev/null
           a=$$((i % 10))
-          echo "audit-$$a:{\"audit_id\":$$a,\"seq\":$$i}" | \
+          printf "source:demo-producer,seq:$$i\taudit-$$a:{\"audit_id\":$$a,\"seq\":$$i}\n" | \
             /opt/kafka/bin/kafka-console-producer.sh --bootstrap-server kafka2:19092 --topic demo-audit \
-              --property parse.key=true --property key.separator=: >/dev/null
+              --property parse.key=true --property key.separator=: --property parse.headers=true >/dev/null
           sleep 2
         done
 
