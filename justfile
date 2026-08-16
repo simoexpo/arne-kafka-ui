@@ -16,7 +16,7 @@ test:
 
 lint:
     cd backend && cargo clippy --all-targets -- -D warnings
-    cd frontend && npm run build
+    cd frontend && npm run lint
 
 docker:
     docker build -t betrachtung:dev .

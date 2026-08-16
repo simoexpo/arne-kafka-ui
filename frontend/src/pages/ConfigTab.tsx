@@ -6,10 +6,16 @@ import { Switch } from '../components/Switch'
 import { formatRetentionValue, retentionMsHint } from '../lib/format'
 import type { ConfigEntry, TopicDetail } from '../api/types'
 
+// A stable reference (not a fresh `[]` literal on every render) so
+// `filteredConfigs`'s `useMemo` below actually memoizes while `data` is
+// undefined (loading/error) — a new array identity every render otherwise
+// defeats the memo's own dependency check.
+const EMPTY_CONFIGS: ConfigEntry[] = []
+
 export function ConfigTab({ data, error, loading }: { data?: TopicDetail; error: unknown; loading: boolean }) {
   const [showAll, setShowAll] = useState(false)
   const [filter, setFilter] = useState('')
-  const configs = data?.configs ?? []
+  const configs = data?.configs ?? EMPTY_CONFIGS
   const overridden = configs.filter((c) => !c.is_default)
   const filteredConfigs = useMemo(() => {
     const q = filter.trim().toLowerCase()
