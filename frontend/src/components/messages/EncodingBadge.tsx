@@ -10,5 +10,5 @@ const STYLES: Record<Encoding, string> = {
 }
 
 export function EncodingBadge({ encoding }: { encoding: Encoding }) {
-  return <span className={`rounded border px-1.5 py-0.5 font-mono text-[10px] ${STYLES[encoding]}`}>{encoding}</span>
+  return <span className={`rounded border px-1.5 py-0.5 font-mono text-xs ${STYLES[encoding]}`}>{encoding}</span>
 }

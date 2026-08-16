@@ -1,4 +1,5 @@
 import { useQuery } from '@tanstack/react-query'
+import { Stat } from '../components/Stat'
 import { useParams } from '@tanstack/react-router'
 import { getOverview, getTopics } from '../api/client'
 import { Panel } from '../components/Panel'
@@ -71,14 +72,6 @@ export function OverviewView({ cluster }: { cluster: string }) {
   )
 }
 
-function Stat({ label, value, warn }: { label: string; value: string; warn?: boolean }) {
-  return (
-    <div>
-      <dt className="text-xs text-zinc-500">{label}</dt>
-      <dd className={`text-xl font-semibold ${warn ? 'text-red-600 dark:text-red-400' : ''}`}>{value}</dd>
-    </div>
-  )
-}
 
 export function OverviewPage() {
   const { cluster } = useParams({ from: '/c/$cluster/overview' })

@@ -145,7 +145,7 @@ export function JumpControl({ onJump }: { onJump: (target: JumpTarget) => void }
           {tsValid && (
             <span
               data-testid="jump-timestamp-preview"
-              className="text-[10px] text-zinc-500 dark:text-zinc-400"
+              className="text-xs text-zinc-500 dark:text-zinc-400"
               title="The absolute instant this will jump to, in the same zone the rows/header are currently showing."
             >
               {formatTimestamp(tsMs, timeDisplayMode)}

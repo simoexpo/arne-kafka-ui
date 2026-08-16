@@ -280,7 +280,7 @@ function TimeColumn({ label, testidPrefix, count, selected, onSelect, open }: {
 
   return (
     <div className="flex flex-col items-center">
-      <span className="mb-1 text-[10px] text-zinc-400 dark:text-zinc-500">{label}</span>
+      <span className="mb-1 text-xs text-zinc-400 dark:text-zinc-500">{label}</span>
       <div
         ref={listRef}
         onScroll={onScroll}
@@ -561,7 +561,7 @@ export function DateTimePicker({
           <div className="mb-1 flex justify-end">
             <span
               data-testid="datetime-picker-zone-label"
-              className="rounded bg-zinc-100 px-1 py-0.5 text-[9px] font-medium uppercase tracking-wide text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400"
+              className="rounded bg-zinc-100 px-1 py-0.5 text-xs font-medium uppercase tracking-wide text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400"
             >
               {zoneBadgeLabel}
             </span>
@@ -587,7 +587,7 @@ export function DateTimePicker({
                   ›
                 </button>
               </div>
-              <div className="grid grid-cols-7 gap-0.5 pb-1 text-center text-[10px] text-zinc-400 dark:text-zinc-500">
+              <div className="grid grid-cols-7 gap-0.5 pb-1 text-center text-xs text-zinc-400 dark:text-zinc-500">
                 {WEEKDAY_LABELS.map((w, i) => <span key={i}>{w}</span>)}
               </div>
               <div className="grid grid-cols-7 gap-0.5 text-center">
@@ -635,7 +635,7 @@ export function DateTimePicker({
               className="w-full rounded border border-zinc-300 px-1.5 py-1 text-center dark:border-zinc-700 dark:bg-zinc-950"
             />
             {!textValid && (
-              <p data-testid="datetime-picker-invalid-hint" className="mt-0.5 text-[10px] text-zinc-500 dark:text-zinc-400">
+              <p data-testid="datetime-picker-invalid-hint" className="mt-0.5 text-xs text-zinc-500 dark:text-zinc-400">
                 doesn't look like a date — expected yyyy-mm-dd hh:mm:ss.mmm
               </p>
             )}

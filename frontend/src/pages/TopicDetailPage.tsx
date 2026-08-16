@@ -1,4 +1,5 @@
 import { useMemo, useState } from 'react'
+import { Stat } from '../components/Stat'
 import { useQuery } from '@tanstack/react-query'
 import { useParams } from '@tanstack/react-router'
 import { getTopicDetail, getThroughput, getTopicConsumers } from '../api/client'
@@ -170,7 +171,7 @@ function GroupRow({ group }: { group: TopicGroupLag }) {
         <span className="ml-auto">lag <span className="font-semibold">{formatCount(group.total_lag)}</span></span>
       </summary>
       {open && (
-        <table className="mt-2 w-full text-left font-mono text-xs">
+        <table className="mt-2 w-full text-left font-mono text-sm">
           <thead className="text-zinc-500">
             <tr><th className="py-1">partition</th><th>committed</th><th>end</th><th>lag</th></tr>
           </thead>
@@ -315,14 +316,6 @@ function ConfigTable({ entries, testPrefix }: { entries: ConfigEntry[]; testPref
   )
 }
 
-function Stat({ label, value }: { label: string; value: string }) {
-  return (
-    <div data-testid={`stat-${label}`}>
-      <dt className="text-xs text-zinc-500">{label}</dt>
-      <dd className="text-xl font-semibold">{value}</dd>
-    </div>
-  )
-}
 
 export function TopicDetailPage() {
   const { cluster, topic } = useParams({ from: '/c/$cluster/topics/$topic' })
