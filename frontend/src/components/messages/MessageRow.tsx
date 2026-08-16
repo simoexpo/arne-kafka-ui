@@ -78,12 +78,10 @@ export function MessageRow({
       {expanded && (
         <div className="mt-2 grid grid-cols-1 gap-3 md:grid-cols-2" onClick={(e) => e.stopPropagation()}>
           <div>
-            <div className="mb-1 text-zinc-500">key</div>
-            <PayloadView payload={message.key} />
+            <PayloadView payload={message.key} label="key" />
           </div>
           <div>
-            <div className="mb-1 text-zinc-500">value</div>
-            <PayloadView payload={message.value} />
+            <PayloadView payload={message.value} label="value" />
           </div>
           <div className="md:col-span-2">
             <div className="mb-1 text-zinc-500">headers</div>

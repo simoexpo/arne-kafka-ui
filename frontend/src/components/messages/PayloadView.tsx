@@ -2,18 +2,26 @@ import type { DecodedPayload } from '../../api/types'
 import { EncodingBadge } from './EncodingBadge'
 import { JsonView } from './JsonView'
 
-export function PayloadView({ payload }: { payload: DecodedPayload | null }) {
-  if (payload === null) return <span className="text-zinc-400">∅ null</span>
-  const schema = payload.schema_id !== null && (
-    <span className="ml-2 text-xs text-zinc-500">schema id {payload.schema_id}</span>
+export function PayloadView({ payload, label }: { payload: DecodedPayload | null; label: string }) {
+  const heading = (
+    <div className="mb-1 flex items-center gap-2 text-zinc-500">
+      <span>{label}</span>
+      {payload && <EncodingBadge encoding={payload.encoding} />}
+      {payload && payload.schema_id !== null && <span className="text-xs">schema id {payload.schema_id}</span>}
+    </div>
   )
+  if (payload === null) {
+    return (
+      <div>
+        {heading}
+        <span className="text-zinc-400">∅ null</span>
+      </div>
+    )
+  }
   if (payload.encoding === 'decode_error') {
     return (
       <div className="space-y-1 font-mono text-sm">
-        <div className="flex items-center gap-2">
-          <EncodingBadge encoding={payload.encoding} />
-          {schema}
-        </div>
+        {heading}
         <p className="text-red-700 dark:text-red-400">{payload.error}</p>
         <pre className="max-h-40 overflow-auto rounded bg-zinc-100 p-2 text-xs text-zinc-500 dark:bg-zinc-900">{payload.text}</pre>
       </div>
@@ -29,10 +37,7 @@ export function PayloadView({ payload }: { payload: DecodedPayload | null }) {
   }
   return (
     <div className="font-mono text-sm">
-      <div className="mb-1 flex items-center gap-2">
-        <EncodingBadge encoding={payload.encoding} />
-        {schema}
-      </div>
+      {heading}
       {body}
     </div>
   )
