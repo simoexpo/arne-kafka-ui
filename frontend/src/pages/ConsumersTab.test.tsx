@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import { screen } from '@testing-library/react'
 import { renderWithQuery } from '../test/utils'
-import { ConsumersTab } from './TopicDetailPage'
+import { ConsumersTab } from './ConsumersTab'
 import * as client from '../api/client'
 
 vi.mock('../api/client', async (importOriginal) => ({
