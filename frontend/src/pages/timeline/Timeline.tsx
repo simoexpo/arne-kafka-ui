@@ -182,115 +182,22 @@ export function Timeline({
   // an empty page that auto-continues further.
   const listRef = useRef<MessageListHandle>(null)
   const pendingScrollEdgeRef = useRef<'top' | 'bottom' | null>(null)
-  // Owner-reported bug (2026-08-15): a jump landing at the bottom edge
-  // (`scrollToEdge('bottom')`, below) programmatically sets `el.scrollTop`
-  // — and a REAL browser (unlike jsdom, which is why this shipped
-  // untested) fires a genuine native 'scroll' event for that assignment,
-  // same as any user-driven scroll. That echoed event lands exactly at the
-  // bottom, trivially satisfying the bottom-sentinel's "near the bottom"
-  // check in `handleScroll` — firing an unsolicited `loadOlder()` a moment
-  // after landing. The older page it fetches appends BELOW the target
-  // (correct — a back page below the cap doesn't move the viewport), but
-  // nothing then re-follows the viewport down to the NEW bottom, so the
-  // target — genuinely the bottom-most loaded row a moment ago — ends up
-  // stranded above it, rendering "in the middle" of the now-larger window.
-  //
-  // Two fix attempts were tried and REJECTED before this one (both refuted
-  // by a real-browser probe, not just reasoning — see the owner's own
-  // reproduction instructions): (1) a one-shot boolean "swallow the very
-  // next scroll event" — wrong, because it could swallow a genuinely LATER
-  // unrelated scroll if nothing happened to consume it first, and — the
-  // real killer — (2) recording the EXACT scrollTop `scrollToEdge` just
-  // set and matching by value — wrong because the virtualizer keeps
-  // measuring REAL row heights via `ResizeObserver` (jsdom has none — a
-  // real browser does) for a few scroll-event cycles AFTER we land,
-  // changing `scrollHeight` — and therefore the true bottom's scrollTop —
-  // out from under us before the echo we're expecting even arrives. A
-  // probe confirmed this exactly: `scrollHeight` at arm time (3405) had
-  // already grown to 3768 by the first echo, so the "exact value" never
-  // matched, the event fell through as if genuine, and re-triggered the
-  // same bug.
-  //
-  // Fix: track SETTLING, not a single value. `{ edge, lastScrollHeight }`
-  // means "we're still watching this jump's landing settle" — armed with
-  // `lastScrollHeight: null` (nothing observed yet). Every scroll event
-  // while settling: if `scrollHeight` differs from the last observed value
-  // (content is STILL resizing — including the very first observation,
-  // trivially "different" from `null`), re-snap to the edge's CURRENT true
-  // position (never treated as a pagination trigger) and keep watching. It
-  // takes exactly two CONSECUTIVE events reporting the SAME `scrollHeight`
-  // to conclude settling is over — genuinely stable content, not a
-  // still-resizing view — at which point normal scroll handling resumes.
-  // `settleAttemptsRef` bounds the worst case (content that never
-  // genuinely stabilizes, e.g. a fast live tail) at `MAX_SETTLE_ATTEMPTS`
-  // re-snaps before giving up and processing normally regardless — the
-  // same "never loop forever" discipline as the iteration-cap elsewhere in
-  // this file.
+  // A jump landing keeps re-snapping to its edge until two consecutive
+  // scroll events report the same `scrollHeight` (capped at
+  // `MAX_SETTLE_ATTEMPTS`); such events are never treated as pagination
+  // triggers. See docs/superpowers/specs/timeline-design-decisions.md
+  // ("MessageList.scrollToEdge's return value") for why this is needed and
+  // the two rejected designs that preceded it.
   const settlingRef = useRef<{ edge: 'top' | 'bottom'; lastScrollHeight: number | null } | null>(null)
   const settleAttemptsRef = useRef(0)
 
-  // Scroll anchoring (design spec v1.3 "Scroll anchoring", owner feedback
-  // 2026-08-15; ROW-IDENTITY rewrite, fix round 1, M1 — review of 079f30f):
-  // a forward page's matches rank newer, so they land near the top of the
-  // newest-first merge — i.e. they prepend above whatever the reader was
-  // looking at. Left alone, scrollTop stays numerically unchanged after the
-  // prepend, which silently relocates the reader to the top of the NEWLY
-  // loaded page instead of keeping them at the junction they were reading.
-  //
-  // The FIRST version of this fix (task 3) captured total scrollHeight
-  // before/after and adjusted by "added − removed". That's wrong the
-  // instant an insert ALSO trims rows BELOW the viewport in the same
-  // commit (routine at a small cap: recovering rows via a forward page can
-  // simultaneously overflow-trim the bottom) — the trim shrinks the total
-  // height without moving anything the reader can see above them, so
-  // "added − removed" can cancel toward ~0: exactly the forbidden
-  // relocation this mechanism exists to prevent.
-  //
-  // Fixed by anchoring to a SPECIFIC row's IDENTITY instead of a total
-  // delta: captured in runPage's `onMatches` callback (see below, one
-  // capture per BATCH as of fix round 2, N5 — including the final one,
-  // since `flush()` always runs before `onPageEnd`), right before that
-  // batch's rows get added — the "junction" row is whatever is CURRENTLY
-  // at the top of the merged (possibly overlaid) list, since a forward
-  // insert can only ever prepend ABOVE it, never move it out from under
-  // itself (a top trim is impossible on a forward-direction insert — see
-  // `enforceCap`: only `back`-direction overflow ever trims the top).
-  // Consumed by the layout effect below, which finds that SAME row's NEW
-  // index after the batch/commit renders and adjusts scrollTop by the
-  // difference in `MessageList#rowOffsetAt` — robust to a simultaneous
-  // trim (which only ever happens BELOW this row) and to estimate-vs-
-  // measured drift (both reads go through the same virtualizer API).
-  //
-  // 'back' pages need the SAME treatment, for the mirror-image reason
-  // (real-browser stall found in the 2026-08-15 rollout drill; the original
-  // "a back page appends below, it doesn't move the viewport" was only true
-  // BELOW the cap). Once the window is full, every back page trims exactly
-  // as many rows off the TOP as it appends at the bottom: total height stops
-  // changing, and every remaining row shifts UP by the trimmed height while
-  // scrollTop stays numerically unchanged. The reader — sitting at the
-  // bottom, which is what fired the sentinel in the first place — is
-  // therefore left pinned at scrollTop === max: the whole window slides
-  // underneath them (they never see the page they just asked for), and the
-  // browser, having no position change to report on an unchanged
-  // scrollHeight, never fires another scroll event. Since scroll is the ONLY
-  // pagination affordance, that killed the down-walk permanently at the cap.
-  // The capture site differs from 'forward' (commit-time, not per-batch —
-  // see runPage's `onPageEnd`), the consumption is identical.
-  //
-  // `priorTop` is ALWAYS `0` here (fix round 2, N4 — flagged as "correct
-  // by accident" otherwise): the junction row captured is, by construction,
-  // ALWAYS the row currently at index 0 (`rowOffsetAt(0)`), and index 0's
-  // own cumulative offset from the top of the list is trivially 0 no
-  // matter WHICH row occupies that slot. `rowOffsetAt(0)` is called anyway
-  // (rather than hard-coding `priorTop: 0`) for two honest reasons, not
-  // because the call result is in doubt: (1) it doubles as the "is the
-  // list actually mounted" check — returns `null` before the virtualizer
-  // exists (e.g. mid-jump, while `Panel` shows a loading skeleton), which a
-  // hardcoded `0` would silently paper over; (2) it keeps the invariant
-  // explicit and self-enforcing — if a future change ever captured some
-  // OTHER index instead of 0, this call would immediately start returning
-  // that row's real (non-zero) offset rather than silently inheriting a
-  // now-wrong hardcoded assumption.
+  // Scroll anchoring: capture the row at index 0 before a forward batch (or
+  // the last committed row before a back commit — see runPage's `onPageEnd`
+  // for the capture site); after render, find that same row's new index and
+  // adjust scrollTop by its offset delta. Robust to a same-commit trim below
+  // the reader, which a total-height delta is not — see
+  // docs/superpowers/specs/timeline-design-decisions.md ("Scroll anchoring:
+  // rejected total-height-delta approach") for why.
   const pendingAnchorRef = useRef<{ partition: number; offset: number; priorTop: number } | null>(null)
 
   // Owner-requested (2026-08-15): the row landed on by an offset jump gets a
