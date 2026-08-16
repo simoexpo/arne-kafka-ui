@@ -23,8 +23,7 @@ export interface MessageListHandle {
   // height change that happened above the viewport (a prepend) so the
   // reader's visual position doesn't silently shift.
   adjustScrollTop(delta: number): void
-  // Scroll anchoring (design spec v1.3 "Scroll anchoring"; fix round 1, M1
-  // — review of 079f30f): the virtualizer's own rendered top-offset (its
+  // Scroll anchoring (design spec v1.3 "Scroll anchoring"): the virtualizer's own rendered top-offset (its
   // coordinate space, not the scroll element's) of the row currently at
   // `index` in the `messages` array this component was last rendered with,
   // or `null` if `index` is out of range. Row-IDENTITY anchoring (capture

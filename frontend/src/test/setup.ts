@@ -17,7 +17,7 @@ afterEach(() => {
 Object.defineProperty(HTMLElement.prototype, 'offsetWidth', { configurable: true, value: 900 })
 Object.defineProperty(HTMLElement.prototype, 'offsetHeight', { configurable: true, value: 600 })
 
-// Fix round 1 (review of 079f30f), L3: @tanstack/virtual-core schedules
+// @tanstack/virtual-core schedules
 // some of its own scroll/rect bookkeeping via `requestAnimationFrame` on the
 // window it was constructed against (see e.g. `observeElementOffset`'s
 // `this.targetWindow.requestAnimationFrame(...)` call). jsdom's default rAF

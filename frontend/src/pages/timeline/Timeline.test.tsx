@@ -2277,7 +2277,7 @@ describe('Timeline', () => {
   // watching); Timeline must instead re-issue the request from the store's
   // fresh edge, transparently to the reader (content never resets, the
   // trimmed row is still recoverable).
-  describe('stale in-flight page rejection (C3, fix round 1)', () => {
+  describe('stale in-flight page rejection', () => {
     it('a live trim mid-flight does not create an interior hole: the stale page is dropped and re-issued from the fresh edge', async () => {
       const tail = mockTail()
       render(<Timeline cluster="prod" topic="orders" windowCap={4} />)

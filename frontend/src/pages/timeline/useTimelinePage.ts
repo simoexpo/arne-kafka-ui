@@ -31,7 +31,7 @@ export interface UseTimelinePage {
   /**
    * `onPageEnd`, if given, fires SYNCHRONOUSLY inside the very same event
    * handler that processes the SSE `page_end` event — the same tick as the
-   * internal `state.loading` update, not a render later (task 3:
+   * internal `state.loading` update, not a render later —
    * a caller that commits a page's rows to its own store needs that
    * mutation to land in the SAME render as `state.loading` flipping false,
    * or ref-based DOM handles reading the store — e.g. a scroll-position
@@ -119,7 +119,7 @@ export function useTimelinePage(cluster: string, topic: string): UseTimelinePage
       }
 
       // Anchor jumps (and fresh cursor pages) must clear stale exhaustion
-      // for the direction being (re)loaded — Task 7's viewport jumps rely
+      // for the direction being (re)loaded — a viewport jump relies
       // on this so a previously-exhausted direction can become
       // not-exhausted again after e.g. "jump to beginning".
       setState((prev) => ({
@@ -162,7 +162,7 @@ export function useTimelinePage(cluster: string, topic: string): UseTimelinePage
             exhausted: { ...prev.exhausted, [params.direction]: exhausted },
           }))
           flush()
-          // Fix round 1, L1: re-check the generation ONE MORE TIME,
+          // Re-check the generation ONE MORE TIME,
           // immediately before this final call — `flush()` just invoked the
           // caller's `onMatches` synchronously, and a caller that starts a
           // NEW `loadPage` from inside it (e.g. auto-advancing to the next
