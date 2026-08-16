@@ -188,6 +188,34 @@ async fn topic_consumers_lists_groups_reading_the_topic() {
     assert_eq!(g["total_lag"], 0);
 }
 
+/// B2 perf regression: `/topics/{t}/consumers` must fetch metadata once and
+/// fetch each partition's watermark once per REQUEST, no matter how many
+/// consumer groups read that topic — not once per group. Two groups reading
+/// the same single-partition topic makes the fan-in trivially checkable: if
+/// group-lag lookups still repeated the metadata fetch and the watermark
+/// fetch per group, this would see 2 of each instead of 1.
+#[tokio::test]
+async fn topic_consumers_shares_metadata_and_watermarks_across_groups() {
+    use betrachtung::cluster::admin::{group_metadata_fetch_count, group_watermark_fetch_count};
+
+    let bootstrap = start_kafka().await;
+    let topic = "fanin-topic";
+    create_topic(&bootstrap, topic, 1).await;
+    produce(&bootstrap, topic, 10).await;
+    consume_and_commit(&bootstrap, topic, "fanin-group-a", 3).await;
+    consume_and_commit(&bootstrap, topic, "fanin-group-b", 5).await;
+    let state = state_for(&bootstrap, vec![]);
+
+    let (status, body) = get_json(app(state), &format!("/api/clusters/test/topics/{topic}/consumers")).await;
+    assert_eq!(status, 200);
+    let groups = body["groups"].as_array().unwrap();
+    assert!(groups.iter().any(|g| g["group_id"] == "fanin-group-a"));
+    assert!(groups.iter().any(|g| g["group_id"] == "fanin-group-b"));
+
+    assert_eq!(group_metadata_fetch_count(Some(topic)), 1, "metadata must be fetched once per request, shared across every group");
+    assert_eq!(group_watermark_fetch_count(topic), 1, "watermarks must be cached per (topic, partition) across the group loop, not refetched per group");
+}
+
 #[tokio::test]
 async fn unknown_group_is_404() {
     let bootstrap = start_kafka().await;
