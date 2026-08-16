@@ -10,13 +10,10 @@ export interface MessageListHandle {
   // oldest-visible edge) is the meaningful anchor there. Assigning
   // scrollTop = scrollHeight is the standard clamp-to-bottom trick (a real
   // browser clamps any out-of-range value to the max scrollable offset).
-  // Returns the scrollTop it actually set (or `null` if the scroll element
-  // isn't mounted yet, a no-op) — owner-reported bug, 2026-08-15: a real
-  // browser fires a genuine native 'scroll' event for this assignment
-  // (jsdom does not), which Timeline must recognize as its OWN echo rather
-  // than a real pagination-triggering scroll; the caller records this
-  // return value to recognize that exact echo when it arrives (see
-  // `suppressNextScrollRef`'s own comment in Timeline.tsx).
+  // Returns the scrollTop it actually set, or `null` if the scroll element
+  // isn't mounted (a no-op). The caller uses it ONLY as a "did this land at
+  // all" check before arming its settling-detection — matching by value was
+  // tried and refuted (see `settlingRef` in Timeline.tsx).
   scrollToEdge(edge: 'top' | 'bottom'): number | null
   // Nudges scrollTop by `delta` (added, not set) — compensates for a
   // height change that happened above the viewport (a prepend) so the
