@@ -97,7 +97,16 @@ fn drive_tail_poll(
                     return Err(format!("tail stalled: {e}"));
                 }
             }
-            PollOutcome::Empty => {}
+            // B6 fix: a quiet poll is not a poll error — it must reset the
+            // streak exactly like a successfully received message does (see
+            // this function's own doc comment: "with only poll errors in
+            // between"). Otherwise two isolated, transient error blips
+            // separated by an arbitrarily long quiet (healthy, idle) period
+            // still sum toward the same stall, misreporting a healthy
+            // broker as stalled.
+            PollOutcome::Empty => {
+                error_streak_since = None;
+            }
         }
     }
     Ok(())
@@ -291,6 +300,58 @@ mod tests {
         // immediately; asserting it takes close to a full stall_timeout
         // proves the reset happened.
         assert!(start.elapsed() >= stall_timeout, "elapsed: {:?}", start.elapsed());
+        drop(rx);
+    }
+
+    /// B6 regression: a quiet poll (`PollOutcome::Empty`) must reset the
+    /// error streak exactly like a successfully received message does — an
+    /// error, then quiet, then error sequence must not sum the two error
+    /// windows across the quiet gap. Before the fix, `Empty` did nothing, so
+    /// two isolated, transient error blips minutes apart on an otherwise
+    /// healthy (quiet) topic could still trip the stall check — directly
+    /// contradicting `drive_tail_poll`'s own doc comment ("a stall is ...
+    /// elapsed since the last successfully received message *with only poll
+    /// errors in between*" — an `Empty` poll is not a poll error).
+    #[test]
+    fn quiet_poll_resets_the_error_streak() {
+        let cancel = AtomicBool::new(false);
+        let (tx, rx) = mpsc::channel(8);
+        let stall_timeout = Duration::from_millis(40);
+        let mut calls = 0u32;
+        let start = Instant::now();
+        let result = drive_tail_poll(
+            move || {
+                calls += 1;
+                match calls {
+                    // A transient error starts the streak...
+                    1 => PollOutcome::Error("transient".into()),
+                    // ...then a REAL quiet gap longer than stall_timeout
+                    // elapses before the next poll returns Empty (not an
+                    // error) — a broker that recovered and went idle, the
+                    // ordinary state for a tail. If this Empty poll does
+                    // NOT reset the streak, the very next error below would
+                    // immediately trip the stall check, since the streak
+                    // already exceeds stall_timeout by the time we get there.
+                    2 => {
+                        std::thread::sleep(stall_timeout * 2);
+                        PollOutcome::Empty
+                    }
+                    _ => PollOutcome::Error("transient".into()),
+                }
+            },
+            &cancel,
+            &tx,
+            stall_timeout,
+        );
+        assert!(result.is_err(), "sustained errors after the quiet gap must still eventually stall");
+        // Must take (at least) the quiet sleep PLUS a fresh stall_timeout —
+        // proving the quiet poll reset the streak instead of letting it
+        // carry through from before the quiet gap.
+        assert!(
+            start.elapsed() >= stall_timeout * 3,
+            "elapsed: {:?} (expected roughly the quiet sleep {:?} plus a fresh stall_timeout {:?})",
+            start.elapsed(), stall_timeout * 2, stall_timeout
+        );
         drop(rx);
     }
 
