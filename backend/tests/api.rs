@@ -1257,33 +1257,45 @@ async fn timeline_scan_stops_on_client_disconnect() {
 
 /// The messages-timeline design supersedes both `/messages` (browse) and
 /// `/search` — "both DELETED — one code path wins" (the timeline). Neither
-/// route exists in the router any more, so a request to either now falls
-/// through to the SPA fallback like any other unmatched path: 200,
-/// text/html, not a JSON 404 from an API handler.
+/// route exists in the router any more. Owner ruling (I3): an unknown path
+/// under `/api/*` is a routing bug or an API typo, not a page to render, so
+/// it gets the same structured 404 envelope as any other `ApiError` —
+/// never the SPA fallback, which would otherwise reach the frontend as a
+/// `SyntaxError` parsing HTML as JSON and get reported as "connection
+/// lost". Non-API paths are unaffected — see `spa_fallback_serves_html_for_unknown_paths`.
 #[tokio::test]
 async fn old_endpoints_are_gone() {
     let bootstrap = start_kafka().await;
     let state = state_for(&bootstrap, vec![]);
 
-    let res = app(state.clone())
-        .oneshot(axum::http::Request::builder()
-            .uri("/api/clusters/test/topics/x/messages?anchor=latest")
-            .body(axum::body::Body::empty()).unwrap())
-        .await
-        .unwrap();
-    assert_eq!(res.status(), 200);
-    let ct = res.headers().get("content-type").unwrap().to_str().unwrap().to_string();
-    assert!(ct.starts_with("text/html"), "/messages must be gone (SPA fallback), got content-type {ct}");
+    let (status, body) = get_json(
+        app(state.clone()),
+        "/api/clusters/test/topics/x/messages?anchor=latest",
+    ).await;
+    assert_eq!(status, 404, "/messages must be gone (404 envelope), got {body}");
+    assert_eq!(body["code"], "not_found");
+    assert_eq!(body["retriable"], false);
 
-    let res = app(state)
-        .oneshot(axum::http::Request::builder()
-            .uri("/api/clusters/test/topics/x/search?range=last_n&n=10&filter=value_contains&q=x")
-            .body(axum::body::Body::empty()).unwrap())
-        .await
-        .unwrap();
-    assert_eq!(res.status(), 200);
-    let ct = res.headers().get("content-type").unwrap().to_str().unwrap().to_string();
-    assert!(ct.starts_with("text/html"), "/search must be gone (SPA fallback), got content-type {ct}");
+    let (status, body) = get_json(
+        app(state),
+        "/api/clusters/test/topics/x/search?range=last_n&n=10&filter=value_contains&q=x",
+    ).await;
+    assert_eq!(status, 404, "/search must be gone (404 envelope), got {body}");
+    assert_eq!(body["code"], "not_found");
+}
+
+/// Any unmatched path under `/api/*` gets the structured 404 envelope, not
+/// the SPA's `text/html` — a backend routing bug or a frontend API typo
+/// must never present as "connection lost".
+#[tokio::test]
+async fn unknown_api_path_gets_404_envelope() {
+    let bootstrap = start_kafka().await;
+    let state = state_for(&bootstrap, vec![]);
+    let (status, body) = get_json(app(state), "/api/clusters/nope/definitely-not-a-route").await;
+    assert_eq!(status, 404);
+    assert_eq!(body["code"], "not_found");
+    assert_eq!(body["retriable"], false);
+    assert!(body["message"].as_str().unwrap().contains("/api/clusters/nope/definitely-not-a-route"));
 }
 
 #[tokio::test]

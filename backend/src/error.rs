@@ -29,6 +29,16 @@ impl ApiError {
                message: format!("consumer group '{group}' does not exist"),
                cluster: Some(cluster.into()), retriable: false }
     }
+    /// A request under `/api/*` that matches no route — a backend routing
+    /// bug or a frontend API typo, never a page to render. Owner ruling
+    /// (review I3): this gets the same structured envelope as any other API
+    /// error, not the SPA fallback, so it never reaches the frontend as an
+    /// HTML body masquerading as a 200 JSON response.
+    pub fn not_found_route(path: &str) -> Self {
+        Self { status: StatusCode::NOT_FOUND, code: "not_found",
+               message: format!("no such endpoint '{path}'"),
+               cluster: None, retriable: false }
+    }
     pub fn bad_request(message: impl Into<String>) -> Self {
         Self { status: StatusCode::BAD_REQUEST, code: "bad_request",
                message: message.into(), cluster: None, retriable: false }

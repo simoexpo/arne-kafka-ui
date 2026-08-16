@@ -1,3 +1,4 @@
+use crate::error::ApiError;
 use axum::http::{header, StatusCode, Uri};
 use axum::response::{Html, IntoResponse, Response};
 use rust_embed::RustEmbed;
@@ -9,8 +10,19 @@ struct Assets;
 const PLACEHOLDER: &str =
     "<!doctype html><html><body><h1>betrachtung</h1><p>frontend not built — run `npm run build` in frontend/ and rebuild.</p></body></html>";
 
+/// Router-wide fallback for any request matching no declared route.
+///
+/// Owner ruling (review I3): `/api/*` is API surface, not a page — an
+/// unmatched path there is a backend routing bug or a frontend typo, and
+/// must answer with the same structured `ApiError` envelope every other API
+/// failure uses, never the SPA's `text/html`. Everything else (a client-side
+/// router path like `/topics/foo`) keeps serving the SPA shell so deep links
+/// and refreshes work.
 pub async fn spa_fallback(uri: Uri) -> Response {
     let path = uri.path().trim_start_matches('/');
+    if uri.path().starts_with("/api/") {
+        return ApiError::not_found_route(uri.path()).into_response();
+    }
     if !path.is_empty()
         && let Some(asset) = Assets::get(path)
     {
