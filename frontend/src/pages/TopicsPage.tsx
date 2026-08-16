@@ -7,7 +7,7 @@ import { FilterInput } from '../components/FilterInput'
 import { Panel } from '../components/Panel'
 import { StalenessChip } from '../components/StalenessChip'
 import { Switch } from '../components/Switch'
-import { formatCount } from '../lib/format'
+import { formatBytes, formatCount } from '../lib/format'
 
 export function TopicsView({ cluster }: { cluster: string }) {
   const [filter, setFilter] = useState('')
@@ -67,7 +67,7 @@ export function TopicsView({ cluster }: { cluster: string }) {
                 <td>{t.partitions}</td>
                 <td>{t.replication_factor}</td>
                 <td>{t.message_estimate === null ? '—' : formatCount(t.message_estimate)}</td>
-                <td className="text-zinc-400">{t.size_bytes === null ? '—' : formatCount(t.size_bytes)}</td>
+                <td className="text-zinc-400">{t.size_bytes === null ? '—' : formatBytes(t.size_bytes)}</td>
               </tr>
             ))}
           </tbody>

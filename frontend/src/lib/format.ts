@@ -73,6 +73,18 @@ export function formatCount(n: number): string {
   return `${(n / 1_000_000_000).toFixed(1)}B`
 }
 
+// Byte-scaled (1024-based, unlike `formatCount`'s decimal message-count
+// shorthand) — a size in bytes should read as KB/MB/GB, not as unit-less "k".
+export function formatBytes(n: number): string {
+  const KB = 1024
+  const MB = KB * 1024
+  const GB = MB * 1024
+  if (n < KB) return `${n} B`
+  if (n < MB) return `${(n / KB).toFixed(1)} KB`
+  if (n < GB) return `${(n / MB).toFixed(1)} MB`
+  return `${(n / GB).toFixed(1)} GB`
+}
+
 function dateOnly(ms: number, mode: TimeDisplayMode): string {
   const d = new Date(ms)
   return mode === 'utc'

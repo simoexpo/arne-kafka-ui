@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { formatAgo, formatCount, formatRetentionValue, formatTimestamp, formatWindowRange, retentionMsHint, zoneSuffix } from './format'
+import { formatAgo, formatBytes, formatCount, formatRetentionValue, formatTimestamp, formatWindowRange, retentionMsHint, zoneSuffix } from './format'
 import { withFixedTZ } from '../test/timezone'
 
 describe('formatAgo', () => {
@@ -18,6 +18,13 @@ describe('formatCount', () => {
   it('thousands', () => expect(formatCount(1500)).toBe('1.5k'))
   it('millions', () => expect(formatCount(2_000_000)).toBe('2.0M'))
   it('billions', () => expect(formatCount(3_100_000_000)).toBe('3.1B'))
+})
+
+describe('formatBytes', () => {
+  it('sub-KB verbatim with a B suffix', () => expect(formatBytes(999)).toBe('999 B'))
+  it('kilobytes', () => expect(formatBytes(1536)).toBe('1.5 KB'))
+  it('megabytes', () => expect(formatBytes(2 * 1024 * 1024)).toBe('2.0 MB'))
+  it('gigabytes', () => expect(formatBytes(3.1 * 1024 * 1024 * 1024)).toBe('3.1 GB'))
 })
 
 describe('formatRetentionValue', () => {
