@@ -284,6 +284,27 @@ describe('Timeline', () => {
       expect(FakeEventSource.instances.length).toBe(requestsBefore)
     })
 
+    // The toggle's own stable handle. Everything else in this block reaches
+    // it by aria-label, which pins the accessible name but leaves nothing
+    // pinning the test-id that out-of-process checks (scripts/smoke.mjs, the
+    // browser probes) address it by — the id went missing during a refactor
+    // round with no test noticing, precisely because no test named it.
+    it('exposes the zone toggle under a stable test-id, and flipping it re-renders the loaded rows', async () => {
+      mockTail()
+      render(<Timeline cluster="prod" topic="orders" />)
+      await emit(0, 'match', mk(2, { timestamp_ms: 1_704_067_265_000 })) // 2024-01-01T00:01:05Z
+      await emit(0, 'page_end', { cursor: cur({ 0: 1 }), exhausted: false })
+
+      const toggle = screen.getByTestId('timezone-toggle')
+      expect(toggle).toHaveAttribute('data-mode', 'utc')
+      expect(screen.getAllByTestId('message-row')[0]).toHaveTextContent('2024-01-01 00:01:05.000 UTC')
+
+      fireEvent.click(toggle)
+
+      expect(screen.getByTestId('timezone-toggle')).toHaveAttribute('data-mode', 'local')
+      expect(screen.getAllByTestId('message-row')[0]).toHaveTextContent('2023-12-31 19:01:05.000 UTC-5')
+    })
+
     // Persistence is the global store's job (`lib/timeDisplayMode`,
     // untouched by this move) — this proves the moved call site still reads
     // it correctly on a fresh mount, without needing to click again.
@@ -1397,6 +1418,7 @@ describe('Timeline', () => {
       expect(FakeEventSource.instances).toHaveLength(3)
       expect(FakeEventSource.instances[2].url).toBe(url({ direction: 'back', limit: '100', cursor: cur({ 0: 30 }) }))
     })
+
   })
 
   describe('attached vs detached windows', () => {

@@ -34,6 +34,7 @@ export function TimeZoneToggle() {
   return (
     <button
       type="button"
+      data-testid="timezone-toggle"
       aria-label="toggle time zone display"
       data-mode={mode}
       className="flex items-center gap-1 rounded-full border border-zinc-300 p-1 text-xs dark:border-zinc-700"
