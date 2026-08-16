@@ -3,7 +3,7 @@ import { render, screen } from '@testing-library/react'
 import { MessageEstimateCell } from './MessageEstimateCell'
 
 // Shared by OverviewPage's "Top topics" table and TopicsPage's inventory
-// table (n8, queue-review): both used to carry an identical, independently
+// table: both used to carry an identical, independently
 // maintained 8-line tri-state ternary — a real message count, a dash with an
 // estimate-error tooltip, or a plain dash. One component now owns that
 // contract.
