@@ -48,4 +48,14 @@ describe('describeError', () => {
     const err = new ApiError(400, 'bad_request', 'invalid offset', null, false)
     expect(describeError(err)).toEqual({ kind: 'app', headline: null })
   })
+
+  // Wire contract with the backend's `ApiError::fetch_deadline`: a scan
+  // stalled under Betrachtung's OWN read deadline. Its message blames that
+  // deadline, so it must never render under the "Kafka unreachable"
+  // headline the kafka_* codes get — headline-free, the message stands
+  // alone and uncontradicted.
+  it('fetch_deadline renders headline-free, never as "Kafka unreachable"', () => {
+    const err = new ApiError(504, 'fetch_deadline', "the cluster didn't return new records within the fetch deadline", 'prod', true)
+    expect(describeError(err)).toEqual({ kind: 'app', headline: null })
+  })
 })

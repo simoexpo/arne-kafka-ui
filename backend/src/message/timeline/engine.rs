@@ -34,6 +34,10 @@ fn no_progress_message() -> &'static str {
     "the cluster didn't return new records within the fetch deadline"
 }
 
+fn no_progress_error(cluster: &str) -> ApiError {
+    ApiError::fetch_deadline(cluster, no_progress_message())
+}
+
 /// Per-partition span of one scan iteration ("chunk"): used by every chunk
 /// of a filtered page, and by every chunk after the first on an unfiltered
 /// one (whose first chunk uses `limit` instead — see `chunk_span`).
@@ -466,7 +470,7 @@ pub fn run_page(
                 // Truthful about WHOSE deadline this is (see
                 // `no_progress_message`'s own doc comment) — never blames
                 // Kafka for our own `fetch_ranges_blocking` cap.
-                let _ = tx.send(ApiError::kafka(&handle.name, no_progress_message()).into()).await;
+                let _ = tx.send(no_progress_error(&handle.name).into()).await;
                 return;
             }
 
@@ -560,5 +564,19 @@ mod tests {
             !msg.to_lowercase().contains("kafka"),
             "must not attribute a stall under our own deadline to Kafka going quiet: {msg:?}"
         );
+    }
+
+    /// The message owns our deadline — the wire CODE must too. `kafka_error`
+    /// and `kafka_timeout` both render under the frontend's "Kafka
+    /// unreachable" headline (`describeError`), which would sit directly
+    /// above a message saying the deadline was ours: contradictory. A stall
+    /// gets its own code, which the frontend renders headline-free.
+    #[test]
+    fn no_progress_error_code_never_renders_as_kafka_unreachable() {
+        let err = no_progress_error("prod");
+        assert_eq!(err.code, "fetch_deadline");
+        assert_eq!(err.message, no_progress_message());
+        assert_eq!(err.cluster.as_deref(), Some("prod"));
+        assert!(err.retriable, "a stalled fetch is worth retrying");
     }
 }

@@ -48,6 +48,15 @@ impl ApiError {
                message: format!("{what} timed out"),
                cluster: Some(cluster.into()), retriable: true }
     }
+    /// A scan stalled under OUR OWN read deadline (see the timeline
+    /// engine's `no_progress_message`) — deliberately not `kafka`/
+    /// `kafka_timeout`, whose codes the frontend headlines as "Kafka
+    /// unreachable": that headline would blame the broker for a limit this
+    /// service imposes, directly above a message saying so.
+    pub fn fetch_deadline(cluster: &str, message: impl Into<String>) -> Self {
+        Self { status: StatusCode::GATEWAY_TIMEOUT, code: "fetch_deadline",
+               message: message.into(), cluster: Some(cluster.into()), retriable: true }
+    }
     pub fn kafka(cluster: &str, message: impl Into<String>) -> Self {
         Self { status: StatusCode::BAD_GATEWAY, code: "kafka_error",
                message: message.into(), cluster: Some(cluster.into()), retriable: true }
