@@ -16,8 +16,8 @@ import { setTimeDisplayMode, useTimeDisplayMode } from '../lib/timeDisplayMode'
 // call-site move only, hence its own file here rather than living inside
 // whichever page happens to render it.
 //
-// Owner ruling (relabel, same day — reverts the earlier 2026-08-17
-// dynamic-offset label): the two halves read the MODE NAMES, "UTC" /
+// Owner ruling (relabel — reverts an earlier dynamic-offset label): the two
+// halves read the MODE NAMES, "UTC" /
 // "local", never a live numeric offset — a mode selector labeled with a
 // current numeric value contradicted rows spanning a DST transition (which
 // legitimately carry different, both-correct offsets) and implied a choice

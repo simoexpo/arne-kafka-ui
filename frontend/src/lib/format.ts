@@ -4,8 +4,8 @@ function pad(n: number, len = 2): string {
   return String(n).padStart(len, '0')
 }
 
-// ONE format family for both modes (owner ruling 2026-08-17), replacing the
-// prior split between a bare `toISOString()` for UTC (`T`/`Z` ISO shape) and
+// ONE format family for both modes, replacing a prior split between a bare
+// `toISOString()` for UTC (`T`/`Z` ISO shape) and
 // a differently-laid-out, word-labelled "local" string: same
 // "yyyy-mm-dd hh:mm:ss[.mmm] <ZONE>" layout in both modes — only the
 // trailing zone SUFFIX differs (see `zoneSuffix` below). This is the one
@@ -30,7 +30,7 @@ function dateAndTime(ms: number, mode: TimeDisplayMode, millis: boolean): string
 // The zone suffix half of the format family: always "UTC" in utc mode; in
 // local mode, a NUMERIC, per-timestamp, DST-honest offset ("UTC-5",
 // "UTC+5:30" for half-hour zones) derived from THIS timestamp's own
-// `getTimezoneOffset()` — never the word "local" (owner ruling 2026-08-17).
+// `getTimezoneOffset()` — never the word "local".
 // Per-timestamp (not "now") on purpose: two rows a DST transition apart
 // carry different, both-correct offsets. `getTimezoneOffset()` is minutes to
 // ADD to local time to reach UTC, so the DISPLAYED offset is its negation.
@@ -123,7 +123,7 @@ function timeOnly(ms: number, mode: TimeDisplayMode): string {
 // (which always carries seconds).
 //
 // `mode` (owner ruling 2026-08-15, UTC/local display toggle; suffix family
-// unified 2026-08-17): defaults to 'utc' — every existing caller predates
+// unified across modes): defaults to 'utc' — every existing caller predates
 // the toggle and keeps rendering exactly as before. 'local' repeats the same
 // shared-date-once / day-boundary logic against the browser's own zone
 // instead, suffixed with the numeric offset (`zoneSuffix`, honest per the

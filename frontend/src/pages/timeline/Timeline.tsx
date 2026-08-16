@@ -15,6 +15,7 @@ import { planJump, type JumpTarget } from '../../lib/timeline/jumpPlan'
 import type { AnchorContext, PauseReason } from '../../lib/timeline/model'
 import { nextPause } from '../../lib/timeline/pauseMachine'
 import { decidePostPage } from '../../lib/timeline/postPage'
+import { rowKey } from '../../lib/timeline/rowKey'
 import { classifyScroll } from '../../lib/timeline/scrollZones'
 import { stepSettling, type SettlingState } from '../../lib/timeline/settling'
 import { useFallingEdge } from './useFallingEdge'
@@ -96,20 +97,20 @@ export function Timeline({
   const anchorContextRef = useRef<AnchorContext>('default')
 
   const pendingDirectionRef = useRef<Direction | null>(null)
-  // Task 3: each in-flight page's own rows, accumulated per-generation
-  // (cleared at the start of every runPage call, appended to as batches
-  // flush from useTimelinePage) so the page-end effect below can commit the
-  // WHOLE page to the store in one `insertPage` call — the store's own
-  // contract (see its interface doc comment) takes one page's rows plus
-  // that SAME page's own start/continuation cursor pair; it isn't designed
-  // to be fed a page's rows piecemeal across several calls (an anchor
-  // bootstrap's opposite-side seed, in particular, needs the FULL page's
-  // row offsets, not just whatever happened to be in one batch).
+  // Each in-flight page's own rows, accumulated per-generation (cleared at
+  // the start of every runPage call, appended to as batches flush from
+  // useTimelinePage) so runPage's own synchronous `onPageEnd` callback below
+  // can commit the WHOLE page to the store in one `insertPage` call — the
+  // store's own contract (see its interface doc comment) takes one page's
+  // rows plus that SAME page's own start/continuation cursor pair; it isn't
+  // designed to be fed a page's rows piecemeal across several calls (an
+  // anchor bootstrap's opposite-side seed, in particular, needs the FULL
+  // page's row offsets, not just whatever happened to be in one batch).
   const pageRowsRef = useRef<MessageOut[]>([])
   // The cursor's decoded positions the in-flight page was ISSUED with (null
   // for an anchor page — no request cursor exists at all). Set by runPage
-  // at issue time; consumed once, by the page-end effect, as `insertPage`'s
-  // `startPositions` argument.
+  // at issue time; consumed once, by runPage's own synchronous `onPageEnd`
+  // callback, as `insertPage`'s `startPositions` argument.
   const pendingStartPositionsRef = useRef<Record<number, number> | null>(null)
   // Only meaningful for a back-direction anchor bootstrap (the store's
   // M-new anchor-awareness fix — see createSlidingWindowStore's `insertPage`
@@ -216,17 +217,20 @@ export function Timeline({
   // effect only runs once, on [cluster, topic], same reason pauseReasonRef
   // is a ref rather than state).
   //
-  // Task 3: starts FALSE (not true) and is ONLY ever flipped true by the
-  // page-end effect below, once that page's own `insertPage` call has
-  // CONFIRMED the store itself is attached (`edges().top === null`) — never
-  // optimistically ahead of it. This is what makes the sliding store's
-  // `insertLive` throw-on-detached precondition provably unreachable from
-  // this component's own call pattern (see the tail effect's onMessage
-  // handler below, and the "insertLive never throws" test in
-  // Timeline.test.tsx): a live message can only ever reach `insertLive`
+  // Starts FALSE (not true) and is ONLY ever flipped true inside runPage's
+  // own SYNCHRONOUS `onPageEnd` callback (never a later `useEffect`), once
+  // that page's own `insertPage` call has returned `outcome.attached: true`
+  // — the store's own attachment truth (see that callback's comment on why
+  // never `edges().top === null`, which reads null for an unrelated reason
+  // too) — never optimistically ahead of it. This is what makes the sliding
+  // store's `insertLive` throw-on-detached precondition provably unreachable
+  // from this component's own call pattern (see the tail effect's
+  // `onMessage` handler below, and Timeline.test.tsx's "a live message
+  // arriving between a jump-to-now click and its page landing buffers
+  // instead of throwing"): a live message can only ever reach `insertLive`
   // while `attachedRef.current` is true, and `attachedRef.current` can only
   // ever become true in the same synchronous update where the store's own
-  // attachment was just verified. Every jump (including 'now') therefore
+  // attachment was just confirmed. Every jump (including 'now') therefore
   // sets `attached` false immediately (matching the store's own immediate
   // `clear()`) and lets this same confirmed-catch-up path bring it back to
   // true once the fresh anchor page actually lands — a live message arriving
@@ -254,8 +258,9 @@ export function Timeline({
   // `bump()` like `pauseReasonRef` above: the tail routing (useLiveTail's
   // `inspectingRef` dep) reads it from inside a mount-once effect, which
   // needs the CURRENT value at message-arrival time, not whatever it was at
-  // mount. Keys are the same "partition-offset" format MessageList's own
-  // `rowKey` helper and the store's dedupe use.
+  // mount. Keys are built with the shared `rowKey` helper (lib/timeline/
+  // rowKey.ts) — the same one MessageList uses for the virtualizer's
+  // `getItemKey`, so the two never drift out of the same format.
   const expandedKeysRef = useRef<Set<string>>(new Set())
   // Derived boolean companion (expandedKeysRef.current.size > 0), kept in
   // sync wherever the set changes: useLiveTail's `UseLiveTailDeps` wants a
@@ -312,7 +317,7 @@ export function Timeline({
       if (outcome.trimmedBottom > 0) bottomTrimmedSinceRef.current = true
 
       if ((outcome.trimmedTop > 0 || outcome.trimmedBottom > 0) && expandedKeysRef.current.size > 0) {
-        const liveKeys = new Set(storeRef.current.rows().map((r) => `${r.partition}-${r.offset}`))
+        const liveKeys = new Set(storeRef.current.rows().map((r) => rowKey(r.partition, r.offset)))
         for (const key of expandedKeysRef.current) {
           if (!liveKeys.has(key)) expandedKeysRef.current.delete(key)
         }
@@ -353,7 +358,7 @@ export function Timeline({
   // at top — "auto rules take over") just updates the set.
   const handleToggleExpand = useCallback(
     (partition: number, offset: number) => {
-      const key = `${partition}-${offset}`
+      const key = rowKey(partition, offset)
       const keys = expandedKeysRef.current
       if (keys.has(key)) keys.delete(key)
       else keys.add(key)
@@ -822,8 +827,8 @@ export function Timeline({
   // While detached, a live message ALWAYS buffers — merging it would recreate the false seam a historical window
   // exists to avoid. `attachedRef` is the gate (never `pauseReasonRef` alone): it can only be true once the store's
   // own attachment has been confirmed (see its own comment above), so this branch can never reach a detached store —
-  // `insertLive`'s throw precondition is structurally unreachable from this call site (see "insertLive never
-  // throws" in Timeline.test.tsx).
+  // `insertLive`'s throw precondition is structurally unreachable from this call site (see Timeline.test.tsx's "a
+  // live message arriving between a jump-to-now click and its page landing buffers instead of throwing").
   const handleLiveInsert = useCallback((m: MessageOut) => noteOutcome(storeRef.current.insertLive([m])), [noteOutcome])
   const handleLiveBuffer = useCallback((m: MessageOut) => liveBufferRef.current.push(m), [])
   const { alive: live, error: tailError } = useLiveTail(cluster, topic, {

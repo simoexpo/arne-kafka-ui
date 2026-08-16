@@ -64,7 +64,7 @@ describe('formatWindowRange', () => {
     expect(formatWindowRange(null, null)).toBe('—')
   })
 
-  // Owner ruling 2026-08-17: ONE format family in both modes — same layout,
+  // ONE format family in both modes — same layout,
   // only the zone SUFFIX differs. The word "local" is gone; local mode
   // instead carries a NUMERIC, per-timestamp, DST-honest UTC offset (e.g.
   // "UTC-5" / "UTC+5:30"). Fixed non-UTC TZ so a mode that silently fell
@@ -89,7 +89,7 @@ describe('formatWindowRange', () => {
 describe('formatTimestamp', () => {
   withFixedTZ('America/New_York')
 
-  // Owner ruling 2026-08-17: one format family for both modes —
+  // One format family for both modes —
   // "yyyy-mm-dd hh:mm:ss.mmm <ZONE>" — only the trailing zone suffix
   // differs ("UTC" vs a numeric per-timestamp offset). This REPLACES the
   // historical bare `toISOString()` row rendering (`T`/`Z` ISO shape).

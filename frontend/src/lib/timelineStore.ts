@@ -276,7 +276,7 @@ interface SlidingWindowStore {
  *    (`back` → `bottomMap`, `forward` → `topMap`) straight from the
  *    response's `contCursor`, when non-null. This mirrors the backend's own
  *    `cur_positions` exactly (see `Cursor`'s doc comment and `run_page` in
- *    `backend/src/message/timeline.rs`): it already accounts for holes,
+ *    `backend/src/message/timeline/engine.rs`): it already accounts for holes,
  *    already covers every partition the request touched (including ones
  *    that contributed zero rows this page but still have a position), and
  *    needs no row-offset math on the frontend side at all. Just before this,

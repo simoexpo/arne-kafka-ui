@@ -20,7 +20,7 @@ const key = (m: MessageOut) => `${m.partition}:${m.offset}`
 // The store must never be told more than rows/direction/startPositions/
 // contCursor — exactly what a real page response gives it. To test the
 // property walk honestly we need a "pretend backend" that behaves like
-// `run_page` (see backend/src/message/timeline.rs): per-partition adjacent-
+// `run_page` (see backend/src/message/timeline/engine.rs): per-partition adjacent-
 // first streams, a k-way merge preferring the best timestamp for the
 // direction (ties: smaller partition wins), and exact offset-based cursor
 // advance (jump to the window boundary only when a partition's window is

@@ -2,8 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { render, screen } from '@testing-library/react'
 import { Stat } from './Stat'
 
-// Fonts pass (owner-approved 2026-08-17 analysis, item 6): OverviewPage.tsx
-// and TopicDetailPage.tsx each used to define their own local `Stat`
+// OverviewPage.tsx and TopicDetailPage.tsx each used to define their own local `Stat`
 // component with identical classes (text-xs label / text-xl font-semibold
 // value) — nothing enforced they'd keep agreeing. This single shared
 // component is the guarantee; no visual change is intended.

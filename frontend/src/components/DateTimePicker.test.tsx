@@ -438,8 +438,8 @@ describe('DateTimePicker', () => {
       expect(screen.getByTestId('datetime-picker-second-10')).toHaveAttribute('aria-pressed', 'true')
     })
 
-    // Owner ruling 2026-08-17: scrolling a wheel doesn't just pan it, it
-    // SELECTS — once the scroll settles (no further scroll events for
+    // Scrolling a wheel doesn't just pan it, it SELECTS — once the scroll
+    // settles (no further scroll events for
     // ~120ms), whichever value is resting at the vertical center becomes
     // the selection, snapped exactly into place. jsdom has no real scroll
     // physics, so `scrollTop` is driven directly via stubbed `fireEvent.scroll`

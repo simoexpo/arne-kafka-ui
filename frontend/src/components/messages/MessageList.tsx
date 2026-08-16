@@ -1,16 +1,8 @@
 import { forwardRef, useImperativeHandle, useRef } from 'react'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import type { MessageOut } from '../../api/types'
+import { rowKey } from '../../lib/timeline/rowKey'
 import { MessageRow } from './MessageRow'
-
-// (partition, offset) is a unique row identity — the store dedupes on it
-// (timelineStore.ts's `seen` set), the virtualizer's measurement cache keys
-// on it (`getItemKey` below), and expansion ownership (Timeline's
-// `expandedKeysRef`) keys on it too. One helper, used everywhere that
-// identity is needed, so the three never drift out of the same format.
-function rowKey(partition: number, offset: number): string {
-  return `${partition}-${offset}`
-}
 
 const NO_EXPANDED_KEYS: ReadonlySet<string> = new Set()
 const noopToggleExpand = () => {}

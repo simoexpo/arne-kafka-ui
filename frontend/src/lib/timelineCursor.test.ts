@@ -26,7 +26,7 @@ describe('timelineCursor', () => {
   // `Cursor` struct always serializes `direction` since it's a plain,
   // non-optional field on the *writer* side — only *decoding* treats it as
   // optional). base64(JSON.stringify({"direction":"back","positions":[[0,60],[1,5]]})),
-  // matching backend/src/message/timeline.rs's own `cursor_roundtrips` test
+  // matching backend/src/message/timeline/cursor.rs's own `cursor_roundtrips` test
   // fixture values (Cursor { direction: Back, positions: [(0,60),(1,5)] }).
   it('decodes a backend-minted cursor that carries a direction field, ignoring it', () => {
     const fixture = 'eyJkaXJlY3Rpb24iOiJiYWNrIiwicG9zaXRpb25zIjpbWzAsNjBdLFsxLDVdXX0='

@@ -16,8 +16,8 @@ export const WHEEL_ROW_HEIGHT_PX = 24
 export const WHEEL_VISIBLE_ROWS = 5
 export const WHEEL_VIEWPORT_HEIGHT_PX = WHEEL_ROW_HEIGHT_PX * WHEEL_VISIBLE_ROWS
 
-// Owner ruling 2026-08-17: scrolling a wheel doesn't just pan it, it
-// SELECTS — real wheel-picker semantics. `onScroll` debounces by this many
+// Scrolling a wheel doesn't just pan it, it SELECTS — real wheel-picker
+// semantics. `onScroll` debounces by this many
 // ms after the LAST scroll event (not on every event — a continuous drag
 // would otherwise fire dozens of spurious selections mid-flight); once
 // settled, whichever value is resting at the vertical center is selected.

@@ -23,7 +23,7 @@ export interface JumpPlan {
 
 // Owner ruling 2026-08-15: 'beginning'/'offset'/'timestamp' all land forward, the target as the oldest loaded
 // row; only 'now' lands at the top of its window. The backend resolves every partition's start position for
-// 'offset'/'timestamp' independent of direction (Anchor::OffsetForwardAligned, backend/src/message/timeline.rs).
+// 'offset'/'timestamp' independent of direction (Anchor::OffsetForwardAligned, backend/src/message/timeline/anchor.rs).
 export function planJump(target: JumpTarget, pageLimit: number): JumpPlan {
   switch (target.kind) {
     case 'now':

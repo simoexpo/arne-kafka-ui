@@ -11,8 +11,8 @@ import { TimeZoneToggle } from './TimeZoneToggle'
 // toggle CONTROL in isolation; Timeline.test.tsx covers it wired into the
 // header (row re-render, zero network, persistence across remount).
 //
-// Owner ruling (relabel — reverts the earlier 2026-08-17 dynamic-offset
-// label): the two halves read the MODE NAMES, "UTC" / "local", never a live
+// Owner ruling (relabel — reverts an earlier dynamic-offset label): the two
+// halves read the MODE NAMES, "UTC" / "local", never a live
 // numeric offset — a mode selector labeled with a current value contradicts
 // rows spanning a DST transition (which legitimately carry different
 // offsets) and implies a choice of offsets that doesn't exist. The local

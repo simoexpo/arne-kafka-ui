@@ -195,8 +195,8 @@ function TimeColumn({ label, testidPrefix, count, selected, onSelect, open }: {
     const corrected = wheelRewrapScrollTop(el.scrollTop, count)
     if (corrected !== null) el.scrollTop = corrected
 
-    // True wheel semantics (owner ruling 2026-08-17): scrolling doesn't just
-    // pan the list, it SELECTS. Debounced — reset on every scroll event, so
+    // True wheel semantics: scrolling doesn't just pan the list, it SELECTS.
+    // Debounced — reset on every scroll event, so
     // only where the scroll actually STOPS gets evaluated, never mid-flight.
     // Re-snapping unconditionally (even when the resolved value hasn't
     // changed) is what makes this "snap-to-center": a settle that lands a
@@ -280,11 +280,11 @@ export function DateTimePicker({
   textPlaceholder: string
 }) {
   const mode = useTimeDisplayMode()
-  // This wording is intentionally left as "UTC"/"local" (owner ruling
-  // 2026-08-17 scoped the "no word 'local'" change to DISPLAYED values —
-  // the popover's zone badge (`zoneBadgeLabel` below) and every rendered
-  // timestamp — not this accessible-name-only mode indicator, which isn't a
-  // timestamp or a zone value, just which MODE the trigger is in.
+  // This wording is intentionally left as "UTC"/"local" — the "no word
+  // 'local'" ruling scopes to DISPLAYED values only (the popover's zone
+  // badge, `zoneBadgeLabel` below, and every rendered timestamp), not this
+  // accessible-name-only mode indicator, which isn't a timestamp or a zone
+  // value, just which MODE the trigger is in.
   const modeLabel = mode === 'utc' ? 'UTC' : 'local'
   const [open, setOpen] = useState(false)
   const containerRef = useRef<HTMLDivElement>(null)
@@ -444,9 +444,9 @@ export function DateTimePicker({
   const leadBlanks = leadingBlankCount(viewYear, viewMonth)
   const today = decompose(Date.now(), mode)
 
-  // The popover's own zone badge (owner ruling 2026-08-17: the word "local"
-  // disappears everywhere — this adopts the same numeric, DST-honest
-  // `zoneSuffix` family the rest of the app now uses). Derived from the
+  // The popover's own zone badge: the word "local" disappears everywhere —
+  // this adopts the same numeric, DST-honest `zoneSuffix` family the rest of
+  // the app uses. Derived from the
   // instant CURRENTLY BEING EDITED (the picked fields composed back to an
   // epoch), not "now" — browsing from an August date to a January one
   // flips EDT/EST honestly as you navigate, same as any other timestamp
