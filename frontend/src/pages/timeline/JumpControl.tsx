@@ -4,7 +4,6 @@ import { formatTimestamp } from '../../lib/format'
 import type { JumpTarget } from '../../lib/timeline/jumpPlan'
 import { useTimeDisplayMode } from '../../lib/timeDisplayMode'
 
-export type { JumpTarget }
 
 type Expanded = 'none' | 'offset' | 'timestamp'
 

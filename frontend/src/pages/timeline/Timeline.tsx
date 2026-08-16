@@ -15,25 +15,20 @@ import { decodeCursor } from '../../lib/timelineCursor'
 import { createSlidingWindowStore, type InsertOutcome } from '../../lib/timelineStore'
 import { useTimeDisplayMode } from '../../lib/timeDisplayMode'
 import { createLiveBuffer } from '../../lib/timeline/liveBuffer'
-import { planJump } from '../../lib/timeline/jumpPlan'
+import { planJump, type JumpTarget } from '../../lib/timeline/jumpPlan'
 import type { AnchorContext, PauseReason } from '../../lib/timeline/model'
 import { nextPause } from '../../lib/timeline/pauseMachine'
 import { decidePostPage } from '../../lib/timeline/postPage'
 import { classifyScroll } from '../../lib/timeline/scrollZones'
 import { stepSettling, type SettlingState } from '../../lib/timeline/settling'
 import { useFallingEdge } from './useFallingEdge'
-import { JumpControl, type JumpTarget } from './JumpControl'
+import { JumpControl } from './JumpControl'
 import { LivePill, PlayPauseToggle } from './LivePill'
 import { useTimelinePage } from './useTimelinePage'
 
 const PAGE_LIMIT = 100
-// Empty-page contract (see useTimelinePage): a page can come back with zero
-// matches but a non-null cursor (nothing in this window passed the filter).
-// We keep paginating automatically rather than leaving the user staring at
-// an unexplained empty screen — but bound the number of *automatic*
-// continuations per user gesture so a sparse/mismatched filter over a huge
-// topic can't spin forever. ~20 auto-continues (per the design spec) is the
-// safety cap; beyond it we stop and hand control back with an affordance.
+// ~20 auto-continues per gesture, per the design spec; the policy lives in
+// lib/timeline/postPage.ts.
 const ITERATION_CAP = 20
 // Live-buffer cap while paused/detached (design spec).
 const BUFFER_CAP = 500
