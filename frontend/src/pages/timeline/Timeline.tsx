@@ -372,23 +372,13 @@ export function Timeline({
   const bufferReceivedRef = useRef(0)
   const bufferOverflowRef = useRef(false)
 
-  // Task 3 (replaces the v1.4 windowCap-honesty drop flags + repositionIf
-  // Dropped/reposition/findAnchorTs machinery entirely — the sliding store's
-  // own edge maps make every trim followable by a REAL minted cursor, so
-  // there is nothing left to "reposition": loadOlder/loadNewer simply read
-  // `edges()` directly, trim or no trim). What's left is a narrower,
-  // caption/gate-only concern: `state.exhausted.back`/`.forward` (React
-  // state from useTimelinePage) is only ever refreshed by a NEW page
-  // actually landing in that direction — so if a trim happens on a side
-  // whose exhausted flag is currently (stale) true, that flag would
-  // otherwise wrongly veto both the "beginning of topic" caption and further
-  // pagination on that side, even though the store's own edge for that side
-  // is now a real, followable, non-exhausted cursor again. These two refs
-  // track "has a trim happened on this side since the last time a page for
-  // that direction actually landed" — cleared the instant a fresh page for
-  // that direction lands (that page's own exhausted flag is authoritative
-  // again), set the instant a trim touches that side (from a page OR a live
-  // insert). See noteOutcome below and its two call sites.
+  // `state.exhausted.back`/`.forward` (React state from useTimelinePage) is
+  // only refreshed by a NEW page landing in that direction — these two refs
+  // override a STALE exhausted flag when a trim (page or live insert) has
+  // touched that side since. Cleared the instant a fresh page for that
+  // direction lands; set the instant a trim touches that side. See
+  // `noteOutcome` below and its two call sites. (Predecessor machinery this
+  // replaced: docs/superpowers/specs/timeline-design-decisions.md.)
   const bottomTrimmedSinceRef = useRef(false)
   const topTrimmedSinceRef = useRef(false)
 
