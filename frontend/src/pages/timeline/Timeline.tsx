@@ -14,6 +14,7 @@ import { formatWindowRange } from '../../lib/format'
 import { decodeCursor } from '../../lib/timelineCursor'
 import { createSlidingWindowStore, type InsertOutcome } from '../../lib/timelineStore'
 import { useTimeDisplayMode } from '../../lib/timeDisplayMode'
+import { useFallingEdge } from './useFallingEdge'
 import { JumpControl, type JumpTarget } from './JumpControl'
 import { LivePill, PlayPauseToggle } from './LivePill'
 import { useTimelinePage } from './useTimelinePage'
@@ -156,7 +157,6 @@ export function Timeline({
   // `page_end`, whereas every delivered match always reaches this ref.
   const pageMatchesRef = useRef(0)
   const iterationRef = useRef(0)
-  const wasLoadingRef = useRef(false)
   const [continueDirection, setContinueDirection] = useState<Direction | null>(null)
   // Running totals across an entire gesture: a user-issued page plus every
   // auto-continued empty page that follows it. A single page's own
@@ -176,13 +176,12 @@ export function Timeline({
   // they now read forward from the target, same as 'beginning') land at the
   // start of their loaded window looking forward, so the bottom
   // (oldest-visible) edge — where the target itself sits — is what matters
-  // there. Tracked separately from pendingDirectionRef/wasLoadingRef
-  // (which drive the empty-page auto-continue) via its own "was loading"
-  // edge-detector, since the two concerns are independent and a jump's
-  // first page can itself be an empty page that auto-continues further.
+  // there. Tracked separately from pendingDirectionRef (which drives the
+  // empty-page auto-continue) via its own `useFallingEdge` instance, since
+  // the two concerns are independent and a jump's first page can itself be
+  // an empty page that auto-continues further.
   const listRef = useRef<MessageListHandle>(null)
   const pendingScrollEdgeRef = useRef<'top' | 'bottom' | null>(null)
-  const scrollWasLoadingRef = useRef(false)
   // Owner-reported bug (2026-08-15): a jump landing at the bottom edge
   // (`scrollToEdge('bottom')`, below) programmatically sets `el.scrollTop`
   // — and a REAL browser (unlike jsdom, which is why this shipped
@@ -755,10 +754,9 @@ export function Timeline({
   // synchronous callback, which must avoid stale-closure reads of `state`)
   // and `storeRef.current.edges()` for the next cursor (already up to date,
   // since the synchronous commit ran before this effect ever could).
+  const autoContinueFallingEdge = useFallingEdge(state.loading)
   useEffect(() => {
-    const wasLoading = wasLoadingRef.current
-    wasLoadingRef.current = state.loading
-    if (!wasLoading || state.loading) return
+    if (!autoContinueFallingEdge) return
     const direction = pendingDirectionRef.current
     if (direction === null) return
     pendingDirectionRef.current = null
@@ -804,7 +802,7 @@ export function Timeline({
       attach: false,
     })
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [state.loading, state.error, state.exhausted.back, state.exhausted.forward])
+  }, [autoContinueFallingEdge, state.error, state.exhausted.back, state.exhausted.forward])
 
   // Jump viewport repositioning: fires on the very first loading:true ->
   // false edge after a jump set pendingScrollEdgeRef (handleJump), whether
@@ -812,10 +810,9 @@ export function Timeline({
   // the viewport for the new anchor, which doesn't depend on rows already
   // being present. Cleared after firing once, so a subsequent empty-page
   // auto-continue for the same jump doesn't re-trigger it.
+  const jumpLandingFallingEdge = useFallingEdge(state.loading)
   useEffect(() => {
-    const wasLoading = scrollWasLoadingRef.current
-    scrollWasLoadingRef.current = state.loading
-    if (!wasLoading || state.loading) return
+    if (!jumpLandingFallingEdge) return
     const edge = pendingScrollEdgeRef.current
     if (edge === null) return
     pendingScrollEdgeRef.current = null
@@ -828,7 +825,7 @@ export function Timeline({
       settlingRef.current = { edge, lastScrollHeight: null }
       settleAttemptsRef.current = 0
     }
-  }, [state.loading])
+  }, [jumpLandingFallingEdge])
 
   // Scroll anchoring (row-identity rewrite, fix round 1 M1; per-batch, fix
   // round 2 N5): consumes whatever the LAST `onMatches` call captured (see
