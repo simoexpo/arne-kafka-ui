@@ -66,26 +66,30 @@ pub fn spawn_sampler(handle: Arc<ClusterHandle>, interval: Duration) -> tokio::t
     })
 }
 
-/// For each non-internal topic, sums its partitions' high watermarks via
-/// `fetch_hi`, tolerating a per-topic failure the same way
-/// `admin::assemble_topic_estimate` does: one failed partition drops that
-/// topic's sample entirely rather than reporting a partial/misleading
-/// total (`complete` is all-or-nothing). Internal (`__`-prefixed) topics
-/// are skipped WITHOUT ever calling `fetch_hi` — mirrors `admin::
-/// list_topics`'s own skip, e.g. `__transaction_state` alone can carry 50
-/// partitions on a cluster with transactional producers — so the
-/// *recurring* sampler never pays their watermark-fetch tax on any tick,
-/// not just on the one-off inventory load `list_topics` already avoids it
-/// for.
+/// For EVERY topic, internal (`__`-prefixed) included, sums its partitions'
+/// high watermarks via `fetch_hi`, tolerating a per-topic failure the same
+/// way `admin::assemble_topic_estimate` does: one failed partition drops
+/// that topic's sample entirely rather than reporting a partial/misleading
+/// total (`complete` is all-or-nothing).
+///
+/// B2 (queue-review): an earlier revision skipped `__`-prefixed topics here
+/// too, mirroring `admin::list_topics`'s own skip — but that skip only
+/// suppresses a *count* there; here it silently zeroed out
+/// `sampler.rate_points`, the sole source for `GET /throughput`, leaving an
+/// internal topic's Throughput/Sparkline panel permanently and unexplainedly
+/// empty. Chart correctness beats the tick tax, so the skip was reverted.
+/// The tax itself (every internal topic's watermark fetch runs on every
+/// sampler tick, even for topics no one has open) is a real cost worth
+/// revisiting with a better shape — e.g. lazy/on-demand sampling keyed off
+/// which topic's detail page is actually open — tracked in
+/// `docs/superpowers/plans/2026-08-15-sliding-window-followups.md`, not
+/// attempted here.
 fn topic_totals<'a>(
     topics: impl IntoIterator<Item = (&'a str, &'a [i32])>,
     mut fetch_hi: impl FnMut(&str, i32) -> Result<i64, ()>,
 ) -> Vec<(String, i64)> {
     let mut out = Vec::new();
     for (name, partitions) in topics {
-        if name.starts_with("__") {
-            continue;
-        }
         let mut total = 0i64;
         let mut complete = true;
         for &p in partitions {
@@ -136,25 +140,29 @@ mod tests {
     use super::*;
     use std::cell::RefCell;
 
-    /// Mirrors `admin::list_topics`'s own internal-topic skip (and its
-    /// `assemble_topic_estimate` test style): `__`-prefixed topics can carry
-    /// dozens of partitions on a cluster with transactional producers, and
-    /// are hidden from the topics UI by default — the *recurring* sampler
-    /// must not pay their watermark-fetch tax every tick any more than the
-    /// one-off inventory load does. Proven here by pointer-free means: the
-    /// fetch closure is never invoked for the internal topic's partitions
-    /// at all (a call counter stays at the real topic's count), not merely
-    /// that its result gets discarded afterward.
+    /// B2 revert: an internal (`__`-prefixed) topic must be sampled exactly
+    /// like any other topic. `admin::list_topics` skips them for its
+    /// inventory *count* — safe there, since nothing downstream renders a
+    /// chart off it — but `sampler.rate_points` is the sole source for
+    /// `GET /throughput`, which `ConsumersTab` renders as a live
+    /// Throughput/Sparkline panel for whatever topic the user opened,
+    /// internal or not. Skipping the fetch here left that chart
+    /// permanently, silently empty for internal topics — the exact
+    /// "blank without a reason" pattern the sibling I5 tooltip work
+    /// existed to avoid. Proven by pointer-free means: the fetch closure
+    /// IS invoked for the internal topic's every partition (the call
+    /// counter covers both topics' partitions), not merely that its
+    /// result isn't discarded.
     #[test]
-    fn internal_topics_are_skipped_without_a_watermark_fetch() {
+    fn internal_topics_are_sampled_like_any_other_topic() {
         let calls = RefCell::new(0);
         let topics = [("__consumer_offsets", &[0, 1, 2, 3][..]), ("orders", &[0][..])];
         let totals = topic_totals(topics, |_name, _partition| {
             *calls.borrow_mut() += 1;
             Ok(10)
         });
-        assert_eq!(totals, vec![("orders".to_string(), 10)]);
-        assert_eq!(*calls.borrow(), 1, "only the real topic's one partition may be fetched");
+        assert_eq!(totals, vec![("__consumer_offsets".to_string(), 40), ("orders".to_string(), 10)]);
+        assert_eq!(*calls.borrow(), 5, "every partition of every topic, internal included, must be fetched");
     }
 
     #[test]
