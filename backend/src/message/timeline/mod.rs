@@ -8,8 +8,7 @@
 //! emits `TimelineEvent`s over an mpsc channel — the SSE handler in
 //! `api::messages` just maps those to wire events.
 
-use base64::Engine as _;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 use super::fetch::{self, RawRecord};
 use super::filter::Filter;
@@ -22,172 +21,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
-/// Which way a page reads relative to its cursor's positions.
-///
-/// Per the design doc: for `Back`, a position is the *exclusive upper
-/// bound* of the next page (the next record read is strictly below it);
-/// for `Forward`, a position is the *inclusive lower bound* (the next
-/// record read is at-or-above it).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Direction {
-    Back,
-    Forward,
-}
-
-impl Default for Direction {
-    /// Arbitrary. `Cursor.direction` is informational only (see `Cursor`'s
-    /// doc comment) — the backend never reads it back for anything besides
-    /// debugging/logging — so this only exists to give `#[serde(default)]`
-    /// something to produce when a client-constructed cursor omits the
-    /// field entirely, which the documented wire format explicitly allows.
-    fn default() -> Self {
-        Direction::Forward
-    }
-}
-
-/// An opaque, per-partition offset map plus the direction it was minted in.
-///
-/// **Wire format (documented contract, spec v1.6):** standard-alphabet
-/// base64 of the compact JSON `{"positions":[[partition,offset],...]
-/// ,"direction":"back"|"forward"}` — `positions` is an array of 2-element
-/// `[i32, i64]` pairs, one per partition, in no particular guaranteed
-/// order; `direction` is OPTIONAL (see below — omitting it decodes fine).
-/// This is deliberately client-constructible: the sliding-window frontend
-/// mints its own cursors from row offsets it already tracks (rather than
-/// only ever replaying a cursor the backend handed back), so the format is
-/// a contract, not an implementation detail — see `tests/api.rs`'s
-/// `timeline_accepts_a_client_constructed_cursor` and
-/// `timeline_accepts_a_client_cursor_without_direction_field` for cursors
-/// built without this Rust type at all.
-///
-/// **`direction` is informational only, and optional in the wire format**
-/// (`#[serde(default)]` — a missing field decodes as `Direction::default()`,
-/// an arbitrary placeholder, never a decode error). It records which
-/// direction the cursor was minted in (useful for debugging/logging), but
-/// the backend never enforces it against a request: the REQUEST's own
-/// `direction` query param is authoritative for how `positions` are read
-/// (see `api::messages::timeline_sse`, where the decoded `direction` field
-/// is intentionally unused). Per the design's bound-semantics ruling, this
-/// is exact, not a loose convention: a `Back` request treats `positions` as
-/// exclusive uppers; a `Forward` request treats the identical numbers as
-/// inclusive lowers (see `Direction`'s doc comment, and `page_windows`,
-/// whose arithmetic is where this is actually implemented) — so following a
-/// back-minted cursor with `direction=forward` is a well-defined re-read of
-/// the region just below that cursor, not a version mismatch. Making the
-/// field optional matches this: a client-constructed cursor built purely
-/// from `positions` (the only part that ever matters) must not be forced to
-/// invent a meaningless `direction` just to satisfy the codec.
-///
-/// Every decoded cursor is treated as untrusted input regardless of origin:
-/// positions are clamped into each partition's *current* watermark range
-/// before use (`clamp_positions`), and any partition id absent from today's
-/// watermarks is dropped.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct Cursor {
-    #[serde(default)]
-    pub direction: Direction,
-    pub positions: Vec<(i32, i64)>,
-}
-
-impl Cursor {
-    pub fn encode(&self) -> String {
-        // `serde_json::to_vec` on a struct made only of enums/tuples/Vecs
-        // never fails (no maps with non-string keys, no floats), so this
-        // is infallible in practice.
-        let json = serde_json::to_vec(self).expect("Cursor always serializes");
-        base64::engine::general_purpose::STANDARD.encode(json)
-    }
-
-    pub fn decode(s: &str) -> Result<Cursor, String> {
-        let bytes = base64::engine::general_purpose::STANDARD.decode(s).map_err(|e| e.to_string())?;
-        serde_json::from_slice(&bytes).map_err(|e| e.to_string())
-    }
-}
-
-/// Where a fresh (non-cursor) page request starts from.
-#[derive(Debug, Clone, PartialEq)]
-pub enum Anchor {
-    /// Start at the high watermark of every partition (open the tab: latest
-    /// N, live prepend on).
-    Latest,
-    /// Start at the low watermark of every partition (jump to beginning).
-    Beginning,
-    /// Jump to a specific message. Only the named partition is positioned
-    /// at that message; every other partition starts at its own high
-    /// watermark.
-    ///
-    /// This is a deliberate simplification, not an oversight: an offset
-    /// anchor is a *partition-local* jump (the user picked one message in
-    /// one partition), and there's no principled cross-partition offset to
-    /// derive from it — a message's timestamp doesn't imply a comparable
-    /// offset in another partition. The global timeline is produced by the
-    /// merge-sort-by-timestamp step downstream, which is what actually
-    /// reconciles the anchored partition's neighborhood against everyone
-    /// else's tail; `initial_positions` just has to give every partition a
-    /// *valid* starting point.
-    Offset { partition: i32, offset: i64 },
-    /// Timestamp anchor, already resolved upstream (one Kafka
-    /// `OffsetsForTimes` call per partition) to either the offset of the
-    /// first message at-or-after the timestamp, or `None` if no such
-    /// message exists (the timestamp is past the newest message in that
-    /// partition). `None` is treated the same as "nothing more to find
-    /// here": position at the high watermark, matching `Latest`'s
-    /// behavior for that partition.
-    TimestampResolved(Vec<(i32, Option<i64>)>),
-    /// Offset anchor, FORWARD-direction alignment (owner ruling
-    /// 2026-08-15 — supersedes `Offset`'s "pin everyone else at their high
-    /// watermark" behavior for a forward read only; `Offset` itself is
-    /// unchanged and still used for `direction=back`, see its own doc
-    /// comment). The anchored `(partition, offset)` message's own
-    /// timestamp is resolved upstream (one bounded single-record fetch),
-    /// then every OTHER partition is resolved via the same
-    /// `OffsetsForTimes` machinery `TimestampResolved` uses, at that same
-    /// timestamp — `aligned` carries that per-partition result (`None` =
-    /// nothing at/after the timestamp there: high watermark, matching
-    /// `Latest`). The anchored partition itself is pinned to exactly
-    /// `offset`, never re-derived from the timestamp lookup (`aligned` may
-    /// also contain an entry for it, from the shared resolution call — it
-    /// is simply ignored below): the whole point is that partition reads
-    /// forward from the EXACT message the user picked, not a second
-    /// approximation of it. This is what makes the anchored message the
-    /// OLDEST row of its own partition in the resulting forward page,
-    /// while every other partition picks up at-or-after the same instant —
-    /// "nothing lost, nothing pinned to the wrong end" relative to a
-    /// `TimestampResolved` anchor at that same timestamp.
-    OffsetForwardAligned { partition: i32, offset: i64, aligned: Vec<(i32, Option<i64>)> },
-}
-
-/// Computes the starting cursor positions for a fresh (non-cursor) page
-/// request. Returned in `watermarks`' partition order.
-pub fn initial_positions(watermarks: &[(i32, i64, i64)], anchor: &Anchor) -> Vec<(i32, i64)> {
-    match anchor {
-        Anchor::Latest => watermarks.iter().map(|&(p, _, hi)| (p, hi)).collect(),
-        Anchor::Beginning => watermarks.iter().map(|&(p, lo, _)| (p, lo)).collect(),
-        Anchor::Offset { partition, offset } => watermarks
-            .iter()
-            .map(|&(p, _, hi)| if p == *partition { (p, offset + 1) } else { (p, hi) })
-            .collect(),
-        Anchor::TimestampResolved(resolved) => watermarks
-            .iter()
-            .map(|&(p, _, hi)| {
-                let found = resolved.iter().find(|&&(rp, _)| rp == p).and_then(|&(_, o)| o);
-                (p, found.unwrap_or(hi))
-            })
-            .collect(),
-        Anchor::OffsetForwardAligned { partition, offset, aligned } => watermarks
-            .iter()
-            .map(|&(p, _, hi)| {
-                if p == *partition {
-                    (p, *offset)
-                } else {
-                    let found = aligned.iter().find(|&&(rp, _)| rp == p).and_then(|&(_, o)| o);
-                    (p, found.unwrap_or(hi))
-                }
-            })
-            .collect(),
-    }
-}
+mod anchor;
+mod cursor;
+pub use anchor::{initial_positions, Anchor};
+pub use cursor::{Cursor, Direction};
 
 /// Computes, per partition, a window of up to `span` records adjacent to
 /// `positions` in `direction`, clamped to that partition's watermarks.
@@ -923,60 +760,6 @@ mod tests {
         // `total_scanned` (prior chunks' real, offset-based charge) plus how
         // far this chunk has gotten so far — not just this chunk's count.
         assert_eq!(mid_chunk_progress(10_000, 2_000), Some(12_000));
-    }
-
-    #[test]
-    fn cursor_roundtrips() {
-        let c = Cursor { direction: Direction::Back, positions: vec![(0, 60), (1, 5)] };
-        let c2 = Cursor::decode(&c.encode()).unwrap();
-        assert_eq!(c2.direction, Direction::Back);
-        assert_eq!(c2.positions, vec![(0, 60), (1, 5)]);
-        assert!(Cursor::decode("garbage!").is_err());
-    }
-
-    /// M1 fix: `direction` is optional in the wire format
-    /// (`#[serde(default)]`) — a client-constructed cursor built purely
-    /// from `positions`, with no `direction` key at all, must decode
-    /// cleanly rather than 400 on a missing required field.
-    #[test]
-    fn cursor_decodes_without_direction_field() {
-        let json = r#"{"positions":[[0,5],[1,3]]}"#;
-        let encoded = base64::engine::general_purpose::STANDARD.encode(json);
-        let decoded = Cursor::decode(&encoded).unwrap();
-        assert_eq!(decoded.positions, vec![(0, 5), (1, 3)]);
-        assert_eq!(decoded.direction, Direction::default());
-    }
-
-    #[test]
-    fn latest_positions_are_high_watermarks() {
-        let p = initial_positions(WM, &Anchor::Latest);
-        assert_eq!(p, vec![(0, 110), (1, 5)]);
-    }
-
-    #[test]
-    fn beginning_positions_are_low_watermarks() {
-        let p = initial_positions(WM, &Anchor::Beginning);
-        assert_eq!(p, vec![(0, 10), (1, 0)]);
-    }
-
-    /// Owner ruling 2026-08-15: a forward offset anchor pins the anchored
-    /// partition at the EXACT offset (not `aligned`'s own resolution for
-    /// it, even if present) and every other partition at its aligned
-    /// timestamp-resolved offset — `None` there falls back to the high
-    /// watermark, exactly like `TimestampResolved`.
-    #[test]
-    fn offset_forward_aligned_pins_anchor_exactly_and_aligns_others() {
-        let wm: &[(i32, i64, i64)] = &[(0, 0, 100), (1, 0, 100), (2, 0, 100)];
-        let anchor = Anchor::OffsetForwardAligned {
-            partition: 0,
-            offset: 42,
-            // Partition 0's own entry (55) must be IGNORED in favor of the
-            // exact `offset` (42); partition 1 aligns to 30; partition 2 has
-            // nothing at/after the timestamp (falls back to its hi, 100).
-            aligned: vec![(0, Some(55)), (1, Some(30)), (2, None)],
-        };
-        let p = initial_positions(wm, &anchor);
-        assert_eq!(p, vec![(0, 42), (1, 30), (2, 100)]);
     }
 
     #[test]
