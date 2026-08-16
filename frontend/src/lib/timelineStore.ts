@@ -318,12 +318,14 @@ interface SlidingWindowStore {
  *    when a detached window re-attaches (a forward page reports
  *    `exhausted`), any live rows Task 3 buffered while detached get flushed
  *    through `insertLive` immediately after — now legal, since the store is
- *    attached again. Every one of those rows is, by the same offset-
- *    monotonicity argument, either strictly above the window's current top
- *    (a genuine extension — the ceiling advances normally) or at-or-below
- *    an offset the just-exhausted forward page already fetched (an exact
- *    duplicate — `insertRows`' `seen` dedup silently drops it, same as any
- *    other overlapping delivery). Neither case is a gap risk.
+ *    attached again. Every one of those rows lands in one of three ways: (a)
+ *    strictly above the window's current top (a genuine extension — the
+ *    ceiling advances normally); (b) an exact duplicate of an offset the
+ *    just-exhausted forward page already fetched — `insertRows`' `seen`
+ *    dedup silently drops it, same as any other overlapping delivery; or (c)
+ *    at or below `bottomMap[p]` — `insertLive`'s own `safeRows` filter drops
+ *    it (see its own comment; this is the real-usage case that filter
+ *    exists for, not a hypothetical). None of the three is a gap risk.
  * 3. **Row-exact trim** (`enforceCap`): when a trim removes rows from a
  *    side, the map on THAT side is updated, per partition, from the EXACT
  *    offsets just trimmed for that partition — never from a broader "what's
