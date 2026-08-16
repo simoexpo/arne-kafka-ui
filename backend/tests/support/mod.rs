@@ -360,6 +360,28 @@ pub async fn produce_transactional(bootstrap: &str, topic: &str, count: usize) {
     }
 }
 
+/// Builds the 2-partition, 20-record-per-partition fixture shared by several
+/// timeline direction/anchor tests: p0 offset o @ ts=1000+20o, p1 offset o @
+/// ts=1010+20o — all timestamps distinct, so back/forward merge order is
+/// fully determined (descending ts strictly alternates p1,p0 for equal
+/// offsets). Assumes `topic` already has (at least) 2 partitions.
+pub async fn produce_interleaved_fixture(bootstrap: &str, topic: &str) {
+    let p0: Vec<(String, String, i64)> =
+        (0..20i64).map(|o| (format!("p0k{o}"), format!("p0v{o}"), 1000 + 20 * o)).collect();
+    let p1: Vec<(String, String, i64)> =
+        (0..20i64).map(|o| (format!("p1k{o}"), format!("p1v{o}"), 1010 + 20 * o)).collect();
+    produce_at_many(bootstrap, topic, 0, &p0).await;
+    produce_at_many(bootstrap, topic, 1, &p1).await;
+}
+
+/// Extracts the `(partition, offset)` set of every `match` event in an SSE
+/// event list collected by `collect_sse`.
+pub fn offsets_of(events: &[(String, serde_json::Value)]) -> std::collections::HashSet<(i64, i64)> {
+    events.iter().filter(|(n, _)| n == "match")
+        .map(|(_, m)| (m["partition"].as_i64().unwrap(), m["offset"].as_i64().unwrap()))
+        .collect()
+}
+
 pub async fn produce(bootstrap: &str, topic: &str, count: usize) {
     let producer: FutureProducer = client(bootstrap).create().unwrap();
     for i in 0..count {

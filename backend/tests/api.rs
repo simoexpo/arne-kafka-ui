@@ -651,19 +651,9 @@ async fn timeline_forward_position_adjacent_drop_does_not_livelock() {
 async fn timeline_direction_flip_reads_back_pages_continuation_forward_and_gets_it_back() {
     let bootstrap = start_kafka().await;
     create_topic(&bootstrap, "tl-flip-topic", 2).await;
-    let p0: Vec<(String, String, i64)> =
-        (0..20i64).map(|o| (format!("p0k{o}"), format!("p0v{o}"), 1000 + 20 * o)).collect();
-    let p1: Vec<(String, String, i64)> =
-        (0..20i64).map(|o| (format!("p1k{o}"), format!("p1v{o}"), 1010 + 20 * o)).collect();
-    produce_at_many(&bootstrap, "tl-flip-topic", 0, &p0).await;
-    produce_at_many(&bootstrap, "tl-flip-topic", 1, &p1).await;
+    produce_interleaved_fixture(&bootstrap, "tl-flip-topic").await;
     let state = state_for(&bootstrap, vec![]);
 
-    let offsets_of = |events: &[(String, serde_json::Value)]| -> std::collections::HashSet<(i64, i64)> {
-        events.iter().filter(|(n, _)| n == "match")
-            .map(|(_, m)| (m["partition"].as_i64().unwrap(), m["offset"].as_i64().unwrap()))
-            .collect()
-    };
     let expected_m: std::collections::HashSet<(i64, i64)> =
         [(0i64, 7i64), (0, 8), (0, 9), (1, 7), (1, 8), (1, 9)].into_iter().collect();
 
@@ -706,19 +696,9 @@ async fn timeline_direction_flip_reads_back_pages_continuation_forward_and_gets_
 async fn timeline_anchor_timestamp_back_and_forward_split_disjointly_and_completely() {
     let bootstrap = start_kafka().await;
     create_topic(&bootstrap, "tl-anchor-split-topic", 2).await;
-    let p0: Vec<(String, String, i64)> =
-        (0..20i64).map(|o| (format!("p0k{o}"), format!("p0v{o}"), 1000 + 20 * o)).collect();
-    let p1: Vec<(String, String, i64)> =
-        (0..20i64).map(|o| (format!("p1k{o}"), format!("p1v{o}"), 1010 + 20 * o)).collect();
-    produce_at_many(&bootstrap, "tl-anchor-split-topic", 0, &p0).await;
-    produce_at_many(&bootstrap, "tl-anchor-split-topic", 1, &p1).await;
+    produce_interleaved_fixture(&bootstrap, "tl-anchor-split-topic").await;
     let state = state_for(&bootstrap, vec![]);
 
-    let offsets_of = |events: &[(String, serde_json::Value)]| -> std::collections::HashSet<(i64, i64)> {
-        events.iter().filter(|(n, _)| n == "match")
-            .map(|(_, m)| (m["partition"].as_i64().unwrap(), m["offset"].as_i64().unwrap()))
-            .collect()
-    };
     let older_half: std::collections::HashSet<(i64, i64)> =
         (0..2i64).flat_map(|p| (0..10i64).map(move |o| (p, o))).collect();
     let newer_half: std::collections::HashSet<(i64, i64)> =
@@ -766,19 +746,9 @@ async fn timeline_anchor_timestamp_back_and_forward_split_disjointly_and_complet
 async fn timeline_offset_anchor_forward_aligns_all_partitions_at_the_targets_timestamp() {
     let bootstrap = start_kafka().await;
     create_topic(&bootstrap, "tl-offset-forward-align-topic", 2).await;
-    let p0: Vec<(String, String, i64)> =
-        (0..20i64).map(|o| (format!("p0k{o}"), format!("p0v{o}"), 1000 + 20 * o)).collect();
-    let p1: Vec<(String, String, i64)> =
-        (0..20i64).map(|o| (format!("p1k{o}"), format!("p1v{o}"), 1010 + 20 * o)).collect();
-    produce_at_many(&bootstrap, "tl-offset-forward-align-topic", 0, &p0).await;
-    produce_at_many(&bootstrap, "tl-offset-forward-align-topic", 1, &p1).await;
+    produce_interleaved_fixture(&bootstrap, "tl-offset-forward-align-topic").await;
     let state = state_for(&bootstrap, vec![]);
 
-    let offsets_of = |events: &[(String, serde_json::Value)]| -> std::collections::HashSet<(i64, i64)> {
-        events.iter().filter(|(n, _)| n == "match")
-            .map(|(_, m)| (m["partition"].as_i64().unwrap(), m["offset"].as_i64().unwrap()))
-            .collect()
-    };
     // Same "newer half" the timestamp-anchor split test proves forward(ts=
     // 1200) covers exactly: offsets 10..19 in both partitions.
     let expected: std::collections::HashSet<(i64, i64)> =
