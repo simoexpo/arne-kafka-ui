@@ -1,9 +1,10 @@
-import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { describe, expect, it } from 'vitest'
 import { render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MessageRow } from './MessageRow'
 import type { MessageOut } from '../../api/types'
 import { setTimeDisplayMode } from '../../lib/timeDisplayMode'
+import { withFixedTZ } from '../../test/timezone'
 
 const msg = (overrides: Partial<MessageOut> = {}): MessageOut => ({
   partition: 2, offset: 1337, timestamp_ms: 1754900000000,
@@ -53,9 +54,7 @@ describe('MessageRow', () => {
   // UTC/local display toggle (owner ruling 2026-08-15): rows re-render the
   // SAME epoch-ms value in either zone — no refetch, pure formatting swap.
   describe('time display mode (fixed TZ=America/New_York)', () => {
-    const ORIGINAL_TZ = process.env.TZ
-    beforeAll(() => { process.env.TZ = 'America/New_York' })
-    afterAll(() => { process.env.TZ = ORIGINAL_TZ })
+    withFixedTZ('America/New_York')
 
     it('shows UTC by default (unchanged historical behavior)', () => {
       render(<MessageRow message={msg({ timestamp_ms: 1_704_067_205_000 })} />)

@@ -1,7 +1,8 @@
 import type { ComponentProps } from 'react'
 import { act, fireEvent, render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
+import { withFixedTZ } from '../test/timezone'
 import {
   DateTimePicker,
   formatDateTimeMillis,
@@ -89,9 +90,7 @@ describe('DateTimePicker', () => {
   })
 
   describe('zone-aware format/parse helpers (fixed TZ=America/New_York)', () => {
-    const ORIGINAL_TZ = process.env.TZ
-    beforeAll(() => { process.env.TZ = 'America/New_York' })
-    afterAll(() => { process.env.TZ = ORIGINAL_TZ })
+    withFixedTZ('America/New_York')
 
     // 2026-08-15 14:32:10 America/New_York (EDT, UTC-4) == 2026-08-15T18:32:10.005Z
     const MS = Date.UTC(2026, 7, 15, 18, 32, 10, 5)
@@ -161,9 +160,7 @@ describe('DateTimePicker', () => {
   // ms value and fail these tests. America/New_York is UTC-4 (EDT) on the
   // dates used.
   describe('fixed TZ=America/New_York', () => {
-    const ORIGINAL_TZ = process.env.TZ
-    beforeAll(() => { process.env.TZ = 'America/New_York' })
-    afterAll(() => { process.env.TZ = ORIGINAL_TZ })
+    withFixedTZ('America/New_York')
 
     // 2026-08-15 14:32:10 America/New_York (EDT, UTC-4) == 2026-08-15T18:32:10Z
     const SEED_MS = Date.UTC(2026, 7, 15, 18, 32, 10)

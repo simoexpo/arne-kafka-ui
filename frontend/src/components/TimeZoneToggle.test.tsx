@@ -1,6 +1,7 @@
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { fireEvent, render, screen } from '@testing-library/react'
 import { getTimeDisplayMode } from '../lib/timeDisplayMode'
+import { withFixedTZ } from '../test/timezone'
 import { TimeZoneToggle } from './TimeZoneToggle'
 
 // UTC/local display toggle: moved out of the sidebar (`layout/AppShell.tsx`)
@@ -21,9 +22,7 @@ import { TimeZoneToggle } from './TimeZoneToggle'
 // included). Fixed TZ + fake system time make "current offset" deterministic
 // here.
 describe('TimeZoneToggle', () => {
-  const ORIGINAL_TZ = process.env.TZ
-  beforeAll(() => { process.env.TZ = 'America/New_York' })
-  afterAll(() => { process.env.TZ = ORIGINAL_TZ })
+  withFixedTZ('America/New_York')
 
   beforeEach(() => {
     vi.useFakeTimers()

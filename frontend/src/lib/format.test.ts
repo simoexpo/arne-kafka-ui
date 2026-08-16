@@ -1,5 +1,6 @@
-import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { describe, expect, it } from 'vitest'
 import { formatAgo, formatCount, formatRetentionValue, formatTimestamp, formatWindowRange, retentionMsHint, zoneSuffix } from './format'
+import { withFixedTZ } from '../test/timezone'
 
 describe('formatAgo', () => {
   const now = 1_000_000_000
@@ -54,9 +55,7 @@ describe('formatWindowRange', () => {
   // back to UTC math (or hardcoded a single offset regardless of DST) would
   // fail these.
   describe('local mode (fixed TZ=America/New_York)', () => {
-    const ORIGINAL_TZ = process.env.TZ
-    beforeAll(() => { process.env.TZ = 'America/New_York' })
-    afterAll(() => { process.env.TZ = ORIGINAL_TZ })
+    withFixedTZ('America/New_York')
 
     it('shows the shared LOCAL date once, then oldest -> newest LOCAL time, suffixed with the numeric UTC offset', () => {
       // 2024-01-01T00:00:05Z .. 2024-01-01T00:01:05Z == 2023-12-31 19:00:05 .. 19:01:05 America/New_York (EST, UTC-5)
@@ -72,9 +71,7 @@ describe('formatWindowRange', () => {
 })
 
 describe('formatTimestamp', () => {
-  const ORIGINAL_TZ = process.env.TZ
-  beforeAll(() => { process.env.TZ = 'America/New_York' })
-  afterAll(() => { process.env.TZ = ORIGINAL_TZ })
+  withFixedTZ('America/New_York')
 
   // Owner ruling 2026-08-17: one format family for both modes —
   // "yyyy-mm-dd hh:mm:ss.mmm <ZONE>" — only the trailing zone suffix
@@ -102,9 +99,7 @@ describe('formatTimestamp', () => {
 })
 
 describe('zoneSuffix', () => {
-  const ORIGINAL_TZ = process.env.TZ
-  beforeAll(() => { process.env.TZ = 'America/New_York' })
-  afterAll(() => { process.env.TZ = ORIGINAL_TZ })
+  withFixedTZ('America/New_York')
 
   it('is always "UTC" in utc mode', () => {
     expect(zoneSuffix(1_704_067_205_000, 'utc')).toBe('UTC')

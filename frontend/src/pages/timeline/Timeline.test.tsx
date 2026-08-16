@@ -2,6 +2,7 @@ import { act, fireEvent, render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { FakeEventSource } from '../../test/fake-event-source'
+import { withFixedTZ } from '../../test/timezone'
 import * as sse from '../../api/sse'
 import type { MessageOut, SseErrorData } from '../../api/types'
 import { encodeCursor } from '../../lib/timelineCursor'
@@ -243,9 +244,7 @@ describe('Timeline', () => {
   // — no refetch. Fixed TZ so a mode that silently fell back to UTC math
   // would fail this.
   describe('UTC/local display toggle (fixed TZ=America/New_York)', () => {
-    const ORIGINAL_TZ = process.env.TZ
-    beforeEach(() => { process.env.TZ = 'America/New_York' })
-    afterEach(() => { process.env.TZ = ORIGINAL_TZ })
+    withFixedTZ('America/New_York')
 
     it('window-range header switches to the local zone label and time when toggled, without any new request', async () => {
       mockTail()

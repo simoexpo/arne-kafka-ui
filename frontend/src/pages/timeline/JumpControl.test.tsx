@@ -1,7 +1,8 @@
 import { act, render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { setTimeDisplayMode } from '../../lib/timeDisplayMode'
+import { withFixedTZ } from '../../test/timezone'
 import { JumpControl } from './JumpControl'
 
 describe('JumpControl', () => {
@@ -122,15 +123,7 @@ describe('JumpControl', () => {
   // `onChange`, and the picker's own Apply is independent of the segment's
   // "jump" button — only the latter ever calls onJump.
   describe('timestamp picker integration (fixed TZ=America/New_York)', () => {
-    const ORIGINAL_TZ = process.env.TZ
-
-    beforeAll(() => {
-      process.env.TZ = 'America/New_York'
-    })
-
-    afterAll(() => {
-      process.env.TZ = ORIGINAL_TZ
-    })
+    withFixedTZ('America/New_York')
 
     it("the icon trigger's aria-label reflects the current UTC/local toggle state", async () => {
       const user = userEvent.setup()
