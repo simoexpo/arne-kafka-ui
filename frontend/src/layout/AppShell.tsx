@@ -46,10 +46,18 @@ export function Sidebar({ cluster, clusters, active, error }: {
   error?: unknown
 }) {
   return (
-    <aside className="flex w-56 flex-col gap-6 border-r border-zinc-200 p-4 dark:border-zinc-800">
-      <div className="flex items-center gap-2 text-sm font-semibold tracking-wide">
-        <img src="/logo.svg" alt="Arne logo" className="h-6 w-auto" />
-        Arne
+    // pt-6 mirrors main's p-6 so the brand tops out level with every page's
+    // title — the ONE cross-column line all pages share. The nav floats
+    // free below it: chasing each page's own content line from here was
+    // tried and reverted (2026-08-17) — headers differ per page, so it
+    // always misaligned somewhere.
+    <aside className="flex w-56 flex-col gap-6 border-r border-zinc-200 px-4 pb-4 pt-6 dark:border-zinc-800">
+      <div className="flex items-center gap-2">
+        <img src="/logo.svg" alt="Arne logo" className="h-9 w-auto" />
+        <div>
+          <div className="font-[Cinzel] text-lg font-semibold tracking-wide">Arne</div>
+          <div className="text-[10px] italic leading-tight text-zinc-500 dark:text-zinc-400">mythological Kafka UI</div>
+        </div>
       </div>
       <nav className="flex flex-col gap-1">
         {SECTIONS.map((s) => (

@@ -2,6 +2,8 @@ import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { RouterProvider } from '@tanstack/react-router'
+// Wordmark font, bundled locally (no CDN — the app stays self-contained).
+import '@fontsource/cinzel/600.css'
 import './index.css'
 import { router } from './router'
 

@@ -88,3 +88,7 @@ at `./config.yaml`:
 ```
 docker run -p 8080:8080 -v $(pwd)/config.yaml:/etc/arne/config.yaml arne-kafka-ui:dev
 ```
+
+## Credits
+
+Wordmark font: [Cinzel](https://fonts.google.com/specimen/Cinzel) by Natanael Gama, SIL Open Font License 1.1, bundled via @fontsource.

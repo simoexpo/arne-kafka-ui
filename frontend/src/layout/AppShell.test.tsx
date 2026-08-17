@@ -31,6 +31,7 @@ describe('Sidebar', () => {
       initialPath: '/c/prod/topics',
     })
     expect(screen.getByAltText('Arne logo')).toHaveAttribute('src', '/logo.svg')
+    expect(screen.getByText('mythological Kafka UI')).toBeInTheDocument()
   })
 
   it('surfaces a clusters-fetch failure honestly instead of silently rendering as zero other clusters', async () => {
