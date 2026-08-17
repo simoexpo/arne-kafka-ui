@@ -52,15 +52,15 @@ services:
         i=0
         while true; do
           i=$$((i+1))
-          printf "source:demo-producer,seq:$$i\torder-$$i:{\"order_id\":$$i,\"amount\":$$((i*3)).50,\"customer\":{\"id\":$$((i%7)),\"tier\":\"gold\"}}\n" | \
+          printf "source:demo-producer,seq:$$i\torder-$$i:{\"order_id\":$$i,\"amount\":$$((i*3)).50,\"customer\":{\"id\":$$((i%7)),\"tier\":\"gold\"},\"scores\":[$$((i%5)),$$((i%7)),$$((i%3))],\"items\":[{\"sku\":\"sku-$$((i%4))\",\"qty\":$$((i%3+1))},{\"sku\":\"sku-$$((i%5))\",\"qty\":$$((i%2+1))},{\"sku\":\"sku-9\",\"qty\":3}]}\n" | \
             /opt/kafka/bin/kafka-console-producer.sh --bootstrap-server kafka:19092 --topic demo-orders \
               --property parse.key=true --property key.separator=: --property parse.headers=true >/dev/null
           u=$$(( (i % 5) + 1 ))
-          printf "source:demo-producer,seq:$$i\tuser-$$u:{\"user_id\":$$u,\"seq\":$$i,\"profile\":{\"active\":true,\"country\":\"IT\"}}\n" | \
+          printf "source:demo-producer,seq:$$i\tuser-$$u:{\"user_id\":$$u,\"seq\":$$i,\"profile\":{\"active\":true,\"country\":\"IT\"},\"logins\":[$$((i%9)),$$((i%4)),7],\"devices\":[{\"type\":\"ios\",\"ver\":$$((i%3))},{\"type\":\"web\",\"ver\":2},{\"type\":\"android\",\"ver\":$$((i%2))}]}\n" | \
             /opt/kafka/bin/kafka-console-producer.sh --bootstrap-server kafka:19092 --topic demo-users \
               --property parse.key=true --property key.separator=: --property parse.headers=true >/dev/null
           a=$$((i % 10))
-          printf "source:demo-producer,seq:$$i\taudit-$$a:{\"audit_id\":$$a,\"seq\":$$i,\"context\":{\"ip\":\"10.0.0.$$a\",\"agent\":\"demo\"}}\n" | \
+          printf "source:demo-producer,seq:$$i\taudit-$$a:{\"audit_id\":$$a,\"seq\":$$i,\"context\":{\"ip\":\"10.0.0.$$a\",\"agent\":\"demo\"},\"codes\":[$$((i%6)),1,$$((i%2))],\"events\":[{\"kind\":\"read\",\"ok\":true},{\"kind\":\"write\",\"ok\":false},{\"kind\":\"del$$((i%3))\",\"ok\":true}]}\n" | \
             /opt/kafka/bin/kafka-console-producer.sh --bootstrap-server kafka:19092 --topic demo-audit \
               --property parse.key=true --property key.separator=: --property parse.headers=true >/dev/null
           sleep 2
@@ -79,15 +79,15 @@ services:
         i=0
         while true; do
           i=$$((i+1))
-          printf "source:demo-producer,seq:$$i\torder-$$i:{\"order_id\":$$i,\"amount\":$$((i*3)).50,\"customer\":{\"id\":$$((i%7)),\"tier\":\"gold\"}}\n" | \
+          printf "source:demo-producer,seq:$$i\torder-$$i:{\"order_id\":$$i,\"amount\":$$((i*3)).50,\"customer\":{\"id\":$$((i%7)),\"tier\":\"gold\"},\"scores\":[$$((i%5)),$$((i%7)),$$((i%3))],\"items\":[{\"sku\":\"sku-$$((i%4))\",\"qty\":$$((i%3+1))},{\"sku\":\"sku-$$((i%5))\",\"qty\":$$((i%2+1))},{\"sku\":\"sku-9\",\"qty\":3}]}\n" | \
             /opt/kafka/bin/kafka-console-producer.sh --bootstrap-server kafka2:19092 --topic demo-orders \
               --property parse.key=true --property key.separator=: --property parse.headers=true >/dev/null
           u=$$(( (i % 5) + 1 ))
-          printf "source:demo-producer,seq:$$i\tuser-$$u:{\"user_id\":$$u,\"seq\":$$i,\"profile\":{\"active\":true,\"country\":\"IT\"}}\n" | \
+          printf "source:demo-producer,seq:$$i\tuser-$$u:{\"user_id\":$$u,\"seq\":$$i,\"profile\":{\"active\":true,\"country\":\"IT\"},\"logins\":[$$((i%9)),$$((i%4)),7],\"devices\":[{\"type\":\"ios\",\"ver\":$$((i%3))},{\"type\":\"web\",\"ver\":2},{\"type\":\"android\",\"ver\":$$((i%2))}]}\n" | \
             /opt/kafka/bin/kafka-console-producer.sh --bootstrap-server kafka2:19092 --topic demo-users \
               --property parse.key=true --property key.separator=: --property parse.headers=true >/dev/null
           a=$$((i % 10))
-          printf "source:demo-producer,seq:$$i\taudit-$$a:{\"audit_id\":$$a,\"seq\":$$i,\"context\":{\"ip\":\"10.0.0.$$a\",\"agent\":\"demo\"}}\n" | \
+          printf "source:demo-producer,seq:$$i\taudit-$$a:{\"audit_id\":$$a,\"seq\":$$i,\"context\":{\"ip\":\"10.0.0.$$a\",\"agent\":\"demo\"},\"codes\":[$$((i%6)),1,$$((i%2))],\"events\":[{\"kind\":\"read\",\"ok\":true},{\"kind\":\"write\",\"ok\":false},{\"kind\":\"del$$((i%3))\",\"ok\":true}]}\n" | \
             /opt/kafka/bin/kafka-console-producer.sh --bootstrap-server kafka2:19092 --topic demo-audit \
               --property parse.key=true --property key.separator=: --property parse.headers=true >/dev/null
           sleep 2
@@ -111,17 +111,17 @@ services:
         i=0
         while true; do
           i=$$((i+1))
-          { for n in 1 2 3 4; do echo "{\"id\":$$((i*10+n)),\"item\":\"widget-$$((i*10+n))\",\"customer\":{\"id\":$$((n%7)),\"tier\":\"gold\"}}"; done; } | \
+          { for n in 1 2 3 4; do echo "{\"id\":$$((i*10+n)),\"item\":\"widget-$$((i*10+n))\",\"customer\":{\"id\":$$((n%7)),\"tier\":\"gold\"},\"nums\":[$$n,$$((n*2)),$$((n*3))],\"lines\":[{\"sku\":\"a-$$n\",\"qty\":1},{\"sku\":\"b-$$n\",\"qty\":2},{\"sku\":\"c\",\"qty\":$$n}]}"; done; } | \
             kafka-avro-console-producer --bootstrap-server kafka:19092 --topic sr-avro \
               --property schema.registry.url=http://schema-registry:8081 \
-              --property value.schema='{"type":"record","name":"Order","fields":[{"name":"id","type":"long"},{"name":"item","type":"string"},{"name":"customer","type":{"type":"record","name":"Customer","fields":[{"name":"id","type":"long"},{"name":"tier","type":"string"}]},"default":{"id":0,"tier":"unknown"}}]}'
-          { for n in 1 2 3 4; do echo "{\"id\":$$((i*10+n)),\"name\":\"event-$$((i*10+n))\",\"actor\":{\"id\":$$((n%7)),\"role\":\"system\"}}"; done; } | \
+              --property value.schema='{"type":"record","name":"Order","fields":[{"name":"id","type":"long"},{"name":"item","type":"string"},{"name":"customer","type":{"type":"record","name":"Customer","fields":[{"name":"id","type":"long"},{"name":"tier","type":"string"}]},"default":{"id":0,"tier":"unknown"}},{"name":"nums","type":{"type":"array","items":"long"},"default":[]},{"name":"lines","type":{"type":"array","items":{"type":"record","name":"Line","fields":[{"name":"sku","type":"string"},{"name":"qty","type":"long"}]}},"default":[]}]}'
+          { for n in 1 2 3 4; do echo "{\"id\":$$((i*10+n)),\"name\":\"event-$$((i*10+n))\",\"actor\":{\"id\":$$((n%7)),\"role\":\"system\"},\"nums\":[$$n,7,$$((n+1))],\"lines\":[{\"sku\":\"x-$$n\",\"qty\":1},{\"sku\":\"y\",\"qty\":2},{\"sku\":\"z\",\"qty\":3}]}"; done; } | \
             kafka-protobuf-console-producer --bootstrap-server kafka:19092 --topic sr-proto \
               --property schema.registry.url=http://schema-registry:8081 \
-              --property value.schema='syntax = "proto3"; message Event { int64 id = 1; string name = 2; message Actor { int64 id = 1; string role = 2; } Actor actor = 3; }'
-          { for n in 1 2 3 4; do echo "{\"id\":$$((i*10+n)),\"status\":\"open\",\"meta\":{\"owner\":\"demo\"}}"; done; } | \
+              --property value.schema='syntax = "proto3"; message Event { int64 id = 1; string name = 2; message Actor { int64 id = 1; string role = 2; } Actor actor = 3; repeated int64 nums = 4; message Line { string sku = 1; int64 qty = 2; } repeated Line lines = 5; }'
+          { for n in 1 2 3 4; do echo "{\"id\":$$((i*10+n)),\"status\":\"open\",\"meta\":{\"owner\":\"demo\"},\"nums\":[$$n,2,3],\"tags\":[{\"k\":\"env\",\"v\":\"dev\"},{\"k\":\"region\",\"v\":\"eu\"},{\"k\":\"n\",\"v\":\"t-$$n\"}]}"; done; } | \
             kafka-json-schema-console-producer --bootstrap-server kafka:19092 --topic sr-json \
               --property schema.registry.url=http://schema-registry:8081 \
-              --property value.schema='{"type":"object","properties":{"id":{"type":"integer"},"status":{"type":"string"},"meta":{"type":"object","properties":{"owner":{"type":"string"}}}}}'
+              --property value.schema='{"type":"object","properties":{"id":{"type":"integer"},"status":{"type":"string"},"meta":{"type":"object","properties":{"owner":{"type":"string"}}},"nums":{"type":"array","items":{"type":"integer"}},"tags":{"type":"array","items":{"type":"object","properties":{"k":{"type":"string"},"v":{"type":"string"}}}}}}'
           sleep 15
         done
