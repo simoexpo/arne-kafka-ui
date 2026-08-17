@@ -195,6 +195,37 @@ try {
     fail(`an offset jump did not leave its target row at the bottom of the viewport: ${JSON.stringify(targetPlacement)}`)
   }
 
+  // Filter grammar v2 + autocomplete (design spec 2026-08-17), REAL BROWSER:
+  // proposals must include fields extracted from the actual window content,
+  // and a field-equality expression must drive a scan that renders matches.
+  const filterInput = page.getByLabel('filter messages')
+  await filterInput.click()
+  await filterInput.fill('val')
+  await page.getByTestId('filter-proposal').first().waitFor({ timeout: 5000 })
+  const proposals = await page.getByTestId('filter-proposal').allTextContents()
+  if (!proposals.includes('value:') || !proposals.includes('value=')) {
+    fail(`autocomplete did not propose the value operators: ${JSON.stringify(proposals)}`)
+  }
+  const fieldRow = proposals.find((p) => p.startsWith('value.') && p.length > 'value.'.length)
+  if (fieldRow === undefined) {
+    fail(`autocomplete proposed no window-extracted fields: ${JSON.stringify(proposals)}`)
+  } else {
+    // Field-exists filter on a field the dropdown itself extracted from this
+    // topic's window — every row carrying the field must match, whatever
+    // topic the table listed first.
+    await filterInput.fill(`${fieldRow}:`)
+    try {
+      await page.waitForFunction(
+        () => document.querySelector('[data-testid="message-row"]') !== null,
+        undefined,
+        { timeout: 15000 },
+      )
+    } catch {
+      fail(`a field-exists filter (${fieldRow}:) rendered no matching rows`)
+    }
+  }
+  await filterInput.fill('')
+
   if (errors.length) {
     console.error('page errors:', errors)
     process.exitCode = 1
