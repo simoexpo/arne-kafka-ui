@@ -4,11 +4,13 @@ import { FilterHelp } from '../../components/FilterHelp'
 export function FilterBar({
   value,
   onChange,
+  proposals,
   progress,
   onCancel,
 }: {
   value: string
   onChange: (value: string) => void
+  proposals: (text: string) => string[]
   // Charter: "real progress — known total up front". `budget` is the
   // GESTURE's accumulated known ceiling — the sum of every page's budget in
   // this scan so far, matching `scanned`/`matches` above (see Timeline.tsx's
@@ -20,7 +22,7 @@ export function FilterBar({
   return (
     <div className="flex flex-wrap items-center gap-3">
       <div className="min-w-0 flex-1">
-        <FilterInput value={value} onChange={onChange} placeholder="filter messages…" ariaLabel="filter messages" className="w-full" fullWidth />
+        <FilterInput value={value} onChange={onChange} placeholder="filter messages…" ariaLabel="filter messages" className="w-full" fullWidth proposals={proposals} />
       </div>
       <FilterHelp />
       {progress && (

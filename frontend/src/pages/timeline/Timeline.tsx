@@ -5,7 +5,9 @@ import { MessageList } from '../../components/messages/MessageList'
 import type { MessageListHandle } from '../../components/messages/MessageList'
 import { Panel } from '../../components/Panel'
 import { describeError } from '../../api/errors'
+import { extractFieldPaths } from '../../lib/fieldPaths'
 import { parseFilterQuery, type FilterQueryApi } from '../../lib/filterQuery'
+import { proposalsFor } from '../../lib/filterProposals'
 import { formatWindowRange } from '../../lib/format'
 import { decodeCursor } from '../../lib/timelineCursor'
 import { createSlidingWindowStore, type InsertOutcome } from '../../lib/timelineStore'
@@ -860,6 +862,20 @@ export function Timeline({
   // just hasn't matched anything yet) skips the merge entirely.
   const rows = pageRowsRef.current.length > 0 ? storeRef.current.previewWithOverlay(pageRowsRef.current) : storeRef.current.rows()
 
+  // Field-path extraction runs lazily on the first proposal computation (a
+  // keystroke in the filter box), never on row churn itself, and is cached
+  // until the window's rows identity changes.
+  const fieldPathsCacheRef = useRef<{ rows: readonly MessageOut[]; paths: string[] } | null>(null)
+  const filterProposals = useCallback(
+    (text: string) => {
+      const cache = fieldPathsCacheRef.current
+      const paths = cache && cache.rows === rows ? cache.paths : extractFieldPaths(rows)
+      if (!cache || cache.rows !== rows) fieldPathsCacheRef.current = { rows, paths }
+      return proposalsFor(text, paths)
+    },
+    [rows],
+  )
+
   const handlePillClick = () => {
     const decision = nextPause(
       { pauseReason: pauseReasonRef.current, attached: attachedRef.current, inspecting: inspectingRef.current },
@@ -1130,6 +1146,7 @@ export function Timeline({
       <FilterBar
         value={filterText}
         onChange={setFilterText}
+        proposals={filterProposals}
         progress={progressVisible ? { scanned: progressScanned, matches: progressMatches, budget: knownBudget } : null}
         onCancel={handleCancelScan}
       />

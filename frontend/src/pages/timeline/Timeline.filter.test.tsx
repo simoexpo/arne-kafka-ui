@@ -738,4 +738,22 @@ describe('Timeline filter box', () => {
     expect(screen.getByText('p0·11')).toBeInTheDocument()
     expect(screen.queryByTestId('live-pill')).not.toBeInTheDocument()
   })
+
+  it('typing a prefix proposes operators and window-extracted fields, and accepting one applies', async () => {
+    render(<Timeline cluster="prod" topic="orders" />)
+    await emit(0, 'match', mk(1, { value: { encoding: 'json', text: '{"customer":{"id":7},"status":"open"}', schema_id: null, error: null } }))
+    await emit(0, 'page_end', { cursor: null, exhausted: true })
+
+    const input = screen.getByLabelText('filter messages')
+    fireEvent.focus(input)
+    typeFilter('val')
+    expect(screen.getAllByTestId('filter-proposal').map((el) => el.textContent)).toEqual([
+      'value:', 'value=', 'value.customer.id', 'value.status',
+    ])
+
+    typeFilter('value.sta')
+    expect(screen.getAllByTestId('filter-proposal').map((el) => el.textContent)).toEqual(['value.status'])
+    fireEvent.keyDown(input, { key: 'Enter' })
+    expect((input as HTMLInputElement).value).toBe('value.status')
+  })
 })
