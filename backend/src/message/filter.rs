@@ -113,35 +113,91 @@ impl Filter {
     }
 }
 
+#[derive(Debug, PartialEq)]
+enum Segment {
+    Name(String),
+    // Unquoted `[]`: quantifies over the array — ANY element may satisfy
+    // the rest of the path (owner ruling 2026-08-17).
+    AnyElement,
+}
+
 // Path tokenizer, identical on both sides (frontend `splitPath`): unquoted
 // `.` separates segments; a double-quoted run is part of its segment with
-// the quotes stripped, so `.`/`:`/`=` inside quotes are literal. An
-// unclosed quote runs to the end. Quoting affects tokenization only.
-fn split_path(path: &str) -> Vec<String> {
+// the quotes stripped, so `.`/`:`/`=`/`[]` inside quotes are literal. An
+// unclosed quote runs to the end. An unquoted `[]` pair emits an
+// any-element marker. Quoting affects tokenization only.
+fn split_path(path: &str) -> Vec<Segment> {
     let mut segments = Vec::new();
     let mut current = String::new();
     let mut in_quotes = false;
-    for c in path.chars() {
-        match c {
-            '"' => in_quotes = !in_quotes,
-            '.' if !in_quotes => segments.push(std::mem::take(&mut current)),
-            _ => current.push(c),
+    let mut after_marker = false;
+    let chars: Vec<char> = path.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if c == '"' {
+            in_quotes = !in_quotes;
+        } else if c == '.' && !in_quotes {
+            // The separator right after a `[]` marker introduces the next
+            // segment — it must not mint an empty Name (which never
+            // resolves); a genuinely empty segment (`a..b`) still does.
+            if !(after_marker && current.is_empty()) {
+                segments.push(Segment::Name(std::mem::take(&mut current)));
+            }
+            after_marker = false;
+        } else if c == '[' && !in_quotes && chars.get(i + 1) == Some(&']') {
+            if !current.is_empty() {
+                segments.push(Segment::Name(std::mem::take(&mut current)));
+            }
+            segments.push(Segment::AnyElement);
+            after_marker = true;
+            i += 1;
+        } else {
+            current.push(c);
+            after_marker = false;
         }
+        i += 1;
     }
-    segments.push(current);
+    if !(after_marker && current.is_empty()) {
+        segments.push(Segment::Name(current));
+    }
     segments
 }
 
-fn json_at_path<'a>(root: &'a serde_json::Value, path: &str) -> Option<&'a serde_json::Value> {
-    let mut current = root;
-    for seg in &split_path(path) {
-        current = match current {
-            serde_json::Value::Object(map) => map.get(seg)?,
-            serde_json::Value::Array(items) => items.get(seg.parse::<usize>().ok()?)?,
-            _ => return None,
+/// Every JSON node the path can reach: exactly one without `[]` markers,
+/// one per matching element combination with them.
+fn path_candidates<'a>(root: &'a serde_json::Value, path: &str) -> Vec<&'a serde_json::Value> {
+    fn walk<'a>(node: &'a serde_json::Value, segs: &[Segment], out: &mut Vec<&'a serde_json::Value>) {
+        let Some((first, rest)) = segs.split_first() else {
+            out.push(node);
+            return;
         };
+        match first {
+            Segment::Name(n) => match node {
+                serde_json::Value::Object(map) => {
+                    if let Some(v) = map.get(n) {
+                        walk(v, rest, out);
+                    }
+                }
+                serde_json::Value::Array(items) => {
+                    if let Some(v) = n.parse::<usize>().ok().and_then(|i| items.get(i)) {
+                        walk(v, rest, out);
+                    }
+                }
+                _ => {}
+            },
+            Segment::AnyElement => {
+                if let serde_json::Value::Array(items) = node {
+                    for v in items {
+                        walk(v, rest, out);
+                    }
+                }
+            }
+        }
     }
-    Some(current)
+    let mut out = Vec::new();
+    walk(root, &split_path(path), &mut out);
+    out
 }
 
 // Case-insensitive structural equality: string keys and string values
@@ -166,6 +222,18 @@ fn json_eq_ci(a: &serde_json::Value, b: &serde_json::Value) -> bool {
         }
         _ => a == b,
     }
+}
+
+/// True when some node the path reaches in a readable JSON value (exactly
+/// one node without `[]` markers, any element combination with them)
+/// satisfies `pred`.
+fn any_json_path_match(msg: &MessageOut, path: &str, pred: impl Fn(&serde_json::Value) -> bool) -> bool {
+    msg.value.as_ref().is_some_and(|v| {
+        v.encoding != Encoding::DecodeError
+            && serde_json::from_str::<serde_json::Value>(&v.text)
+                .ok()
+                .is_some_and(|root| path_candidates(&root, path).into_iter().any(&pred))
+    })
 }
 
 /// The `=`/`!=` equality reading of a readable value text: JSON semantic
@@ -209,27 +277,15 @@ pub fn matches(filter: &Filter, msg: &MessageOut) -> bool {
         Filter::ValueNotEquals { text, json } => msg.value.as_ref().is_some_and(|v| {
             v.encoding != Encoding::DecodeError && !value_equals(text, json, &v.text)
         }),
-        Filter::JsonPathEquals { path, value } => msg.value.as_ref().is_some_and(|v| {
-            v.encoding != Encoding::DecodeError
-                && serde_json::from_str::<serde_json::Value>(&v.text)
-                    .ok()
-                    .and_then(|root| json_at_path(&root, path).and_then(scalar_text))
-                    .is_some_and(|found| found == *value)
-        }),
-        Filter::JsonPathNotEquals { path, value } => msg.value.as_ref().is_some_and(|v| {
-            v.encoding != Encoding::DecodeError
-                && serde_json::from_str::<serde_json::Value>(&v.text)
-                    .ok()
-                    .and_then(|root| json_at_path(&root, path).and_then(scalar_text))
-                    .is_some_and(|found| found != *value)
-        }),
-        Filter::JsonPathContains { path, value } => msg.value.as_ref().is_some_and(|v| {
-            v.encoding != Encoding::DecodeError
-                && serde_json::from_str::<serde_json::Value>(&v.text)
-                    .ok()
-                    .and_then(|root| json_at_path(&root, path).and_then(scalar_text))
-                    .is_some_and(|found| found.contains(value.as_str()))
-        }),
+        Filter::JsonPathEquals { path, value } => {
+            any_json_path_match(msg, path, |c| scalar_text(c).is_some_and(|found| found == *value))
+        }
+        Filter::JsonPathNotEquals { path, value } => {
+            any_json_path_match(msg, path, |c| scalar_text(c).is_some_and(|found| found != *value))
+        }
+        Filter::JsonPathContains { path, value } => {
+            any_json_path_match(msg, path, |c| scalar_text(c).is_some_and(|found| found.contains(value.as_str())))
+        }
         Filter::KeyCompare { op, value } => value.is_some_and(|expected| {
             msg.key
                 .as_ref()
@@ -244,12 +300,9 @@ pub fn matches(filter: &Filter, msg: &MessageOut) -> bool {
                 .is_some_and(|target| op.holds(target, expected))
         }),
         Filter::JsonPathCompare { path, op, value } => value.is_some_and(|expected| {
-            msg.value
-                .as_ref()
-                .filter(|v| v.encoding != Encoding::DecodeError)
-                .and_then(|v| serde_json::from_str::<serde_json::Value>(&v.text).ok())
-                .and_then(|root| json_at_path(&root, path).and_then(scalar_number))
-                .is_some_and(|target| op.holds(target, expected))
+            any_json_path_match(msg, path, |c| {
+                scalar_number(c).is_some_and(|target| op.holds(target, expected))
+            })
         }),
         Filter::Contains(q) => {
             let key_hit = msg.key.as_ref().is_some_and(|k| k.text.to_lowercase().contains(q.as_str()));
@@ -527,6 +580,39 @@ mod tests {
         let j = msg(None, r#"{"a":{"b":1}}"#, Encoding::Json);
         assert!(!matches(&Filter::parse("json_neq", "x", Some("missing"), None).unwrap(), &j));
         assert!(!matches(&Filter::parse("json_neq", "x", Some("a"), None).unwrap(), &j));
+    }
+
+    /// Owner ruling 2026-08-17: an unquoted `[]` at the end of a segment
+    /// quantifies over that array — the expression matches if ANY element
+    /// satisfies the leaf operator.
+    #[test]
+    fn any_element_marker_matches_when_some_element_satisfies_the_leaf() {
+        let m = msg(None, r#"{"items":[{"sku":"aaa","qty":1},{"sku":"BBB","qty":7}],"nums":[1,2,3]}"#, Encoding::Json);
+        assert!(matches(&Filter::parse("json_eq", "bbb", Some("items[].sku"), None).unwrap(), &m));
+        assert!(!matches(&Filter::parse("json_eq", "ccc", Some("items[].sku"), None).unwrap(), &m));
+        assert!(matches(&Filter::parse("json_contains", "b", Some("items[].sku"), None).unwrap(), &m));
+        assert!(matches(&Filter::parse("json_cmp", "5", Some("items[].qty"), Some("gt")).unwrap(), &m));
+        assert!(!matches(&Filter::parse("json_cmp", "7", Some("items[].qty"), Some("gt")).unwrap(), &m));
+        assert!(matches(&Filter::parse("json_eq", "2", Some("nums[]"), None).unwrap(), &m));
+        // `!=` under `[]` is existential: SOME element differs.
+        assert!(matches(&Filter::parse("json_neq", "aaa", Some("items[].sku"), None).unwrap(), &m));
+    }
+
+    #[test]
+    fn any_element_marker_edges() {
+        let m = msg(
+            None,
+            r#"{"empty":[],"notarray":5,"nested":[[1,2],[3]],"same":[5,5],"items[]":1}"#,
+            Encoding::Json,
+        );
+        assert!(!matches(&Filter::parse("json_eq", "1", Some("empty[]"), None).unwrap(), &m));
+        assert!(!matches(&Filter::parse("json_eq", "5", Some("notarray[]"), None).unwrap(), &m));
+        assert!(matches(&Filter::parse("json_eq", "3", Some("nested[][]"), None).unwrap(), &m));
+        assert!(!matches(&Filter::parse("json_neq", "5", Some("same[]"), None).unwrap(), &m));
+        // A quoted "items[]" is a literal field name, not a marker.
+        assert!(matches(&Filter::parse("json_eq", "1", Some(r#""items[]""#), None).unwrap(), &m));
+        // Numeric indexing still works alongside the marker.
+        assert!(matches(&Filter::parse("json_eq", "2", Some("nested.0.1"), None).unwrap(), &m));
     }
 
     #[test]
