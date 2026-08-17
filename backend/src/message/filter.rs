@@ -5,6 +5,7 @@ pub enum Filter {
     KeyEquals(String),
     KeyContains(String),
     ValueContains(String),
+    ValueEquals { text: String, json: Option<serde_json::Value> },
     JsonPathEquals { path: String, value: String },
     /// Case-insensitive contains on key text OR value text — the bare-text
     /// filter box of the timeline design (`filter=contains&q=...`). The
@@ -25,6 +26,8 @@ impl Filter {
             "key_eq" => Ok(Filter::KeyEquals(q.to_lowercase())),
             "key_contains" => Ok(Filter::KeyContains(q.to_lowercase())),
             "value_contains" => Ok(Filter::ValueContains(q.to_lowercase())),
+            // The needle's JSON form is parsed ONCE here, never per record.
+            "value_eq" => Ok(Filter::ValueEquals { text: q.to_lowercase(), json: serde_json::from_str(q).ok() }),
             "contains" => Ok(Filter::Contains(q.to_lowercase())),
             "json_eq" => path
                 .map(|p| Filter::JsonPathEquals { path: p.to_string(), value: q.to_lowercase() })
@@ -46,6 +49,27 @@ fn json_at_path<'a>(root: &'a serde_json::Value, path: &str) -> Option<&'a serde
     Some(current)
 }
 
+// Case-insensitive structural equality: string keys and string values
+// compare lower-cased; numbers/bools/null compare exactly.
+fn json_eq_ci(a: &serde_json::Value, b: &serde_json::Value) -> bool {
+    use serde_json::Value;
+    match (a, b) {
+        (Value::String(x), Value::String(y)) => x.to_lowercase() == y.to_lowercase(),
+        (Value::Array(x), Value::Array(y)) => {
+            x.len() == y.len() && x.iter().zip(y).all(|(xa, yb)| json_eq_ci(xa, yb))
+        }
+        (Value::Object(x), Value::Object(y)) => {
+            x.len() == y.len()
+                && x.iter().all(|(k, xv)| {
+                    y.iter()
+                        .find(|(yk, _)| yk.to_lowercase() == k.to_lowercase())
+                        .is_some_and(|(_, yv)| json_eq_ci(xv, yv))
+                })
+        }
+        _ => a == b,
+    }
+}
+
 fn scalar_text(v: &serde_json::Value) -> Option<String> {
     match v {
         serde_json::Value::String(s) => Some(s.to_lowercase()),
@@ -65,6 +89,15 @@ pub fn matches(filter: &Filter, msg: &MessageOut) -> bool {
         // would produce false hits with no relationship to actual content.
         Filter::ValueContains(q) => msg.value.as_ref().is_some_and(|v| {
             v.encoding != Encoding::DecodeError && v.text.to_lowercase().contains(q.as_str())
+        }),
+        Filter::ValueEquals { text, json } => msg.value.as_ref().is_some_and(|v| {
+            if v.encoding == Encoding::DecodeError {
+                return false;
+            }
+            match (json, serde_json::from_str::<serde_json::Value>(&v.text).ok()) {
+                (Some(expected), Some(actual)) => json_eq_ci(&actual, expected),
+                _ => v.text.to_lowercase() == *text,
+            }
         }),
         Filter::JsonPathEquals { path, value } => msg.value.as_ref().is_some_and(|v| {
             v.encoding != Encoding::DecodeError
@@ -182,6 +215,34 @@ mod tests {
         assert!(matches(&Filter::parse("json_eq", "ALICE", Some("user.name")).unwrap(), &m));
         assert!(matches(&Filter::parse("json_eq", "42", Some("user.id")).unwrap(), &m));
         assert!(!matches(&Filter::parse("json_eq", "43", Some("user.id")).unwrap(), &m));
+    }
+
+    #[test]
+    fn value_eq_plain_text_is_case_insensitive_equality() {
+        let m = msg(None, "Hello World", Encoding::Utf8);
+        assert!(matches(&Filter::parse("value_eq", "hello world", None).unwrap(), &m));
+        assert!(!matches(&Filter::parse("value_eq", "hello", None).unwrap(), &m));
+    }
+
+    #[test]
+    fn value_eq_json_is_semantic_whitespace_and_key_order_immune() {
+        let m = msg(None, r#"{"a": 1, "b": {"c": "X"}}"#, Encoding::Json);
+        assert!(matches(&Filter::parse("value_eq", r#"{"b":{"c":"x"},"a":1}"#, None).unwrap(), &m));
+        assert!(!matches(&Filter::parse("value_eq", r#"{"b":{"c":"x"},"a":2}"#, None).unwrap(), &m));
+    }
+
+    #[test]
+    fn value_eq_json_needle_against_non_json_value_falls_back_to_text() {
+        let m = msg(None, "not json", Encoding::Utf8);
+        assert!(!matches(&Filter::parse("value_eq", r#"{"a":1}"#, None).unwrap(), &m));
+        let m2 = msg(None, r#"{"a":1}"#, Encoding::Utf8);
+        assert!(matches(&Filter::parse("value_eq", r#"{"a": 1}"#, None).unwrap(), &m2));
+    }
+
+    #[test]
+    fn value_eq_never_matches_decode_error() {
+        let m = msg(None, "blob", Encoding::DecodeError);
+        assert!(!matches(&Filter::parse("value_eq", "blob", None).unwrap(), &m));
     }
 
     #[test]
