@@ -50,9 +50,9 @@ export function FilterHelp() {
             <div><dt className="inline font-mono text-sky-800 dark:text-sky-300">value.path.to.field:foo</dt><dd className="inline text-zinc-600 dark:text-zinc-400"> — that field contains foo</dd></div>
             <div><dt className="inline font-mono text-sky-800 dark:text-sky-300">value.path.to.field=42</dt><dd className="inline text-zinc-600 dark:text-zinc-400"> — that field equals 42</dd></div>
             <div><dt className="inline font-mono text-sky-800 dark:text-sky-300">"key:foo"</dt><dd className="inline text-zinc-600 dark:text-zinc-400"> — search the literal text key:foo</dd></div>
+            <div><dt className="inline font-mono text-sky-800 dark:text-sky-300">value."field.with.dots"=x</dt><dd className="inline text-zinc-600 dark:text-zinc-400"> — quote a field name containing . : or =</dd></div>
           </dl>
           <p className="mt-2 text-zinc-500">All matching is case-insensitive.</p>
-          <p className="mt-1 text-zinc-500">Field names containing . : or = can't be addressed by value.path.</p>
           <p className="mt-1 text-zinc-500">Text that itself starts and ends with a quote can't be searched literally — the outer quotes are always stripped.</p>
         </div>
       )}

@@ -15,10 +15,11 @@ describe('FilterHelp', () => {
     }
     expect(pop).toHaveTextContent(/case-insensitive/i)
     expect(pop).toHaveTextContent(/key or value/i)
-    // The two documented limitations (design spec 2026-08-17) must be
-    // discoverable here, not just true.
-    expect(pop).toHaveTextContent(/field names containing/i)
+    // The quoted-segment syntax and the remaining limitations (design spec
+    // 2026-08-17) must be discoverable here, not just true.
+    expect(pop).toHaveTextContent('value."field.with.dots"=x')
     expect(pop).toHaveTextContent(/outer quotes/i)
+    expect(pop).not.toHaveTextContent(/can't be addressed/i)
   })
 
   it('closes on Escape and on outside click', async () => {
