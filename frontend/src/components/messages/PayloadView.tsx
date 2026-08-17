@@ -40,7 +40,7 @@ export function PayloadView({ payload, label }: { payload: DecodedPayload | null
       </div>
     )
   }
-  let body = <pre className="overflow-x-auto whitespace-pre-wrap break-all">{payload.text}</pre>
+  let body = <pre className="whitespace-pre">{payload.text}</pre>
   if (payload.encoding === 'json' || payload.encoding === 'avro' || payload.encoding === 'protobuf') {
     try {
       body = <JsonView value={JSON.parse(payload.text)} />
@@ -51,7 +51,13 @@ export function PayloadView({ payload, label }: { payload: DecodedPayload | null
   return (
     <div className="font-mono text-sm">
       {heading}
-      {body}
+      {/* Future-proofing for production payloads of any size: the body is
+          height-capped (~20 mono lines) and scrolls on either axis ONLY
+          when it overflows. nowrap keeps long fields and deep nesting on
+          one line each, so they scroll sideways instead of wrapping. */}
+      <div data-testid="payload-scroll" className="max-h-80 overflow-auto whitespace-nowrap">
+        {body}
+      </div>
     </div>
   )
 }

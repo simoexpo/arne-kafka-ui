@@ -43,4 +43,24 @@ describe('copy affordance', () => {
     await user.click(screen.getByLabelText('copy key'))
     expect(writeText).toHaveBeenCalledWith('order-1')
   })
+
+  // Future-proofing for production payloads of any size (owner ruling
+  // 2026-08-17): the body sits in a height-capped scroll container whose
+  // scrollbars appear only on overflow — vertical for tall payloads,
+  // horizontal for long unwrapped lines (nowrap makes long fields/deep
+  // nesting scroll sideways instead of wrapping into porridge).
+  it('json body sits in a capped, both-axis scroll container', () => {
+    render(<PayloadView payload={{ encoding: 'json', text: '{"a":1}', schema_id: null, error: null }} label="value" />)
+    const scroller = screen.getByTestId('payload-scroll')
+    expect(scroller.className).toMatch(/\bmax-h-80\b/)
+    expect(scroller.className).toMatch(/\boverflow-auto\b/)
+    expect(scroller.className).toMatch(/\bwhitespace-nowrap\b/)
+  })
+
+  it('raw text keeps its own line structure without soft-wrapping', () => {
+    render(<PayloadView payload={{ encoding: 'utf8', text: 'a very long single line', schema_id: null, error: null }} label="key" />)
+    const pre = screen.getByTestId('payload-scroll').querySelector('pre')
+    expect(pre?.className).toMatch(/\bwhitespace-pre\b/)
+    expect(pre?.className).not.toMatch(/pre-wrap|break-all/)
+  })
 })

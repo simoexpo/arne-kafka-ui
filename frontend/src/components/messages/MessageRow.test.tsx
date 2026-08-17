@@ -84,6 +84,14 @@ describe('MessageRow', () => {
     expect(screen.getByTestId('message-row').className).not.toMatch(/emerald/)
   })
 
+  it('headers list sits in a capped, both-axis scroll container (future-proof for huge headers)', () => {
+    render(<MessageRow message={msg()} expanded onToggle={() => {}} />)
+    const block = screen.getByTestId('headers-scroll')
+    expect(block.className).toMatch(/\bmax-h-80\b/)
+    expect(block.className).toMatch(/\boverflow-auto\b/)
+    expect(block.className).toMatch(/\bwhitespace-nowrap\b/)
+  })
+
   describe('keyboard operability', () => {
     // ARIA forbids interactive descendants inside role="button" (the row
     // wraps focusable copy buttons and a JSON <details>/<summary>), and
