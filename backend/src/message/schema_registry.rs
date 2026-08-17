@@ -62,6 +62,23 @@ struct SubjectVersionResponse {
 }
 
 #[derive(Debug, serde::Serialize)]
+pub struct RegistrySettings {
+    pub compatibility_level: String,
+    pub mode: String,
+}
+
+#[derive(Deserialize)]
+struct SrConfigResponse {
+    #[serde(rename = "compatibilityLevel")]
+    compatibility_level: String,
+}
+
+#[derive(Deserialize)]
+struct SrModeResponse {
+    mode: String,
+}
+
+#[derive(Debug, serde::Serialize)]
 pub struct SubjectDetail {
     pub subject: String,
     pub versions: Vec<i32>,
@@ -152,6 +169,15 @@ impl SchemaRegistry {
         res.json()
             .await
             .map_err(|e| SubjectError::Registry(format!("schema registry bad body: {e}")))
+    }
+
+    /// Registry-wide settings for the Schemas page header: the global
+    /// compatibility level and the registry mode. Uncached, same reasoning
+    /// as `subjects`.
+    pub async fn registry_settings(&self) -> Result<RegistrySettings, SubjectError> {
+        let config: SrConfigResponse = self.get_subject_json("config").await?;
+        let mode: SrModeResponse = self.get_subject_json("mode").await?;
+        Ok(RegistrySettings { compatibility_level: config.compatibility_level, mode: mode.mode })
     }
 
     /// The subject's version list plus ONE version's schema — the requested
@@ -247,6 +273,8 @@ pub(crate) mod tests {
                 "/subjects",
                 get(|| async { Json(serde_json::json!(["sr-avro-value", "sr-json-value"])) }),
             )
+            .route("/config", get(|| async { Json(serde_json::json!({"compatibilityLevel": "BACKWARD"})) }))
+            .route("/mode", get(|| async { Json(serde_json::json!({"mode": "READWRITE"})) }))
             .route(
                 "/subjects/{subject}/versions",
                 get(|Path(subject): Path<String>| async move {
@@ -300,6 +328,16 @@ pub(crate) mod tests {
         let v1 = sr.subject_detail("sr-avro-value", Some(1)).await.unwrap();
         assert_eq!(v1.version, 1);
         assert_eq!(v1.schema_type, "JSON");
+    }
+
+    /// Registry-wide settings for the Schemas page header: the global
+    /// compatibility level (GET /config) and the registry mode (GET /mode).
+    #[tokio::test]
+    async fn registry_settings_report_compatibility_and_mode() {
+        let sr = SchemaRegistry::new(&mock_sr(Arc::new(AtomicUsize::new(0))).await);
+        let settings = sr.registry_settings().await.unwrap();
+        assert_eq!(settings.compatibility_level, "BACKWARD");
+        assert_eq!(settings.mode, "READWRITE");
     }
 
     #[tokio::test]

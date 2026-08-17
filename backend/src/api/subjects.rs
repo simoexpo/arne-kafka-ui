@@ -31,6 +31,22 @@ pub async fn list(
     Ok(Json(json!({ "subjects": subjects, "as_of": crate::util::now_ms() })))
 }
 
+pub async fn registry_settings(
+    State(state): State<AppState>,
+    Path(cluster): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let sr = registry_for(&state, &cluster)?;
+    let settings = sr
+        .registry_settings()
+        .await
+        .map_err(|e| subject_error(&cluster, "", e))?;
+    Ok(Json(json!({
+        "compatibility_level": settings.compatibility_level,
+        "mode": settings.mode,
+        "as_of": crate::util::now_ms(),
+    })))
+}
+
 #[derive(Deserialize)]
 pub struct VersionParam {
     pub version: Option<i32>,
