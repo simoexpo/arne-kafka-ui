@@ -18,8 +18,12 @@ function jsonAtPath(root: unknown, path: string): { found: true; value: unknown 
   let current: unknown = root
   for (const seg of path.split('.')) {
     if (Array.isArray(current)) {
+      // Mirrors the server's `parse::<usize>()`: digits with an optional
+      // leading `+` only — `Number('')`/`Number(' ')` coercing to 0 must
+      // never turn a malformed segment into index 0.
+      if (!/^\+?\d+$/.test(seg)) return { found: false }
       const idx = Number(seg)
-      if (!Number.isInteger(idx) || idx < 0 || idx >= current.length) return { found: false }
+      if (idx >= current.length) return { found: false }
       current = current[idx]
     } else if (current !== null && typeof current === 'object') {
       const obj = current as Record<string, unknown>

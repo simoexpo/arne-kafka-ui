@@ -72,6 +72,40 @@ describe('parseFilterQuery', () => {
     expect(parseFilterQuery('value.abc').api).toEqual({ filter: 'contains', q: 'value.abc' })
     expect(parseFilterQuery('value.:x').api).toEqual({ filter: 'contains', q: 'value.:x' })
   })
+  it('JSON numbers compare as doubles, mirroring the server (1.0 equals 1)', () => {
+    const m = jsonRow('{"qty":1}')
+    expect(parseFilterQuery('value={"qty":1.0}').predicate(m)).toBe(true)
+    expect(parseFilterQuery('value={"qty":2}').predicate(m)).toBe(false)
+  })
+  it('path scalars stringify via the double model, mirroring the server', () => {
+    const m = jsonRow('{"amount":100.0,"id":12345678901234567890}')
+    expect(parseFilterQuery('value.amount=100').predicate(m)).toBe(true)
+    expect(parseFilterQuery('value.amount=100.0').predicate(m)).toBe(false)
+    expect(parseFilterQuery('value.id=12345678901234567000').predicate(m)).toBe(true)
+  })
+  it('value.path: with empty needle means the field exists as a scalar', () => {
+    const m = jsonRow('{"a":{"b":1},"c":"x"}')
+    expect(parseFilterQuery('value.c:').predicate(m)).toBe(true)
+    expect(parseFilterQuery('value.a:').predicate(m)).toBe(false) // object, not scalar
+    expect(parseFilterQuery('value.missing:').predicate(m)).toBe(false)
+  })
+  it('objects and arrays sitting AT the path never match', () => {
+    const m = jsonRow('{"a":{"b":1},"list":[1]}')
+    expect(parseFilterQuery('value.a=1').predicate(m)).toBe(false)
+    expect(parseFilterQuery('value.list:1').predicate(m)).toBe(false)
+  })
+  it('value= JSON needle against a non-JSON value falls back to text equality', () => {
+    expect(parseFilterQuery('value={"a":1}').predicate(mk(0, 1, 1, 'not json'))).toBe(false)
+    expect(parseFilterQuery('value={"a": 1}').predicate(jsonRow('{"a":1}'))).toBe(true)
+  })
+  it('array segments must be canonical integers, mirroring the server parser', () => {
+    const m = jsonRow('{"items":["hit"]}')
+    expect(parseFilterQuery('value.items.0:hit').predicate(m)).toBe(true)
+    // Number(' ') coerces to 0 in JS; Rust's parse::<usize> rejects it — a
+    // whitespace segment must be a no-match, not index 0.
+    expect(parseFilterQuery('value.items. :hit').predicate(m)).toBe(false)
+    expect(parseFilterQuery('value.items.1e0:hit').predicate(m)).toBe(false)
+  })
   it('decode-error values never content-match', () => {
     const f = parseFilterQuery('AAEC')
     const m = mk(0, 1, 1, 'AAECAw==')

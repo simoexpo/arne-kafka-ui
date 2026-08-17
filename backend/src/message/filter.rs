@@ -54,11 +54,14 @@ fn json_at_path<'a>(root: &'a serde_json::Value, path: &str) -> Option<&'a serde
 }
 
 // Case-insensitive structural equality: string keys and string values
-// compare lower-cased; numbers/bools/null compare exactly.
+// compare lower-cased; numbers compare as doubles (the client's JSON.parse
+// has no other number model — serde's variant-exact `1.0 != 1` would match
+// different rows in the scanned window vs the live tail); bools/null exact.
 fn json_eq_ci(a: &serde_json::Value, b: &serde_json::Value) -> bool {
     use serde_json::Value;
     match (a, b) {
         (Value::String(x), Value::String(y)) => x.to_lowercase() == y.to_lowercase(),
+        (Value::Number(x), Value::Number(y)) => x.as_f64() == y.as_f64(),
         (Value::Array(x), Value::Array(y)) => {
             x.len() == y.len() && x.iter().zip(y).all(|(xa, yb)| json_eq_ci(xa, yb))
         }
@@ -77,7 +80,12 @@ fn json_eq_ci(a: &serde_json::Value, b: &serde_json::Value) -> bool {
 fn scalar_text(v: &serde_json::Value) -> Option<String> {
     match v {
         serde_json::Value::String(s) => Some(s.to_lowercase()),
-        serde_json::Value::Number(n) => Some(n.to_string()),
+        // Through f64 deliberately: the client stringifies via a JS double
+        // (`String(JSON.parse(...))`), so `100.0` must read "100" and >2^53
+        // integers collapse identically on both sides. Both shortest-
+        // round-trip formatters (ryu here, V8 there) print the same digits
+        // for the same double.
+        serde_json::Value::Number(n) => n.as_f64().map(|f| f.to_string()),
         serde_json::Value::Bool(b) => Some(b.to_string()),
         serde_json::Value::Null => Some("null".to_string()),
         _ => None,
@@ -248,6 +256,29 @@ mod tests {
         assert!(!matches(&Filter::parse("value_eq", r#"{"a":1}"#, None).unwrap(), &m));
         let m2 = msg(None, r#"{"a":1}"#, Encoding::Utf8);
         assert!(matches(&Filter::parse("value_eq", r#"{"a": 1}"#, None).unwrap(), &m2));
+    }
+
+    /// serde's own `Number` equality is variant-exact (`1.0 != 1`), but the
+    /// client's JSON.parse collapses every number to a double — the server
+    /// must share that model or the same filter matches different rows in
+    /// the scanned window vs the live tail.
+    #[test]
+    fn value_eq_json_numbers_compare_as_doubles_like_the_client() {
+        let m = msg(None, r#"{"qty":1}"#, Encoding::Json);
+        assert!(matches(&Filter::parse("value_eq", r#"{"qty":1.0}"#, None).unwrap(), &m));
+        assert!(!matches(&Filter::parse("value_eq", r#"{"qty":2}"#, None).unwrap(), &m));
+    }
+
+    /// Same double model for path scalars: `100.0` stringifies as "100"
+    /// (shortest round-trip, like JS `String(100.0)`), and integers past
+    /// 2^53 collapse to the double both sides share — a documented
+    /// limitation, not a divergence.
+    #[test]
+    fn json_path_scalars_stringify_like_the_client_double_model() {
+        let m = msg(None, r#"{"amount":100.0,"id":12345678901234567890}"#, Encoding::Json);
+        assert!(matches(&Filter::parse("json_eq", "100", Some("amount")).unwrap(), &m));
+        assert!(!matches(&Filter::parse("json_eq", "100.0", Some("amount")).unwrap(), &m));
+        assert!(matches(&Filter::parse("json_eq", "12345678901234567000", Some("id")).unwrap(), &m));
     }
 
     #[test]
