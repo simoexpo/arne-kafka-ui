@@ -1,10 +1,11 @@
-import type { TimelineFilterKind } from '../api/sse'
+import type { CmpOpWire, TimelineFilterKind } from '../api/sse'
 import type { MessageOut } from '../api/types'
 
 export interface FilterQueryApi {
   filter: TimelineFilterKind
   q: string
   path?: string
+  op?: CmpOpWire
 }
 
 interface ParsedFilterQuery {
@@ -33,15 +34,84 @@ function splitPath(path: string): string[] {
   return segments
 }
 
-// Index of the first `:` or `=` sitting outside double quotes, or -1.
+// Index of the first `:`, `=`, `>` or `<` sitting outside double quotes,
+// or -1.
 function unquotedOperatorIndex(text: string): number {
   let inQuotes = false
   for (let i = 0; i < text.length; i++) {
     const c = text[i]
     if (c === '"') inQuotes = !inQuotes
-    else if ((c === ':' || c === '=') && !inQuotes) return i
+    else if ((c === ':' || c === '=' || c === '>' || c === '<') && !inQuotes) return i
   }
   return -1
+}
+
+// "A number" is the JSON number grammar — the backend runs serde_json on
+// its side, so using JSON.parse here keeps the mirror exact by
+// construction (`1e3` parses; `''`, `+42`, `0x2` don't).
+function jsonNumber(text: string): number | null {
+  try {
+    const v = JSON.parse(text)
+    return typeof v === 'number' ? v : null
+  } catch {
+    return null
+  }
+}
+
+// The numeric reading of a JSON scalar: a number itself, or a string that
+// parses as one. Bools/null/objects/arrays have none.
+function scalarNumber(v: unknown): number | null {
+  if (typeof v === 'number') return v
+  if (typeof v === 'string') return jsonNumber(v)
+  return null
+}
+
+function cmpHolds(op: CmpOpWire, target: number, expected: number): boolean {
+  if (op === 'gt') return target > expected
+  if (op === 'gte') return target >= expected
+  if (op === 'lt') return target < expected
+  return target <= expected
+}
+
+function keyCmpPredicate(op: CmpOpWire, q: string) {
+  const expected = jsonNumber(q)
+  return (m: MessageOut) => {
+    if (expected === null || !m.key) return false
+    const target = jsonNumber(m.key.text)
+    return target !== null && cmpHolds(op, target, expected)
+  }
+}
+
+function valueCmpPredicate(op: CmpOpWire, q: string) {
+  const expected = jsonNumber(q)
+  return (m: MessageOut) => {
+    if (expected === null || !m.value || m.value.encoding === 'decode_error') return false
+    let parsed: unknown
+    try {
+      parsed = JSON.parse(m.value.text)
+    } catch {
+      return false
+    }
+    const target = scalarNumber(parsed)
+    return target !== null && cmpHolds(op, target, expected)
+  }
+}
+
+function jsonCmpPredicate(path: string, op: CmpOpWire, q: string) {
+  const expected = jsonNumber(q)
+  return (m: MessageOut) => {
+    if (expected === null || !m.value || m.value.encoding === 'decode_error') return false
+    let root: unknown
+    try {
+      root = JSON.parse(m.value.text)
+    } catch {
+      return false
+    }
+    const found = jsonAtPath(root, path)
+    if (!found.found) return false
+    const target = scalarNumber(found.value)
+    return target !== null && cmpHolds(op, target, expected)
+  }
 }
 
 function jsonAtPath(root: unknown, path: string): { found: true; value: unknown } | { found: false } {
@@ -179,6 +249,16 @@ function prefixIs(text: string, prefix: string): boolean {
   return text.slice(0, prefix.length).toLowerCase() === prefix
 }
 
+// The comparison operator starting at index i, two-character forms first
+// (`>=` before `>`), or null if the char there isn't one.
+function cmpAt(text: string, i: number): { op: CmpOpWire; len: number } | null {
+  const c = text[i]
+  if (c !== '>' && c !== '<') return null
+  const twoChar = text[i + 1] === '='
+  const op: CmpOpWire = c === '>' ? (twoChar ? 'gte' : 'gt') : twoChar ? 'lte' : 'lt'
+  return { op, len: twoChar ? 2 : 1 }
+}
+
 // A `value.`-prefixed expression whose operator hasn't been typed yet —
 // the state right after accepting a field proposal. Timeline holds the
 // filter while this is true (spec "Hold while composing"): applying it as
@@ -204,6 +284,11 @@ export function parseFilterQuery(text: string): ParsedFilterQuery {
     const q = text.slice('key='.length)
     return { api: { filter: 'key_eq', q }, predicate: keyEqPredicate(q) }
   }
+  const keyCmp = prefixIs(text, 'key>') || prefixIs(text, 'key<') ? cmpAt(text, 3) : null
+  if (keyCmp !== null) {
+    const q = text.slice(3 + keyCmp.len)
+    return { api: { filter: 'key_cmp', q, op: keyCmp.op }, predicate: keyCmpPredicate(keyCmp.op, q) }
+  }
   if (prefixIs(text, 'value:')) {
     const q = text.slice('value:'.length)
     return { api: { filter: 'value_contains', q }, predicate: valueContainsPredicate(q) }
@@ -212,15 +297,28 @@ export function parseFilterQuery(text: string): ParsedFilterQuery {
     const q = text.slice('value='.length)
     return { api: { filter: 'value_eq', q }, predicate: valueEqPredicate(q) }
   }
+  const valueCmp = prefixIs(text, 'value>') || prefixIs(text, 'value<') ? cmpAt(text, 5) : null
+  if (valueCmp !== null) {
+    const q = text.slice(5 + valueCmp.len)
+    return { api: { filter: 'value_cmp', q, op: valueCmp.op }, predicate: valueCmpPredicate(valueCmp.op, q) }
+  }
   if (prefixIs(text, 'value.')) {
     const rest = text.slice('value.'.length)
     const opIdx = unquotedOperatorIndex(rest)
     if (opIdx > 0) {
       const path = rest.slice(0, opIdx)
-      const q = rest.slice(opIdx + 1)
-      return rest[opIdx] === ':'
-        ? { api: { filter: 'json_contains', q, path }, predicate: jsonContainsPredicate(path, q) }
-        : { api: { filter: 'json_eq', q, path }, predicate: jsonEqPredicate(path, q) }
+      const ch = rest[opIdx]
+      if (ch === ':') {
+        const q = rest.slice(opIdx + 1)
+        return { api: { filter: 'json_contains', q, path }, predicate: jsonContainsPredicate(path, q) }
+      }
+      if (ch === '=') {
+        const q = rest.slice(opIdx + 1)
+        return { api: { filter: 'json_eq', q, path }, predicate: jsonEqPredicate(path, q) }
+      }
+      const c = cmpAt(rest, opIdx)!
+      const q = rest.slice(opIdx + c.len)
+      return { api: { filter: 'json_cmp', q, path, op: c.op }, predicate: jsonCmpPredicate(path, c.op, q) }
     }
   }
 

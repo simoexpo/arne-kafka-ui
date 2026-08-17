@@ -399,7 +399,13 @@ export function Timeline({
   const withFilter = useCallback((params: TimelinePageParams): TimelinePageParams => {
     const api = activeFilterApiRef.current
     if (!api) return params
-    return { ...params, filter: api.filter, q: api.q, ...(api.path !== undefined ? { path: api.path } : {}) }
+    return {
+      ...params,
+      filter: api.filter,
+      q: api.q,
+      ...(api.path !== undefined ? { path: api.path } : {}),
+      ...(api.op !== undefined ? { op: api.op } : {}),
+    }
   }, [])
 
   const runPage = useCallback(

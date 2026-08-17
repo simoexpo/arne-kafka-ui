@@ -10,7 +10,7 @@ describe('FilterHelp', () => {
     expect(screen.queryByTestId('filter-help-popover')).not.toBeInTheDocument()
     await user.click(screen.getByTestId('filter-help'))
     const pop = screen.getByTestId('filter-help-popover')
-    for (const syntax of ['key:foo', 'key=foo', 'value:foo', 'value=foo', 'value.path.to.field:foo', 'value.path.to.field=42', '"key:foo"']) {
+    for (const syntax of ['key:foo', 'key=foo', 'value:foo', 'value=foo', 'value.path.to.field:foo', 'value.path.to.field=42', 'value.path.to.field>42', '"key:foo"']) {
       expect(pop).toHaveTextContent(syntax)
     }
     expect(pop).toHaveTextContent(/case-insensitive/i)

@@ -47,6 +47,9 @@ type TimelineAnchor = 'latest' | 'beginning' | 'offset' | 'timestamp'
 export type TimelineFilterKind =
   | 'contains' | 'key_contains' | 'value_contains'
   | 'key_eq' | 'value_eq' | 'json_eq' | 'json_contains'
+  | 'key_cmp' | 'value_cmp' | 'json_cmp'
+
+export type CmpOpWire = 'gt' | 'gte' | 'lt' | 'lte'
 
 export interface TimelinePageParams {
   direction: TimelineDirection
@@ -61,6 +64,7 @@ export interface TimelinePageParams {
   filter?: TimelineFilterKind
   q?: string
   path?: string
+  op?: CmpOpWire
 }
 
 export function timelinePage(
@@ -90,6 +94,7 @@ export function timelinePage(
     qs.set('filter', params.filter)
     if (params.q !== undefined) qs.set('q', params.q)
     if (params.path !== undefined) qs.set('path', params.path)
+    if (params.op !== undefined) qs.set('op', params.op)
   }
   return openSse(
     `/api/clusters/${enc(cluster)}/topics/${enc(topic)}/timeline?${qs}`,

@@ -131,6 +131,32 @@ describe('parseFilterQuery', () => {
     expect(isIncompleteFieldExpression('val')).toBe(false)
     expect(isIncompleteFieldExpression('banana')).toBe(false)
   })
+  it('numeric comparisons parse on all three targets, two-char operators first', () => {
+    expect(parseFilterQuery('key>5').api).toEqual({ filter: 'key_cmp', q: '5', op: 'gt' })
+    expect(parseFilterQuery('key>=5').api).toEqual({ filter: 'key_cmp', q: '5', op: 'gte' })
+    expect(parseFilterQuery('value<10').api).toEqual({ filter: 'value_cmp', q: '10', op: 'lt' })
+    expect(parseFilterQuery('value.amount<=100').api).toEqual({ filter: 'json_cmp', q: '100', path: 'amount', op: 'lte' })
+    expect(parseFilterQuery('VALUE.amount>1e2').api).toEqual({ filter: 'json_cmp', q: '1e2', path: 'amount', op: 'gt' })
+  })
+  it('numeric comparison predicates mirror the server: non-numeric target or query is empty', () => {
+    const m = jsonRow('{"amount":100.5,"qty":"42","name":"abc"}')
+    expect(parseFilterQuery('value.amount>100').predicate(m)).toBe(true)
+    expect(parseFilterQuery('value.amount>100.5').predicate(m)).toBe(false)
+    expect(parseFilterQuery('value.amount>=100.5').predicate(m)).toBe(true)
+    expect(parseFilterQuery('value.qty>41').predicate(m)).toBe(true)
+    expect(parseFilterQuery('value.name>1').predicate(m)).toBe(false)
+    expect(parseFilterQuery('value.amount>abc').predicate(m)).toBe(false)
+    const plain = { ...mk(0, 1, 1, '7'), key: { encoding: 'utf8' as const, text: '42', schema_id: null, error: null } }
+    expect(parseFilterQuery('key>41').predicate(plain)).toBe(true)
+    expect(parseFilterQuery('value>=7').predicate(plain)).toBe(true)
+    expect(parseFilterQuery('value<7').predicate(plain)).toBe(false)
+    const quotedPath = jsonRow('{"a.b":5}')
+    expect(parseFilterQuery('value."a.b">4').predicate(quotedPath)).toBe(true)
+  })
+  it('a comparison operator completes an expression for the hold rule', () => {
+    expect(isIncompleteFieldExpression('value.amount>')).toBe(false)
+    expect(isIncompleteFieldExpression('value.amount')).toBe(true)
+  })
   it('decode-error values never content-match', () => {
     const f = parseFilterQuery('AAEC')
     const m = mk(0, 1, 1, 'AAECAw==')

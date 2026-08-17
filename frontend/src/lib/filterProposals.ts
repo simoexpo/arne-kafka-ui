@@ -11,7 +11,7 @@ export function proposalsFor(text: string, fields: readonly string[]): string[] 
   const lower = text.toLowerCase()
   if (lower.startsWith('value.')) {
     const typed = text.slice('value.'.length)
-    if (/[:=]/.test(typed)) return []
+    if (/[:=<>]/.test(typed)) return []
     return fields
       .filter((f) => f.startsWith(typed) && f !== typed)
       .slice(0, MAX_FIELD_ROWS)
