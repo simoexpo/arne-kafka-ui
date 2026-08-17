@@ -44,6 +44,14 @@ pub struct TopicSummary {
 /// name ("fetch watermarks") straight into the tooltip. This gives a plain,
 /// standalone reason: the raw broker-side text for an ordinary failure, or
 /// an honest one-line timeout message — no internal vocabulary either way.
+/// Kafka's own internals are `__`-prefixed; `_schemas` (the schema
+/// registry's storage topic) is formally a regular topic but effectively
+/// internal (owner ruling 2026-08-17) — it hides and skips estimates with
+/// the rest. Other single-underscore names are user topics.
+fn is_internal_topic(name: &str) -> bool {
+    name.starts_with("__") || name == "_schemas"
+}
+
 fn estimate_error_message(err: &KafkaError) -> String {
     match err.rdkafka_error_code() {
         Some(RDKafkaErrorCode::OperationTimedOut) | Some(RDKafkaErrorCode::RequestTimedOut) => {
@@ -91,7 +99,7 @@ pub async fn list_topics(handle: Arc<ClusterHandle>) -> Result<TopicList, ApiErr
             .map_err(|e| error::from_kafka(&handle.name, "fetch metadata", &e))?;
         let mut topics = Vec::new();
         for t in md.topics() {
-            let internal = t.name().starts_with("__");
+            let internal = is_internal_topic(t.name());
             // Internal topics (e.g. `__transaction_state`, which alone can
             // carry 50 partitions on a cluster with transactional producers)
             // are hidden by default and their estimates aren't shown
@@ -499,6 +507,17 @@ pub async fn overview(handle: Arc<ClusterHandle>) -> Result<Overview, ApiError> 
 mod tests {
     use super::*;
     use std::cell::RefCell;
+
+    /// Owner ruling 2026-08-17: `_schemas` (the schema registry's storage
+    /// topic) is formally not internal but effectively is — it hides with
+    /// the `__`-prefixed ones. Other single-underscore names stay visible.
+    #[test]
+    fn schema_registry_storage_topic_counts_as_internal() {
+        assert!(is_internal_topic("__consumer_offsets"));
+        assert!(is_internal_topic("_schemas"));
+        assert!(!is_internal_topic("_my_topic"));
+        assert!(!is_internal_topic("demo-orders"));
+    }
 
     #[test]
     fn all_partitions_succeed_sums_estimate() {
