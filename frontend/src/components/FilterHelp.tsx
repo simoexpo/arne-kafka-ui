@@ -43,19 +43,12 @@ export function FilterHelp() {
           <h3 className="mb-2 text-sm font-medium text-zinc-500 dark:text-zinc-400">Filter syntax</h3>
           <dl className="space-y-1.5">
             <div><dt className="inline font-mono text-sky-800 dark:text-sky-300">anything</dt><dd className="inline text-zinc-600 dark:text-zinc-400"> — messages whose key or value contains it</dd></div>
-            <div><dt className="inline font-mono text-sky-800 dark:text-sky-300">key:foo</dt><dd className="inline text-zinc-600 dark:text-zinc-400"> — key contains foo</dd></div>
-            <div><dt className="inline font-mono text-sky-800 dark:text-sky-300">key=foo</dt><dd className="inline text-zinc-600 dark:text-zinc-400"> — key equals foo</dd></div>
-            <div><dt className="inline font-mono text-sky-800 dark:text-sky-300">value:foo</dt><dd className="inline text-zinc-600 dark:text-zinc-400"> — value contains foo</dd></div>
-            <div><dt className="inline font-mono text-sky-800 dark:text-sky-300">value=foo</dt><dd className="inline text-zinc-600 dark:text-zinc-400"> — value equals foo (JSON compared by content)</dd></div>
-            <div><dt className="inline font-mono text-sky-800 dark:text-sky-300">value.path.to.field:foo</dt><dd className="inline text-zinc-600 dark:text-zinc-400"> — that field contains foo</dd></div>
-            <div><dt className="inline font-mono text-sky-800 dark:text-sky-300">value.path.to.field=42</dt><dd className="inline text-zinc-600 dark:text-zinc-400"> — that field equals 42</dd></div>
-            <div><dt className="inline font-mono text-sky-800 dark:text-sky-300">value.path.to.field!=42</dt><dd className="inline text-zinc-600 dark:text-zinc-400"> — that field differs (also key!= and value!=); a field we can't read never matches</dd></div>
-            <div><dt className="inline font-mono text-sky-800 dark:text-sky-300">value.path.to.field&gt;42</dt><dd className="inline text-zinc-600 dark:text-zinc-400"> — numeric compare (&gt; &gt;= &lt; &lt;=, also on key and value); non-numbers never match</dd></div>
-            <div><dt className="inline font-mono text-sky-800 dark:text-sky-300">"key:foo"</dt><dd className="inline text-zinc-600 dark:text-zinc-400"> — search the literal text key:foo</dd></div>
+            <div><dt className="inline font-mono text-sky-800 dark:text-sky-300">key:foo · value=bar · value.path.to.field&gt;42</dt><dd className="inline text-zinc-600 dark:text-zinc-400"> — a target combined with an operator</dd></div>
+            <div><dt className="inline font-mono text-sky-800 dark:text-sky-300">: = != &gt; &gt;= &lt; &lt;=</dt><dd className="inline text-zinc-600 dark:text-zinc-400"> — contains · equals (JSON compared by content) · differs · numeric compare</dd></div>
             <div><dt className="inline font-mono text-sky-800 dark:text-sky-300">value."field.with.dots"=x</dt><dd className="inline text-zinc-600 dark:text-zinc-400"> — quote a field name containing . : or =</dd></div>
+            <div><dt className="inline font-mono text-sky-800 dark:text-sky-300">"key:foo"</dt><dd className="inline text-zinc-600 dark:text-zinc-400"> — search the literal text (the outer quotes are always stripped)</dd></div>
           </dl>
-          <p className="mt-2 text-zinc-500">All matching is case-insensitive.</p>
-          <p className="mt-1 text-zinc-500">Text that itself starts and ends with a quote can't be searched literally — the outer quotes are always stripped.</p>
+          <p className="mt-2 text-zinc-500">All matching is case-insensitive. Content that can't be read — undecodable values, missing fields, non-numbers in comparisons — never matches.</p>
         </div>
       )}
     </div>
