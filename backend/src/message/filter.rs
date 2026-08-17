@@ -8,6 +8,9 @@ pub enum Filter {
     ValueEquals { text: String, json: Option<serde_json::Value> },
     JsonPathEquals { path: String, value: String },
     JsonPathContains { path: String, value: String },
+    KeyCompare { op: CmpOp, value: Option<f64> },
+    ValueCompare { op: CmpOp, value: Option<f64> },
+    JsonPathCompare { path: String, op: CmpOp, value: Option<f64> },
     /// Case-insensitive contains on key text OR value text — the bare-text
     /// filter box of the timeline design (`filter=contains&q=...`). The
     /// value side keeps the same decode-error exclusion as `ValueContains`
@@ -21,8 +24,63 @@ pub enum Filter {
     Contains(String),
 }
 
+/// Numeric comparison operators (owner ruling 2026-08-17). Comparisons use
+/// the shared double model; a non-numeric target or query matches nothing.
+#[derive(Debug, Clone, Copy)]
+pub enum CmpOp {
+    Gt,
+    Gte,
+    Lt,
+    Lte,
+}
+
+impl CmpOp {
+    fn parse(op: Option<&str>, kind: &str) -> Result<CmpOp, String> {
+        match op {
+            Some("gt") => Ok(CmpOp::Gt),
+            Some("gte") => Ok(CmpOp::Gte),
+            Some("lt") => Ok(CmpOp::Lt),
+            Some("lte") => Ok(CmpOp::Lte),
+            Some(other) => Err(format!("filter {kind} does not support op '{other}'")),
+            None => Err(format!("filter {kind} requires an op parameter")),
+        }
+    }
+
+    fn holds(self, target: f64, expected: f64) -> bool {
+        match self {
+            CmpOp::Gt => target > expected,
+            CmpOp::Gte => target >= expected,
+            CmpOp::Lt => target < expected,
+            CmpOp::Lte => target <= expected,
+        }
+    }
+}
+
+/// "A number" is the JSON number grammar — the frontend runs JSON.parse on
+/// its side, so using the JSON parser here keeps the mirror exact by
+/// construction (`1e3` parses; `""`, `+42`, `0x2` don't).
+fn json_number(text: &str) -> Option<f64> {
+    serde_json::from_str::<f64>(text).ok()
+}
+
+/// The numeric reading of a JSON scalar: a number itself, or a string that
+/// parses as one. Bools/null/objects/arrays have none.
+fn scalar_number(v: &serde_json::Value) -> Option<f64> {
+    match v {
+        serde_json::Value::Number(n) => n.as_f64(),
+        serde_json::Value::String(s) => json_number(s),
+        _ => None,
+    }
+}
+
+/// The numeric reading of a whole value text: parsed as JSON it is a
+/// number, or a string parsing as one (raw text like `42` IS valid JSON).
+fn value_number(text: &str) -> Option<f64> {
+    scalar_number(&serde_json::from_str::<serde_json::Value>(text).ok()?)
+}
+
 impl Filter {
-    pub fn parse(kind: &str, q: &str, path: Option<&str>) -> Result<Filter, String> {
+    pub fn parse(kind: &str, q: &str, path: Option<&str>, op: Option<&str>) -> Result<Filter, String> {
         match kind {
             "key_eq" => Ok(Filter::KeyEquals(q.to_lowercase())),
             "key_contains" => Ok(Filter::KeyContains(q.to_lowercase())),
@@ -36,6 +94,12 @@ impl Filter {
             "json_contains" => path
                 .map(|p| Filter::JsonPathContains { path: p.to_string(), value: q.to_lowercase() })
                 .ok_or_else(|| "filter json_contains requires a path parameter".to_string()),
+            "key_cmp" => Ok(Filter::KeyCompare { op: CmpOp::parse(op, kind)?, value: json_number(q) }),
+            "value_cmp" => Ok(Filter::ValueCompare { op: CmpOp::parse(op, kind)?, value: json_number(q) }),
+            "json_cmp" => {
+                let p = path.ok_or_else(|| "filter json_cmp requires a path parameter".to_string())?;
+                Ok(Filter::JsonPathCompare { path: p.to_string(), op: CmpOp::parse(op, kind)?, value: json_number(q) })
+            }
             other => Err(format!("unknown filter kind '{other}'")),
         }
     }
@@ -144,6 +208,27 @@ pub fn matches(filter: &Filter, msg: &MessageOut) -> bool {
                     .and_then(|root| json_at_path(&root, path).and_then(scalar_text))
                     .is_some_and(|found| found.contains(value.as_str()))
         }),
+        Filter::KeyCompare { op, value } => value.is_some_and(|expected| {
+            msg.key
+                .as_ref()
+                .and_then(|k| json_number(&k.text))
+                .is_some_and(|target| op.holds(target, expected))
+        }),
+        Filter::ValueCompare { op, value } => value.is_some_and(|expected| {
+            msg.value
+                .as_ref()
+                .filter(|v| v.encoding != Encoding::DecodeError)
+                .and_then(|v| value_number(&v.text))
+                .is_some_and(|target| op.holds(target, expected))
+        }),
+        Filter::JsonPathCompare { path, op, value } => value.is_some_and(|expected| {
+            msg.value
+                .as_ref()
+                .filter(|v| v.encoding != Encoding::DecodeError)
+                .and_then(|v| serde_json::from_str::<serde_json::Value>(&v.text).ok())
+                .and_then(|root| json_at_path(&root, path).and_then(scalar_number))
+                .is_some_and(|target| op.holds(target, expected))
+        }),
         Filter::Contains(q) => {
             let key_hit = msg.key.as_ref().is_some_and(|k| k.text.to_lowercase().contains(q.as_str()));
             let value_hit = msg.value.as_ref().is_some_and(|v| {
@@ -225,56 +310,56 @@ mod tests {
 
     #[test]
     fn parse_validates() {
-        assert!(matches!(Filter::parse("key_eq", "k", None), Ok(Filter::KeyEquals(_))));
-        assert!(matches!(Filter::parse("json_eq", "42", Some("a.b")), Ok(Filter::JsonPathEquals { .. })));
-        assert!(matches!(Filter::parse("contains", "x", None), Ok(Filter::Contains(_))));
-        assert!(Filter::parse("json_eq", "42", None).is_err());
-        assert!(Filter::parse("sideways", "x", None).is_err());
+        assert!(matches!(Filter::parse("key_eq", "k", None, None), Ok(Filter::KeyEquals(_))));
+        assert!(matches!(Filter::parse("json_eq", "42", Some("a.b"), None), Ok(Filter::JsonPathEquals { .. })));
+        assert!(matches!(Filter::parse("contains", "x", None, None), Ok(Filter::Contains(_))));
+        assert!(Filter::parse("json_eq", "42", None, None).is_err());
+        assert!(Filter::parse("sideways", "x", None, None).is_err());
     }
 
     #[test]
     fn key_filters_are_case_insensitive() {
         let m = msg(Some("Order-42"), "x", Encoding::Utf8);
-        assert!(matches(&Filter::parse("key_eq", "ORDER-42", None).unwrap(), &m));
-        assert!(matches(&Filter::parse("key_contains", "oRdEr", None).unwrap(), &m));
-        assert!(!matches(&Filter::parse("key_eq", "order-4", None).unwrap(), &m));
+        assert!(matches(&Filter::parse("key_eq", "ORDER-42", None, None).unwrap(), &m));
+        assert!(matches(&Filter::parse("key_contains", "oRdEr", None, None).unwrap(), &m));
+        assert!(!matches(&Filter::parse("key_eq", "order-4", None, None).unwrap(), &m));
     }
 
     #[test]
     fn value_contains_is_case_insensitive() {
         let m = msg(None, "Hello KAFKA World", Encoding::Utf8);
-        assert!(matches(&Filter::parse("value_contains", "kafka", None).unwrap(), &m));
-        assert!(!matches(&Filter::parse("value_contains", "rabbit", None).unwrap(), &m));
+        assert!(matches(&Filter::parse("value_contains", "kafka", None, None).unwrap(), &m));
+        assert!(!matches(&Filter::parse("value_contains", "rabbit", None, None).unwrap(), &m));
     }
 
     #[test]
     fn json_eq_is_case_insensitive_on_strings_exact_on_numbers() {
         let m = msg(None, r#"{"user":{"name":"Alice","id":42}}"#, Encoding::Json);
-        assert!(matches(&Filter::parse("json_eq", "ALICE", Some("user.name")).unwrap(), &m));
-        assert!(matches(&Filter::parse("json_eq", "42", Some("user.id")).unwrap(), &m));
-        assert!(!matches(&Filter::parse("json_eq", "43", Some("user.id")).unwrap(), &m));
+        assert!(matches(&Filter::parse("json_eq", "ALICE", Some("user.name"), None).unwrap(), &m));
+        assert!(matches(&Filter::parse("json_eq", "42", Some("user.id"), None).unwrap(), &m));
+        assert!(!matches(&Filter::parse("json_eq", "43", Some("user.id"), None).unwrap(), &m));
     }
 
     #[test]
     fn value_eq_plain_text_is_case_insensitive_equality() {
         let m = msg(None, "Hello World", Encoding::Utf8);
-        assert!(matches(&Filter::parse("value_eq", "hello world", None).unwrap(), &m));
-        assert!(!matches(&Filter::parse("value_eq", "hello", None).unwrap(), &m));
+        assert!(matches(&Filter::parse("value_eq", "hello world", None, None).unwrap(), &m));
+        assert!(!matches(&Filter::parse("value_eq", "hello", None, None).unwrap(), &m));
     }
 
     #[test]
     fn value_eq_json_is_semantic_whitespace_and_key_order_immune() {
         let m = msg(None, r#"{"a": 1, "b": {"c": "X"}}"#, Encoding::Json);
-        assert!(matches(&Filter::parse("value_eq", r#"{"b":{"c":"x"},"a":1}"#, None).unwrap(), &m));
-        assert!(!matches(&Filter::parse("value_eq", r#"{"b":{"c":"x"},"a":2}"#, None).unwrap(), &m));
+        assert!(matches(&Filter::parse("value_eq", r#"{"b":{"c":"x"},"a":1}"#, None, None).unwrap(), &m));
+        assert!(!matches(&Filter::parse("value_eq", r#"{"b":{"c":"x"},"a":2}"#, None, None).unwrap(), &m));
     }
 
     #[test]
     fn value_eq_json_needle_against_non_json_value_falls_back_to_text() {
         let m = msg(None, "not json", Encoding::Utf8);
-        assert!(!matches(&Filter::parse("value_eq", r#"{"a":1}"#, None).unwrap(), &m));
+        assert!(!matches(&Filter::parse("value_eq", r#"{"a":1}"#, None, None).unwrap(), &m));
         let m2 = msg(None, r#"{"a":1}"#, Encoding::Utf8);
-        assert!(matches(&Filter::parse("value_eq", r#"{"a": 1}"#, None).unwrap(), &m2));
+        assert!(matches(&Filter::parse("value_eq", r#"{"a": 1}"#, None, None).unwrap(), &m2));
     }
 
     /// serde's own `Number` equality is variant-exact (`1.0 != 1`), but the
@@ -284,8 +369,8 @@ mod tests {
     #[test]
     fn value_eq_json_numbers_compare_as_doubles_like_the_client() {
         let m = msg(None, r#"{"qty":1}"#, Encoding::Json);
-        assert!(matches(&Filter::parse("value_eq", r#"{"qty":1.0}"#, None).unwrap(), &m));
-        assert!(!matches(&Filter::parse("value_eq", r#"{"qty":2}"#, None).unwrap(), &m));
+        assert!(matches(&Filter::parse("value_eq", r#"{"qty":1.0}"#, None, None).unwrap(), &m));
+        assert!(!matches(&Filter::parse("value_eq", r#"{"qty":2}"#, None, None).unwrap(), &m));
     }
 
     /// Same double model for path scalars: `100.0` stringifies as "100"
@@ -295,38 +380,38 @@ mod tests {
     #[test]
     fn json_path_scalars_stringify_like_the_client_double_model() {
         let m = msg(None, r#"{"amount":100.0,"id":12345678901234567890}"#, Encoding::Json);
-        assert!(matches(&Filter::parse("json_eq", "100", Some("amount")).unwrap(), &m));
-        assert!(!matches(&Filter::parse("json_eq", "100.0", Some("amount")).unwrap(), &m));
-        assert!(matches(&Filter::parse("json_eq", "12345678901234567000", Some("id")).unwrap(), &m));
+        assert!(matches(&Filter::parse("json_eq", "100", Some("amount"), None).unwrap(), &m));
+        assert!(!matches(&Filter::parse("json_eq", "100.0", Some("amount"), None).unwrap(), &m));
+        assert!(matches(&Filter::parse("json_eq", "12345678901234567000", Some("id"), None).unwrap(), &m));
     }
 
     #[test]
     fn value_eq_never_matches_decode_error() {
         let m = msg(None, "blob", Encoding::DecodeError);
-        assert!(!matches(&Filter::parse("value_eq", "blob", None).unwrap(), &m));
+        assert!(!matches(&Filter::parse("value_eq", "blob", None, None).unwrap(), &m));
     }
 
     #[test]
     fn json_contains_matches_scalar_substring_case_insensitively() {
         let m = msg(None, r#"{"user":{"name":"Alice Smith","id":42}}"#, Encoding::Json);
-        assert!(matches(&Filter::parse("json_contains", "SMITH", Some("user.name")).unwrap(), &m));
-        assert!(matches(&Filter::parse("json_contains", "4", Some("user.id")).unwrap(), &m));
-        assert!(!matches(&Filter::parse("json_contains", "bob", Some("user.name")).unwrap(), &m));
+        assert!(matches(&Filter::parse("json_contains", "SMITH", Some("user.name"), None).unwrap(), &m));
+        assert!(matches(&Filter::parse("json_contains", "4", Some("user.id"), None).unwrap(), &m));
+        assert!(!matches(&Filter::parse("json_contains", "bob", Some("user.name"), None).unwrap(), &m));
     }
 
     #[test]
     fn json_contains_empty_needle_means_field_exists_as_scalar() {
         let m = msg(None, r#"{"a":{"b":1},"c":"x"}"#, Encoding::Json);
-        assert!(matches(&Filter::parse("json_contains", "", Some("c")).unwrap(), &m));
-        assert!(!matches(&Filter::parse("json_contains", "", Some("a")).unwrap(), &m)); // object, not scalar
-        assert!(!matches(&Filter::parse("json_contains", "", Some("missing")).unwrap(), &m));
+        assert!(matches(&Filter::parse("json_contains", "", Some("c"), None).unwrap(), &m));
+        assert!(!matches(&Filter::parse("json_contains", "", Some("a"), None).unwrap(), &m)); // object, not scalar
+        assert!(!matches(&Filter::parse("json_contains", "", Some("missing"), None).unwrap(), &m));
     }
 
     #[test]
     fn json_contains_requires_path_and_never_matches_decode_error() {
-        assert!(Filter::parse("json_contains", "x", None).is_err());
+        assert!(Filter::parse("json_contains", "x", None, None).is_err());
         let m = msg(None, r#"{"a":"x"}"#, Encoding::DecodeError);
-        assert!(!matches(&Filter::parse("json_contains", "x", Some("a")).unwrap(), &m));
+        assert!(!matches(&Filter::parse("json_contains", "x", Some("a"), None).unwrap(), &m));
     }
 
     /// Owner ruling 2026-08-17: a double-quoted run inside a path is part
@@ -335,10 +420,10 @@ mod tests {
     #[test]
     fn quoted_path_segments_address_fields_with_special_characters() {
         let m = msg(None, r#"{"a.b":1,"x":{"b=c":"hit","d:e":[7]}}"#, Encoding::Json);
-        assert!(matches(&Filter::parse("json_eq", "1", Some(r#""a.b""#)).unwrap(), &m));
-        assert!(matches(&Filter::parse("json_eq", "hit", Some(r#"x."b=c""#)).unwrap(), &m));
-        assert!(matches(&Filter::parse("json_eq", "7", Some(r#"x."d:e".0"#)).unwrap(), &m));
-        assert!(!matches(&Filter::parse("json_eq", "1", Some(r#""a.c""#)).unwrap(), &m));
+        assert!(matches(&Filter::parse("json_eq", "1", Some(r#""a.b""#), None).unwrap(), &m));
+        assert!(matches(&Filter::parse("json_eq", "hit", Some(r#"x."b=c""#), None).unwrap(), &m));
+        assert!(matches(&Filter::parse("json_eq", "7", Some(r#"x."d:e".0"#), None).unwrap(), &m));
+        assert!(!matches(&Filter::parse("json_eq", "1", Some(r#""a.c""#), None).unwrap(), &m));
     }
 
     /// An unclosed quote runs to the end of the path; quoting is
@@ -346,8 +431,55 @@ mod tests {
     #[test]
     fn quoted_path_edges() {
         let m = msg(None, r#"{"a.b":1,"list":[5]}"#, Encoding::Json);
-        assert!(matches(&Filter::parse("json_eq", "1", Some(r#""a.b"#)).unwrap(), &m));
-        assert!(matches(&Filter::parse("json_eq", "5", Some(r#"list."0""#)).unwrap(), &m));
+        assert!(matches(&Filter::parse("json_eq", "1", Some(r#""a.b"#), None).unwrap(), &m));
+        assert!(matches(&Filter::parse("json_eq", "5", Some(r#"list."0""#), None).unwrap(), &m));
+    }
+
+    fn cmp(kind: &str, q: &str, path: Option<&str>, op: &str) -> Filter {
+        Filter::parse(kind, q, path, Some(op)).unwrap()
+    }
+
+    /// Owner ruling 2026-08-17: `>`/`>=`/`<`/`<=` compare numbers on all
+    /// three targets; a non-numeric target OR query matches nothing.
+    #[test]
+    fn numeric_comparisons_on_field_scalars() {
+        let m = msg(None, r#"{"amount":100.5,"qty":"42","name":"abc"}"#, Encoding::Json);
+        assert!(matches(&cmp("json_cmp", "100", Some("amount"), "gt"), &m));
+        assert!(!matches(&cmp("json_cmp", "100.5", Some("amount"), "gt"), &m));
+        assert!(matches(&cmp("json_cmp", "100.5", Some("amount"), "gte"), &m));
+        assert!(matches(&cmp("json_cmp", "101", Some("amount"), "lt"), &m));
+        assert!(matches(&cmp("json_cmp", "1e2", Some("amount"), "gt"), &m));
+        // A string field parsable as a number counts as that number.
+        assert!(matches(&cmp("json_cmp", "41", Some("qty"), "gt"), &m));
+        assert!(matches(&cmp("json_cmp", "42", Some("qty"), "lte"), &m));
+        // Non-numeric target or query: honest empty, never an error.
+        assert!(!matches(&cmp("json_cmp", "1", Some("name"), "gt"), &m));
+        assert!(!matches(&cmp("json_cmp", "abc", Some("amount"), "gt"), &m));
+        assert!(!matches(&cmp("json_cmp", "", Some("amount"), "gt"), &m));
+    }
+
+    #[test]
+    fn numeric_comparisons_on_key_and_whole_value() {
+        let m = msg(Some("42"), "7", Encoding::Utf8);
+        assert!(matches(&cmp("key_cmp", "41", None, "gt"), &m));
+        assert!(!matches(&cmp("key_cmp", "42", None, "lt"), &m));
+        assert!(matches(&cmp("value_cmp", "7", None, "gte"), &m));
+        assert!(!matches(&cmp("value_cmp", "7", None, "lt"), &m));
+        // A JSON-string value parsable as a number counts.
+        let quoted = msg(None, r#""42""#, Encoding::Json);
+        assert!(matches(&cmp("value_cmp", "41", None, "gt"), &quoted));
+        // Non-numeric key/value: empty.
+        let text = msg(Some("order-42"), "not a number", Encoding::Utf8);
+        assert!(!matches(&cmp("key_cmp", "1", None, "gt"), &text));
+        assert!(!matches(&cmp("value_cmp", "1", None, "gt"), &text));
+    }
+
+    #[test]
+    fn comparisons_require_op_and_reject_unknown_op_and_skip_decode_errors() {
+        assert!(Filter::parse("json_cmp", "1", Some("a"), None).is_err());
+        assert!(Filter::parse("key_cmp", "1", None, Some("sideways")).is_err());
+        let m = msg(None, "42", Encoding::DecodeError);
+        assert!(!matches(&cmp("value_cmp", "1", None, "gt"), &m));
     }
 
     #[test]
@@ -370,8 +502,8 @@ mod tests {
         // holds its needle already lower-cased (see its own doc comment), so
         // a query built any other way isn't guaranteed to be case-insensitive.
         let m = msg(Some("Order-42"), "Hello KAFKA World", Encoding::Utf8);
-        assert!(matches(&Filter::parse("contains", "ORDER", None).unwrap(), &m));
-        assert!(matches(&Filter::parse("contains", "kafka", None).unwrap(), &m));
+        assert!(matches(&Filter::parse("contains", "ORDER", None, None).unwrap(), &m));
+        assert!(matches(&Filter::parse("contains", "kafka", None, None).unwrap(), &m));
     }
 
     #[test]

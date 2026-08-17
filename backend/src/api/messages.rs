@@ -36,6 +36,7 @@ pub struct TimelineParams {
     pub filter: Option<String>,
     pub q: Option<String>,
     pub path: Option<String>,
+    pub op: Option<String>,
 }
 
 /// The wire shape actually extracted from the query string — every
@@ -63,6 +64,7 @@ pub struct RawTimelineParams {
     pub filter: Option<String>,
     pub q: Option<String>,
     pub path: Option<String>,
+    pub op: Option<String>,
 }
 
 /// Parses one optional numeric string field, producing a precise
@@ -92,6 +94,7 @@ fn parse_raw(raw: &RawTimelineParams) -> Result<TimelineParams, ApiError> {
         filter: raw.filter.clone(),
         q: raw.q.clone(),
         path: raw.path.clone(),
+        op: raw.op.clone(),
     })
 }
 
@@ -155,7 +158,7 @@ fn parse_filter(params: &TimelineParams) -> Result<Option<Filter>, ApiError> {
     match &params.filter {
         Some(kind) => {
             let q = params.q.as_deref().ok_or_else(|| ApiError::bad_request("filter requires q"))?;
-            Ok(Some(Filter::parse(kind, q, params.path.as_deref()).map_err(ApiError::bad_request)?))
+            Ok(Some(Filter::parse(kind, q, params.path.as_deref(), params.op.as_deref()).map_err(ApiError::bad_request)?))
         }
         None => Ok(None),
     }
@@ -322,6 +325,7 @@ mod tests {
             filter: None,
             q: None,
             path: None,
+            op: None,
         }
     }
 
