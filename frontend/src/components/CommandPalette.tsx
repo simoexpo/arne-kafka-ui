@@ -92,7 +92,7 @@ export function CommandPalette({ cluster }: { cluster: string }) {
       label: t.name, kind: 'topic' as const, to: `/c/${enc(cluster)}/topics/${enc(t.name)}`,
     })),
     ...(groups.data?.groups ?? []).map((g) => ({
-      label: g.group_id, kind: 'group' as const, to: `/c/${enc(cluster)}/groups/${enc(g.group_id)}`,
+      label: g.group_id, kind: 'group' as const, to: `/c/${enc(cluster)}/consumers/${enc(g.group_id)}`,
     })),
   ]
   return (

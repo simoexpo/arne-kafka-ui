@@ -55,6 +55,6 @@ export function GroupDetailView({ cluster, group }: { cluster: string; group: st
 }
 
 export function GroupDetailPage() {
-  const { cluster, group } = useParams({ from: '/c/$cluster/groups/$group' })
+  const { cluster, group } = useParams({ from: '/c/$cluster/consumers/$group' })
   return <GroupDetailView cluster={cluster} group={group} />
 }

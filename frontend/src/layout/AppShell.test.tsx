@@ -16,7 +16,7 @@ describe('Sidebar', () => {
     })
     expect(screen.getByRole('link', { name: /overview/i })).toHaveAttribute('href', '/c/prod/overview')
     expect(screen.getByRole('link', { name: /topics/i })).toHaveAttribute('href', '/c/prod/topics')
-    expect(screen.getByRole('link', { name: /groups/i })).toHaveAttribute('href', '/c/prod/groups')
+    expect(screen.getByRole('link', { name: /consumers/i })).toHaveAttribute('href', '/c/prod/consumers')
     expect(screen.getByText('prod')).toBeInTheDocument()
     // switcher lists the other cluster as a link preserving the section
     expect(screen.getByRole('link', { name: /dead/i })).toHaveAttribute('href', '/c/dead/topics')
@@ -59,12 +59,12 @@ describe('sectionFromPathname', () => {
     expect(sectionFromPathname('/c/prod/overview', 'prod')).toBe('overview')
   })
 
-  it('maps a topic detail path whose slug contains "groups" to topics, not groups', () => {
+  it('maps a topic detail path whose slug contains "groups" to topics, not consumers', () => {
     expect(sectionFromPathname('/c/prod/topics/groups-events', 'prod')).toBe('topics')
   })
 
-  it('maps a group detail path to groups', () => {
-    expect(sectionFromPathname('/c/prod/groups/billing', 'prod')).toBe('groups')
+  it('maps a group detail path to consumers', () => {
+    expect(sectionFromPathname('/c/prod/consumers/billing', 'prod')).toBe('consumers')
   })
 })
 

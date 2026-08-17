@@ -18,12 +18,12 @@ describe('GroupsView', () => {
       ],
       as_of: Date.now(),
     })
-    await renderWithRouter(<GroupsView cluster="prod" />, { initialPath: '/c/prod/groups/billing' })
+    await renderWithRouter(<GroupsView cluster="prod" />, { initialPath: '/c/prod/consumers/billing' })
     expect(await screen.findByText('billing')).toBeInTheDocument()
     expect(screen.getByText('Stable')).toBeInTheDocument()
     expect(screen.getByText('42')).toBeInTheDocument()
     const link = screen.getByRole('link', { name: /billing/ })
-    expect(link).toHaveAttribute('href', '/c/prod/groups/billing')
+    expect(link).toHaveAttribute('href', '/c/prod/consumers/billing')
     // router-rendered <Link>, not a plain <a> full-reload anchor: the router
     // marks the link matching the current location as active itself
     expect(link).toHaveAttribute('data-status', 'active')
@@ -41,8 +41,8 @@ describe('GroupsView', () => {
     expect(await screen.findByText('billing team')).toBeInTheDocument()
     expect(screen.getByRole('link', { name: 'billing team' })).toHaveAttribute(
       'href',
-      '/c/prod/groups/billing%20team',
+      '/c/prod/consumers/billing%20team',
     )
-    expect(screen.getByRole('link', { name: 'a/b' })).toHaveAttribute('href', '/c/prod/groups/a%2Fb')
+    expect(screen.getByRole('link', { name: 'a/b' })).toHaveAttribute('href', '/c/prod/consumers/a%2Fb')
   })
 })

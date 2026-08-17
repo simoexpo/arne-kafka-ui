@@ -33,7 +33,7 @@ export function GroupsView({ cluster }: { cluster: string }) {
               <tr key={g.group_id} className="border-t border-zinc-100 dark:border-zinc-800">
                 <td className="py-1.5">
                   <Link
-                    to="/c/$cluster/groups/$group"
+                    to="/c/$cluster/consumers/$group"
                     params={{ cluster, group: g.group_id }}
                     className="font-mono text-blue-600 hover:underline dark:text-blue-400"
                   >
@@ -54,6 +54,6 @@ export function GroupsView({ cluster }: { cluster: string }) {
 }
 
 export function GroupsPage() {
-  const { cluster } = useParams({ from: '/c/$cluster/groups' })
+  const { cluster } = useParams({ from: '/c/$cluster/consumers' })
   return <GroupsView cluster={cluster} />
 }
