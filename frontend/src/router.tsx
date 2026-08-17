@@ -9,6 +9,7 @@ import { TopicDetailPage } from './pages/TopicDetailPage'
 import { GroupsPage } from './pages/GroupsPage'
 import { GroupDetailPage } from './pages/GroupDetailPage'
 import { SchemaPage } from './pages/SchemaPage'
+import { SchemaByIdPage } from './pages/SchemaByIdPage'
 import { SubjectDetailPage } from './pages/SubjectDetailPage'
 
 const rootRoute = createRootRoute({ component: AppShell })
@@ -21,10 +22,11 @@ const groupsRoute = createRoute({ getParentRoute: () => clusterRoute, path: 'con
 const groupDetailRoute = createRoute({ getParentRoute: () => clusterRoute, path: 'consumers/$group', component: GroupDetailPage })
 const schemaRoute = createRoute({ getParentRoute: () => clusterRoute, path: 'schemas', component: SchemaPage })
 const subjectDetailRoute = createRoute({ getParentRoute: () => clusterRoute, path: 'schemas/$subject', component: SubjectDetailPage })
+const schemaByIdRoute = createRoute({ getParentRoute: () => clusterRoute, path: 'schemas/by-id/$id', component: SchemaByIdPage })
 
 const routeTree = rootRoute.addChildren([
   indexRoute,
-  clusterRoute.addChildren([overviewRoute, topicsRoute, topicDetailRoute, groupsRoute, groupDetailRoute, schemaRoute, subjectDetailRoute]),
+  clusterRoute.addChildren([overviewRoute, topicsRoute, topicDetailRoute, groupsRoute, groupDetailRoute, schemaRoute, subjectDetailRoute, schemaByIdRoute]),
 ])
 
 export const router = createRouter({ routeTree })

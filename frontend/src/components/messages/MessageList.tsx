@@ -69,9 +69,11 @@ export const MessageList = forwardRef<
     // See MessageRow's own doc comment for why it's a controlled component.
     expandedKeys?: ReadonlySet<string>
     onToggleExpand?: (partition: number, offset: number) => void
+    // Enables the schema-id link in expanded payload headings.
+    cluster?: string
   }
 >(function MessageList(
-  { messages, onScroll, jumpTarget, expandedKeys = NO_EXPANDED_KEYS, onToggleExpand = noopToggleExpand },
+  { messages, onScroll, jumpTarget, expandedKeys = NO_EXPANDED_KEYS, onToggleExpand = noopToggleExpand, cluster },
   ref,
 ) {
   const parentRef = useRef<HTMLDivElement>(null)
@@ -177,6 +179,7 @@ export const MessageList = forwardRef<
                 isJumpTarget={isJumpTarget}
                 expanded={expandedKeys.has(key)}
                 onToggle={() => onToggleExpand(m.partition, m.offset)}
+                cluster={cluster}
               />
             </div>
           )

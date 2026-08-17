@@ -1,5 +1,5 @@
 import type {
-  ClustersResponse, GroupDetail, GroupList, Overview, RegistrySettings, SubjectDetail, SubjectList, SubjectUsageList,
+  ClustersResponse, GroupDetail, GroupList, Overview, CompatibilityLevel, CompatibilityResult, RegistrySettings, SchemaIdSubject, SubjectDetail, SubjectList, SubjectStrategyInfo,
   Throughput, TopicConsumers, TopicDetail, TopicList,
 } from './types'
 
@@ -20,13 +20,18 @@ export class ApiError extends Error {
 
 const REQUEST_TIMEOUT_MS = 15_000
 
-export async function fetchJson<T>(path: string, callerSignal?: AbortSignal): Promise<T> {
+export async function fetchJson<T>(path: string, callerSignal?: AbortSignal, payload?: unknown): Promise<T> {
   const signal = callerSignal
     ? AbortSignal.any([callerSignal, AbortSignal.timeout(REQUEST_TIMEOUT_MS)])
     : AbortSignal.timeout(REQUEST_TIMEOUT_MS)
   let res: Response
   try {
-    res = await fetch(path, { signal })
+    res = await fetch(
+      path,
+      payload === undefined
+        ? { signal }
+        : { signal, method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(payload) },
+    )
   } catch (err) {
     // A timeout fires as a DOMException named 'TimeoutError' — map it to a
     // plain, readable Error so panels can render something meaningful.
@@ -66,6 +71,13 @@ export const getGroups = (c: string, signal?: AbortSignal) => fetchJson<GroupLis
 export const getGroupDetail = (c: string, g: string, signal?: AbortSignal) => fetchJson<GroupDetail>(`/api/clusters/${enc(c)}/groups/${enc(g)}`, signal)
 export const getSubjects = (c: string, signal?: AbortSignal) => fetchJson<SubjectList>(`/api/clusters/${enc(c)}/subjects`, signal)
 export const getRegistrySettings = (c: string, signal?: AbortSignal) => fetchJson<RegistrySettings>(`/api/clusters/${enc(c)}/schema-registry`, signal)
-export const getSubjectUsage = (c: string, s: string, signal?: AbortSignal) => fetchJson<SubjectUsageList>(`/api/clusters/${enc(c)}/subjects/${enc(s)}/usage`, signal)
 export const getSubjectDetail = (c: string, s: string, version?: number, signal?: AbortSignal) =>
   fetchJson<SubjectDetail>(`/api/clusters/${enc(c)}/subjects/${enc(s)}${version !== undefined ? `?version=${version}` : ''}`, signal)
+export const getSubjectStrategy = (c: string, s: string, signal?: AbortSignal) =>
+  fetchJson<SubjectStrategyInfo>(`/api/clusters/${enc(c)}/subjects/${enc(s)}/strategy`, signal)
+export const getSubjectOfId = (c: string, id: number, signal?: AbortSignal) =>
+  fetchJson<SchemaIdSubject>(`/api/clusters/${enc(c)}/schema-ids/${id}`, signal)
+export const getCompatibilityLevel = (c: string, s: string, signal?: AbortSignal) =>
+  fetchJson<CompatibilityLevel>(`/api/clusters/${enc(c)}/subjects/${enc(s)}/compatibility`, signal)
+export const checkCompatibility = (c: string, s: string, schema: string, schemaType: string) =>
+  fetchJson<CompatibilityResult>(`/api/clusters/${enc(c)}/subjects/${enc(s)}/compatibility`, undefined, { schema, schema_type: schemaType })

@@ -1,8 +1,7 @@
 import { useState } from 'react'
-import { useQuery } from '@tanstack/react-query'
-import { useParams } from '@tanstack/react-router'
-import { Link } from '@tanstack/react-router'
-import { getSubjectDetail, getSubjectUsage } from '../api/client'
+import { useMutation, useQuery } from '@tanstack/react-query'
+import { Link, useParams } from '@tanstack/react-router'
+import { checkCompatibility, getCompatibilityLevel, getSubjectDetail, getSubjectStrategy } from '../api/client'
 import { CopyButton } from '../components/CopyButton'
 import { JsonView } from '../components/messages/JsonView'
 import { Panel } from '../components/Panel'
@@ -26,62 +25,133 @@ function SchemaBody({ schema }: { schema: string }) {
   )
 }
 
-// Compatibility stays a placeholder deliberately (owner request
-// 2026-08-17): the structure ships first, mirroring the topic detail
-// page's tab pattern.
-const TABS = ['Schema', 'Usage', 'Compatibility'] as const
-type Tab = (typeof TABS)[number]
+const STRATEGY_LABEL = {
+  topic_name: 'topic name',
+  topic_record_name: 'topic-record name',
+  record_name: 'record name',
+} as const
 
-const STRATEGY_LABEL = { topic_name: 'topic name', topic_record_name: 'topic-record name' } as const
+// The registry doesn't record topic associations — the strategy is
+// resolved server-side from evidence (existing topics, the schema's own
+// record name) and rendered honestly as "not derivable" when unproven.
+function StrategySection({ cluster, subject }: { cluster: string; subject: string }) {
+  const strategy = useQuery({
+    queryKey: ['subject-strategy', cluster, subject],
+    queryFn: ({ signal }) => getSubjectStrategy(cluster, subject, signal),
+  })
+  if (!strategy.data) return null
+  const s = strategy.data
+  return (
+    <div className="flex items-center gap-4 border-t border-zinc-100 pt-3 text-sm dark:border-zinc-800">
+      <span className="flex items-center gap-1.5 text-zinc-500">
+        topic
+        {s.topic === null ? (
+          <span className="text-zinc-400">—</span>
+        ) : (
+          <Link
+            to="/c/$cluster/topics/$topic"
+            params={{ cluster, topic: s.topic }}
+            className="font-mono text-blue-600 hover:underline dark:text-blue-400"
+          >
+            {s.topic}
+          </Link>
+        )}
+      </span>
+      <span className="flex items-center gap-1.5 text-zinc-500">
+        strategy
+        {s.strategy === null ? (
+          <span className="text-zinc-400">not derivable</span>
+        ) : (
+          <span className="text-zinc-700 dark:text-zinc-300">
+            {STRATEGY_LABEL[s.strategy]}
+            {s.role !== null && ` (${s.role})`}
+          </span>
+        )}
+      </span>
+    </div>
+  )
+}
 
-// The registry doesn't record which topics use a schema — usage is
-// inferred server-side from the subject NAME per Confluent's naming
-// strategies, and only claimed for topics that exist.
-function UsageTab({ cluster, subject }: { cluster: string; subject: string }) {
-  const usage = useQuery({
-    queryKey: ['subject-usage', cluster, subject],
-    queryFn: ({ signal }) => getSubjectUsage(cluster, subject, signal),
+function CompatibilityTab({ cluster, subject, schemaType }: { cluster: string; subject: string; schemaType: string }) {
+  const level = useQuery({
+    queryKey: ['compat-level', cluster, subject],
+    queryFn: ({ signal }) => getCompatibilityLevel(cluster, subject, signal),
+  })
+  const [candidate, setCandidate] = useState('')
+  const [candidateType, setCandidateType] = useState(schemaType)
+  const check = useMutation({
+    mutationFn: () => checkCompatibility(cluster, subject, candidate, candidateType),
   })
   return (
-    <Panel title="usage" error={usage.error} loading={usage.isPending} hasData={usage.data !== undefined}>
-      {usage.data?.usages.length === 0 ? (
-        <p className="text-sm text-zinc-500">
-          No topic is derivable from this subject's name. The registry doesn't record which topics
-          use a schema — Arne infers it from topic-based subject naming, which this name doesn't follow
-          (record-name strategy).
-        </p>
-      ) : (
-        <table className="w-full text-left text-sm">
-          <thead className="text-xs text-zinc-500">
-            <tr><th className="py-1">topic</th><th>strategy</th></tr>
-          </thead>
-          <tbody>
-            {usage.data?.usages.map((u) => (
-              <tr key={`${u.topic}-${u.role ?? ''}`} className="border-t border-zinc-100 dark:border-zinc-800">
-                <td className="py-1.5">
-                  <Link
-                    to="/c/$cluster/topics/$topic"
-                    params={{ cluster, topic: u.topic }}
-                    className="font-mono text-blue-600 hover:underline dark:text-blue-400"
-                  >
-                    {u.topic}
-                  </Link>
-                </td>
-                <td className="text-zinc-500">
-                  {STRATEGY_LABEL[u.strategy]}
-                  {u.role !== null && ` (${u.role})`}
-                </td>
-              </tr>
+    <Panel title="compatibility" error={level.error} loading={level.isPending} hasData={level.data !== undefined}>
+      <div className="space-y-3">
+        <div className="flex items-center gap-1.5 text-sm text-zinc-500">
+          effective level
+          <span className="rounded bg-zinc-100 px-1.5 py-0.5 text-xs font-medium text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300">
+            {level.data?.level}
+          </span>
+        </div>
+        <textarea
+          aria-label="candidate schema"
+          value={candidate}
+          onChange={(e) => {
+            setCandidate(e.target.value)
+            check.reset()
+          }}
+          placeholder="paste a candidate schema…"
+          rows={10}
+          className="w-full rounded border border-zinc-300 bg-transparent p-2 font-mono text-sm outline-none focus:border-zinc-500 dark:border-zinc-700"
+        />
+        <div className="flex items-center gap-3">
+          <label className="flex items-center gap-1.5 text-sm text-zinc-500">
+            type
+            <select
+              aria-label="candidate schema type"
+              value={candidateType}
+              onChange={(e) => setCandidateType(e.target.value)}
+              className="rounded border border-zinc-300 bg-transparent px-1.5 py-0.5 dark:border-zinc-700"
+            >
+              {['AVRO', 'PROTOBUF', 'JSON'].map((t) => (
+                <option key={t} value={t}>{t}</option>
+              ))}
+            </select>
+          </label>
+          <button
+            type="button"
+            disabled={candidate.trim() === '' || check.isPending}
+            onClick={() => check.mutate()}
+            className="rounded border border-zinc-300 px-3 py-1 text-sm hover:bg-zinc-100 disabled:opacity-50 dark:border-zinc-700 dark:hover:bg-zinc-800"
+          >
+            check compatibility
+          </button>
+        </div>
+        {check.isError && (
+          <p className="text-sm text-red-700 dark:text-red-400">{(check.error as Error).message}</p>
+        )}
+        {check.data && (check.data.is_compatible ? (
+          <p className="text-sm font-medium text-emerald-700 dark:text-emerald-400">
+            compatible with the latest version under {level.data?.level}
+          </p>
+        ) : (
+          <div className="space-y-1 text-sm">
+            <p className="font-medium text-red-700 dark:text-red-400">
+              not compatible with the latest version under {level.data?.level}
+            </p>
+            {check.data.messages.map((m, i) => (
+              <p key={i} className="font-mono text-xs text-red-600 dark:text-red-400">{m}</p>
             ))}
-          </tbody>
-        </table>
-      )}
+          </div>
+        ))}
+      </div>
     </Panel>
   )
 }
 
+const TABS = ['Definition', 'Compatibility'] as const
+type Tab = (typeof TABS)[number]
+
 export function SubjectDetailView({ cluster, subject }: { cluster: string; subject: string }) {
-  const [tab, setTab] = useState<Tab>('Schema')
+  const [tab, setTab] = useState<Tab>('Definition')
   // `undefined` = the registry's latest; the served version lands in
   // `detail.data.version`, which is what the selector displays.
   const [version, setVersion] = useState<number | undefined>(undefined)
@@ -115,9 +185,10 @@ export function SubjectDetailView({ cluster, subject }: { cluster: string; subje
           </button>
         ))}
       </div>
-      {tab === 'Compatibility' && <p className="text-sm text-zinc-500">nothing here yet</p>}
-      {tab === 'Usage' && <UsageTab cluster={cluster} subject={subject} />}
-      {tab === 'Schema' && (
+      {tab === 'Compatibility' && (
+        <CompatibilityTab cluster={cluster} subject={subject} schemaType={detail.data?.schema_type ?? 'AVRO'} />
+      )}
+      {tab === 'Definition' && (
       <Panel title="schema" error={detail.error} loading={detail.isPending} hasData={detail.data !== undefined}>
         {detail.data && (
           <div className="space-y-3">
@@ -141,6 +212,7 @@ export function SubjectDetailView({ cluster, subject }: { cluster: string; subje
               <span className="text-zinc-500">id {detail.data.id}</span>
               <CopyButton text={detail.data.schema} label="schema" />
             </div>
+            <StrategySection cluster={cluster} subject={subject} />
             <SchemaBody schema={detail.data.schema} />
           </div>
         )}

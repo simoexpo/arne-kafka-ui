@@ -11,10 +11,14 @@ export function MessageRow({
   isJumpTarget = false,
   expanded,
   onToggle,
+  cluster,
 }: {
   message: MessageOut
   tsInverted?: boolean
   isJumpTarget?: boolean
+  // Enables the schema-id link in the payload headings; optional so
+  // router-less renders (tests) stay plain text.
+  cluster?: string
   // Fix: expansion state survives virtualization, owned by identity — this
   // used to be local `useState`, which a virtualized row scrolled out of the
   // renderer's overscan (routine, not exotic) loses on unmount: the row
@@ -112,7 +116,7 @@ export function MessageRow({
               is usually far shorter than the value, so its column had dead
               space exactly where the headers fit. */}
           <div data-testid="key-column" className="space-y-3">
-            <PayloadView payload={message.key} label="key" />
+            <PayloadView payload={message.key} label="key" cluster={cluster} />
             <div>
               <div className="mb-1 text-zinc-500">headers</div>
               {/* Same future-proofing as PayloadView's body: capped height,
@@ -130,7 +134,7 @@ export function MessageRow({
             </div>
           </div>
           <div>
-            <PayloadView payload={message.value} label="value" />
+            <PayloadView payload={message.value} label="value" cluster={cluster} />
           </div>
         </div>
       )}

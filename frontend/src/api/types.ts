@@ -72,8 +72,15 @@ export interface GroupList { groups: GroupSummary[]; as_of: number }
 
 export interface SubjectList { subjects: string[]; as_of: number }
 export interface RegistrySettings { compatibility_level: string; mode: string; as_of: number }
-export interface SubjectUsage { topic: string; strategy: 'topic_name' | 'topic_record_name'; role: 'key' | 'value' | null }
-export interface SubjectUsageList { usages: SubjectUsage[]; as_of: number }
+export interface SubjectStrategyInfo {
+  strategy: 'topic_name' | 'topic_record_name' | 'record_name' | null
+  topic: string | null
+  role: 'key' | 'value' | null
+  as_of: number
+}
+export interface SchemaIdSubject { subject: string; version: number; as_of: number }
+export interface CompatibilityLevel { level: string; as_of: number }
+export interface CompatibilityResult { is_compatible: boolean; messages: string[]; as_of: number }
 export interface SubjectDetail {
   subject: string
   versions: number[]

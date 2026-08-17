@@ -1194,6 +1194,7 @@ export function Timeline({
         <MessageList
           ref={listRef}
           messages={rows}
+          cluster={cluster}
           onScroll={handleScroll}
           jumpTarget={jumpTarget}
           expandedKeys={expandedKeysRef.current}

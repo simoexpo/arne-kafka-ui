@@ -1,3 +1,4 @@
+import { Link } from '@tanstack/react-router'
 import type { DecodedPayload } from '../../api/types'
 import { CopyButton } from '../CopyButton'
 import { EncodingBadge } from './EncodingBadge'
@@ -14,12 +15,35 @@ function copyTextFor(payload: DecodedPayload): string {
   return payload.text
 }
 
-export function PayloadView({ payload, label }: { payload: DecodedPayload | null; label: string }) {
+export function PayloadView({
+  payload,
+  label,
+  // With a cluster in hand, the schema id links into the schemas section by
+  // ID (resolved to its subject server-side — exact under any naming
+  // strategy). Optional: callers without router context render plain text.
+  cluster,
+}: {
+  payload: DecodedPayload | null
+  label: string
+  cluster?: string
+}) {
   const heading = (
     <div className="mb-1 flex items-center gap-2 text-zinc-500">
       <span>{label}</span>
       {payload && <EncodingBadge encoding={payload.encoding} />}
-      {payload && payload.schema_id !== null && <span className="text-xs">schema id {payload.schema_id}</span>}
+      {payload && payload.schema_id !== null && (
+        cluster !== undefined ? (
+          <Link
+            to="/c/$cluster/schemas/by-id/$id"
+            params={{ cluster, id: String(payload.schema_id) }}
+            className="text-xs text-blue-600 hover:underline dark:text-blue-400"
+          >
+            schema id {payload.schema_id}
+          </Link>
+        ) : (
+          <span className="text-xs">schema id {payload.schema_id}</span>
+        )
+      )}
       {payload && <CopyButton text={copyTextFor(payload)} label={label} />}
     </div>
   )

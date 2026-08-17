@@ -1,9 +1,21 @@
 import { describe, expect, it, vi } from 'vitest'
 import userEvent from '@testing-library/user-event'
 import { render, screen } from '@testing-library/react'
+import { renderWithRouter } from '../../test/utils'
 import { PayloadView } from './PayloadView'
 
 describe('PayloadView', () => {
+  // With a cluster in hand (the message tab), the schema id links into the
+  // schemas section by ID — exact under any naming strategy, resolved
+  // server-side (owner request 2026-08-17).
+  it('schema id links to the schema page when a cluster is provided', async () => {
+    await renderWithRouter(
+      <PayloadView payload={{ encoding: 'json', text: '{"a":1}', schema_id: 7, error: null }} label="value" cluster="prod" />,
+      { initialPath: '/c/prod/topics/orders' },
+    )
+    expect(screen.getByRole('link', { name: /schema id 7/ })).toHaveAttribute('href', '/c/prod/schemas/by-id/7')
+  })
+
   it('renders json payloads as a tree with schema id', () => {
     render(<PayloadView payload={{ encoding: 'json', text: '{"a":1}', schema_id: 7, error: null }} label="value" />)
     expect(screen.getByText('a')).toBeInTheDocument()
