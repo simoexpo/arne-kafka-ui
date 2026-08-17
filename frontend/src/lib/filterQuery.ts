@@ -14,14 +14,6 @@ interface ParsedFilterQuery {
 
 const alwaysTrue = () => true
 
-function scalarEq(v: unknown, expected: string): boolean {
-  if (typeof v === 'string') return v === expected
-  if (typeof v === 'number') return String(v) === expected
-  if (typeof v === 'boolean') return String(v) === expected
-  if (v === null) return expected === 'null'
-  return false
-}
-
 function jsonAtPath(root: unknown, path: string): { found: true; value: unknown } | { found: false } {
   let current: unknown = root
   for (const seg of path.split('.')) {
@@ -40,19 +32,25 @@ function jsonAtPath(root: unknown, path: string): { found: true; value: unknown 
   return { found: true, value: current }
 }
 
-// key:/value: are case-SENSITIVE, unlike bare contains below — mirrors the
-// server exactly (backend/src/message/filter.rs:62,66 vs :76).
+// Every predicate mirrors the server exactly (backend/src/message/filter.rs):
+// all matching is case-insensitive; a decode-error value never content-matches;
+// a null key never key-matches.
 function keyContainsPredicate(q: string) {
-  return (m: MessageOut) => !!m.key && m.key.text.includes(q)
+  const needle = q.toLowerCase()
+  return (m: MessageOut) => !!m.key && m.key.text.toLowerCase().includes(needle)
+}
+
+function keyEqPredicate(q: string) {
+  const needle = q.toLowerCase()
+  return (m: MessageOut) => !!m.key && m.key.text.toLowerCase() === needle
 }
 
 function valueContainsPredicate(q: string) {
-  return (m: MessageOut) => !!m.value && m.value.encoding !== 'decode_error' && m.value.text.includes(q)
+  const needle = q.toLowerCase()
+  return (m: MessageOut) =>
+    !!m.value && m.value.encoding !== 'decode_error' && m.value.text.toLowerCase().includes(needle)
 }
 
-// Case-insensitive contains on key OR value text. A decode-error value is
-// the base64 of raw bytes, not real content, so it never content-matches —
-// mirrors the server's `Filter::Contains` semantics exactly.
 function containsPredicate(q: string) {
   const needle = q.toLowerCase()
   return (m: MessageOut) => {
@@ -62,37 +60,120 @@ function containsPredicate(q: string) {
   }
 }
 
-function jsonEqPredicate(path: string, q: string) {
+// Case-insensitive structural equality: string keys and string values
+// compare lower-cased; numbers/bools/null compare exactly.
+function jsonEqCi(a: unknown, b: unknown): boolean {
+  if (typeof a === 'string' && typeof b === 'string') return a.toLowerCase() === b.toLowerCase()
+  if (Array.isArray(a) && Array.isArray(b)) return a.length === b.length && a.every((x, i) => jsonEqCi(x, b[i]))
+  if (
+    a !== null && b !== null && typeof a === 'object' && typeof b === 'object' &&
+    !Array.isArray(a) && !Array.isArray(b)
+  ) {
+    const ea = Object.entries(a as Record<string, unknown>)
+    const eb = Object.entries(b as Record<string, unknown>)
+    return (
+      ea.length === eb.length &&
+      ea.every(([k, va]) => {
+        const hit = eb.find(([kb]) => kb.toLowerCase() === k.toLowerCase())
+        return hit !== undefined && jsonEqCi(va, hit[1])
+      })
+    )
+  }
+  return a === b
+}
+
+function valueEqPredicate(q: string) {
+  const needle = q.toLowerCase()
+  let expected: unknown
+  let expectedIsJson = true
+  try {
+    expected = JSON.parse(q)
+  } catch {
+    expectedIsJson = false
+  }
   return (m: MessageOut) => {
     if (!m.value || m.value.encoding === 'decode_error') return false
-    let root: unknown
-    try {
-      root = JSON.parse(m.value.text)
-    } catch {
-      return false
+    if (expectedIsJson) {
+      try {
+        return jsonEqCi(JSON.parse(m.value.text), expected)
+      } catch {
+        // value is not JSON: falls back to text equality below
+      }
     }
-    const found = jsonAtPath(root, path)
-    return found.found && scalarEq(found.value, q)
+    return m.value.text.toLowerCase() === needle
+  }
+}
+
+function scalarText(v: unknown): string | null {
+  if (typeof v === 'string') return v.toLowerCase()
+  if (typeof v === 'number' || typeof v === 'boolean') return String(v)
+  if (v === null) return 'null'
+  return null
+}
+
+function jsonPathScalar(m: MessageOut, path: string): string | null {
+  if (!m.value || m.value.encoding === 'decode_error') return null
+  let root: unknown
+  try {
+    root = JSON.parse(m.value.text)
+  } catch {
+    return null
+  }
+  const found = jsonAtPath(root, path)
+  return found.found ? scalarText(found.value) : null
+}
+
+function jsonEqPredicate(path: string, q: string) {
+  const needle = q.toLowerCase()
+  return (m: MessageOut) => {
+    const s = jsonPathScalar(m, path)
+    return s !== null && s === needle
+  }
+}
+
+function jsonContainsPredicate(path: string, q: string) {
+  const needle = q.toLowerCase()
+  return (m: MessageOut) => {
+    const s = jsonPathScalar(m, path)
+    return s !== null && s.includes(needle)
   }
 }
 
 export function parseFilterQuery(text: string): ParsedFilterQuery {
   if (text === '') return { api: null, predicate: alwaysTrue }
 
+  if (text.length >= 2 && text.startsWith('"') && text.endsWith('"')) {
+    const q = text.slice(1, -1)
+    if (q === '') return { api: null, predicate: alwaysTrue }
+    return { api: { filter: 'contains', q }, predicate: containsPredicate(q) }
+  }
+
   if (text.startsWith('key:')) {
     const q = text.slice('key:'.length)
     return { api: { filter: 'key_contains', q }, predicate: keyContainsPredicate(q) }
+  }
+  if (text.startsWith('key=')) {
+    const q = text.slice('key='.length)
+    return { api: { filter: 'key_eq', q }, predicate: keyEqPredicate(q) }
   }
   if (text.startsWith('value:')) {
     const q = text.slice('value:'.length)
     return { api: { filter: 'value_contains', q }, predicate: valueContainsPredicate(q) }
   }
-
-  const eqIdx = text.indexOf('=')
-  if (eqIdx > 0) {
-    const path = text.slice(0, eqIdx)
-    const q = text.slice(eqIdx + 1)
-    return { api: { filter: 'json_eq', q, path }, predicate: jsonEqPredicate(path, q) }
+  if (text.startsWith('value=')) {
+    const q = text.slice('value='.length)
+    return { api: { filter: 'value_eq', q }, predicate: valueEqPredicate(q) }
+  }
+  if (text.startsWith('value.')) {
+    const rest = text.slice('value.'.length)
+    const opIdx = rest.search(/[:=]/)
+    if (opIdx > 0) {
+      const path = rest.slice(0, opIdx)
+      const q = rest.slice(opIdx + 1)
+      return rest[opIdx] === ':'
+        ? { api: { filter: 'json_contains', q, path }, predicate: jsonContainsPredicate(path, q) }
+        : { api: { filter: 'json_eq', q, path }, predicate: jsonEqPredicate(path, q) }
+    }
   }
 
   return { api: { filter: 'contains', q: text }, predicate: containsPredicate(text) }

@@ -44,7 +44,9 @@ export interface TimelineProgress { scanned: number; matches: number; budget: nu
 
 export type TimelineDirection = 'back' | 'forward'
 type TimelineAnchor = 'latest' | 'beginning' | 'offset' | 'timestamp'
-export type TimelineFilterKind = 'contains' | 'key_contains' | 'value_contains' | 'json_eq'
+export type TimelineFilterKind =
+  | 'contains' | 'key_contains' | 'value_contains'
+  | 'key_eq' | 'value_eq' | 'json_eq' | 'json_contains'
 
 export interface TimelinePageParams {
   direction: TimelineDirection

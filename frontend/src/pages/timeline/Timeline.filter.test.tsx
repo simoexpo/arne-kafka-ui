@@ -617,7 +617,7 @@ describe('Timeline filter box', () => {
     mockTail()
     await mountAndSettleInitial()
 
-    typeFilter('user.id=42')
+    typeFilter('value.user.id=42')
     await settle()
     const filteredIdx = FakeEventSource.instances.length - 1
     await emit(filteredIdx, 'match', mk(9))

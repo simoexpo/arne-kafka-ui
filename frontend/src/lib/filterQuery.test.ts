@@ -7,6 +7,12 @@ const mk = (partition: number, offset: number, ts: number, text = `v${offset}`):
   value: { encoding: 'utf8', text, schema_id: null, error: null }, headers: [],
 })
 
+const jsonRow = (text: string): MessageOut => {
+  const m = mk(0, 1, 1, text)
+  m.value!.encoding = 'json'
+  return m
+}
+
 describe('parseFilterQuery', () => {
   it('empty means no filter', () => {
     const f = parseFilterQuery('')
@@ -23,17 +29,55 @@ describe('parseFilterQuery', () => {
     expect(parseFilterQuery('key:k7').api).toEqual({ filter: 'key_contains', q: 'k7' })
     expect(parseFilterQuery('value:foo').api).toEqual({ filter: 'value_contains', q: 'foo' })
   })
-  it('dot-path equals becomes json_eq and predicate matches json', () => {
-    const f = parseFilterQuery('user.id=42')
-    expect(f.api).toEqual({ filter: 'json_eq', q: '42', path: 'user.id' })
-    const m = mk(0, 1, 1, '{"user":{"id":42}}')
-    m.value!.encoding = 'json'
-    expect(f.predicate(m)).toBe(true)
+  it('key: and value: contains are now case-insensitive', () => {
+    expect(parseFilterQuery('key:K7').predicate(mk(0, 7, 1))).toBe(true)
+    expect(parseFilterQuery('value:V7').predicate(mk(0, 7, 1))).toBe(true)
+  })
+  it('key= is case-insensitive key equality', () => {
+    expect(parseFilterQuery('key=K7').api).toEqual({ filter: 'key_eq', q: 'K7' })
+    const p = parseFilterQuery('key=K7').predicate
+    expect(p(mk(0, 7, 1))).toBe(true)
+    expect(p(mk(0, 71, 1))).toBe(false)
+  })
+  it('value= is case-insensitive equality, semantic when both sides are JSON', () => {
+    expect(parseFilterQuery('value=x').api).toEqual({ filter: 'value_eq', q: 'x' })
+    const m = jsonRow('{"a": 1, "b": "X"}')
+    expect(parseFilterQuery('value={"b":"x","a":1}').predicate(m)).toBe(true)
+    expect(parseFilterQuery('value={"b":"x","a":2}').predicate(m)).toBe(false)
+    expect(parseFilterQuery('value=HELLO').predicate(mk(0, 1, 1, 'hello'))).toBe(true)
+  })
+  it('value.path:q is field contains, value.path=q is field equality', () => {
+    expect(parseFilterQuery('value.user.name:ali').api).toEqual({ filter: 'json_contains', q: 'ali', path: 'user.name' })
+    expect(parseFilterQuery('value.user.id=42').api).toEqual({ filter: 'json_eq', q: '42', path: 'user.id' })
+    const m = jsonRow('{"user":{"name":"Alice","id":42}}')
+    expect(parseFilterQuery('value.user.name:ALI').predicate(m)).toBe(true)
+    expect(parseFilterQuery('value.user.id=42').predicate(m)).toBe(true)
+    expect(parseFilterQuery('value.user.id=43').predicate(m)).toBe(false)
+  })
+  it('the operator is the FIRST : or = after value.', () => {
+    expect(parseFilterQuery('value.a:b=c').api).toEqual({ filter: 'json_contains', q: 'b=c', path: 'a' })
+    expect(parseFilterQuery('value.a=b:c').api).toEqual({ filter: 'json_eq', q: 'b:c', path: 'a' })
+  })
+  it('bare path= no longer parses as a filter — it is a contains search', () => {
+    expect(parseFilterQuery('a=b').api).toEqual({ filter: 'contains', q: 'a=b' })
+    expect(parseFilterQuery('customer.id=42').api).toEqual({ filter: 'contains', q: 'customer.id=42' })
+  })
+  it('quoted input escapes the grammar into a literal contains', () => {
+    expect(parseFilterQuery('"key:asd"').api).toEqual({ filter: 'contains', q: 'key:asd' })
+    expect(parseFilterQuery('"a"b"').api).toEqual({ filter: 'contains', q: 'a"b' })
+    expect(parseFilterQuery('"abc').api).toEqual({ filter: 'contains', q: '"abc' })
+    expect(parseFilterQuery('""').api).toBeNull()
+  })
+  it('value. with no operator or empty path falls through to contains', () => {
+    expect(parseFilterQuery('value.abc').api).toEqual({ filter: 'contains', q: 'value.abc' })
+    expect(parseFilterQuery('value.:x').api).toEqual({ filter: 'contains', q: 'value.:x' })
   })
   it('decode-error values never content-match', () => {
     const f = parseFilterQuery('AAEC')
     const m = mk(0, 1, 1, 'AAECAw==')
     m.value!.encoding = 'decode_error'
     expect(f.predicate(m)).toBe(false)
+    const eq = parseFilterQuery('value=AAECAw==')
+    expect(eq.predicate(m)).toBe(false)
   })
 })
