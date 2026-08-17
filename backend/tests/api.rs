@@ -217,6 +217,16 @@ async fn topic_consumers_shares_metadata_and_watermarks_across_groups() {
 }
 
 #[tokio::test]
+async fn subjects_without_a_configured_registry_answer_an_honest_envelope() {
+    let bootstrap = start_kafka().await;
+    let state = state_for(&bootstrap, vec![]);
+    let (status, body) = get_json(app(state), "/api/clusters/test/subjects").await;
+    assert_eq!(status, 400, "body: {body}");
+    assert_eq!(body["code"], "no_schema_registry");
+    assert!(body["message"].as_str().unwrap().contains("no schema registry configured"));
+}
+
+#[tokio::test]
 async fn unknown_group_is_404() {
     let bootstrap = start_kafka().await;
     let state = state_for(&bootstrap, vec![]);

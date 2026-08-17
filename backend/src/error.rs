@@ -39,6 +39,20 @@ impl ApiError {
                message: format!("no such endpoint '{path}'"),
                cluster: None, retriable: false }
     }
+    pub fn no_schema_registry(cluster: &str) -> Self {
+        Self { status: StatusCode::BAD_REQUEST, code: "no_schema_registry",
+               message: format!("no schema registry configured for cluster '{cluster}'"),
+               cluster: Some(cluster.into()), retriable: false }
+    }
+    pub fn subject_not_found(cluster: &str, subject: &str) -> Self {
+        Self { status: StatusCode::NOT_FOUND, code: "subject_not_found",
+               message: format!("subject '{subject}' does not exist"),
+               cluster: Some(cluster.into()), retriable: false }
+    }
+    pub fn schema_registry(cluster: &str, message: impl Into<String>) -> Self {
+        Self { status: StatusCode::BAD_GATEWAY, code: "schema_registry_error",
+               message: message.into(), cluster: Some(cluster.into()), retriable: true }
+    }
     pub fn bad_request(message: impl Into<String>) -> Self {
         Self { status: StatusCode::BAD_REQUEST, code: "bad_request",
                message: message.into(), cluster: None, retriable: false }

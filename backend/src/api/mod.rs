@@ -2,6 +2,7 @@ pub mod clusters;
 pub mod groups;
 pub mod messages;
 pub mod static_files;
+pub mod subjects;
 pub mod topics;
 
 use crate::state::AppState;
@@ -20,6 +21,8 @@ pub fn app(state: AppState) -> Router {
         .route("/api/clusters/{cluster}/topics/{topic}/timeline", get(messages::timeline_sse))
         .route("/api/clusters/{cluster}/groups", get(groups::list))
         .route("/api/clusters/{cluster}/groups/{group}", get(groups::detail))
+        .route("/api/clusters/{cluster}/subjects", get(subjects::list))
+        .route("/api/clusters/{cluster}/subjects/{subject}", get(subjects::detail))
         // A bare handler (not wrapped in `get(...)`), so axum registers it as
         // an ANY-method fallback: any request to an UNMATCHED path — every
         // method, not just GET — reaches `spa_fallback` and gets the

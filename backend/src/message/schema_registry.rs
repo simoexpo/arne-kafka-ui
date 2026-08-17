@@ -43,6 +43,34 @@ struct SrResponse {
     schema_type: Option<String>,
 }
 
+#[derive(Debug)]
+pub enum SubjectError {
+    /// The registry answered 404: the subject (or version) doesn't exist.
+    NotFound,
+    /// Anything else — unreachable, non-2xx, bad body — with a
+    /// product-voice message.
+    Registry(String),
+}
+
+#[derive(Deserialize)]
+struct SubjectVersionResponse {
+    id: i32,
+    version: i32,
+    #[serde(rename = "schemaType")]
+    schema_type: Option<String>,
+    schema: String,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct SubjectDetail {
+    pub subject: String,
+    pub versions: Vec<i32>,
+    pub version: i32,
+    pub id: i32,
+    pub schema_type: String,
+    pub schema: String,
+}
+
 pub struct SchemaRegistry {
     base: String,
     http: reqwest::Client,
@@ -108,6 +136,61 @@ impl SchemaRegistry {
         Ok(entry)
     }
 
+    /// Every subject name in the registry, in the registry's own order.
+    /// Uncached: the schema page is user-triggered and must show fresh
+    /// registry state, unlike per-id decode lookups (ids are immutable).
+    pub async fn subjects(&self) -> Result<Vec<String>, SubjectError> {
+        let res = self
+            .http
+            .get(format!("{}/subjects", self.base))
+            .send()
+            .await
+            .map_err(|e| SubjectError::Registry(format!("schema registry unreachable: {e}")))?;
+        if !res.status().is_success() {
+            return Err(SubjectError::Registry(format!("schema registry returned {}", res.status())));
+        }
+        res.json()
+            .await
+            .map_err(|e| SubjectError::Registry(format!("schema registry bad body: {e}")))
+    }
+
+    /// The subject's version list plus ONE version's schema — the requested
+    /// one, or the registry's latest when `None` — so the detail page is a
+    /// single query. Uncached, same reasoning as `subjects`.
+    pub async fn subject_detail(&self, subject: &str, version: Option<i32>) -> Result<SubjectDetail, SubjectError> {
+        let versions: Vec<i32> = self.get_subject_json(&format!("subjects/{subject}/versions")).await?;
+        let selector = version.map_or_else(|| "latest".to_string(), |v| v.to_string());
+        let body: SubjectVersionResponse =
+            self.get_subject_json(&format!("subjects/{subject}/versions/{selector}")).await?;
+        Ok(SubjectDetail {
+            subject: subject.to_string(),
+            versions,
+            version: body.version,
+            id: body.id,
+            // The registry omits the field for its default type.
+            schema_type: body.schema_type.unwrap_or_else(|| "AVRO".to_string()),
+            schema: body.schema,
+        })
+    }
+
+    async fn get_subject_json<T: serde::de::DeserializeOwned>(&self, path: &str) -> Result<T, SubjectError> {
+        let res = self
+            .http
+            .get(format!("{}/{path}", self.base))
+            .send()
+            .await
+            .map_err(|e| SubjectError::Registry(format!("schema registry unreachable: {e}")))?;
+        if res.status() == reqwest::StatusCode::NOT_FOUND {
+            return Err(SubjectError::NotFound);
+        }
+        if !res.status().is_success() {
+            return Err(SubjectError::Registry(format!("schema registry returned {}", res.status())));
+        }
+        res.json()
+            .await
+            .map_err(|e| SubjectError::Registry(format!("schema registry bad body: {e}")))
+    }
+
     /// Returns the parsed/structured form of schema `id` (an
     /// `apache_avro::Schema` or protobuf `FileDescriptor`), parsing it only
     /// on first use and caching the result thereafter — schemas are
@@ -144,25 +227,86 @@ pub(crate) mod tests {
     }
 
     async fn mock_sr(hits: Arc<AtomicUsize>) -> String {
-        let app = Router::new().route(
-            "/schemas/ids/{id}",
-            get(move |Path(id): Path<i32>| {
-                let hits = hits.clone();
-                async move {
-                    hits.fetch_add(1, Ordering::SeqCst);
-                    match id {
-                        7 => Json(serde_json::json!({"schema": "\"string\""})).into_response(),
-                        8 => Json(serde_json::json!({"schema": "syntax = \"proto3\";", "schemaType": "PROTOBUF"})).into_response(),
-                        9 => Json(serde_json::json!({"schema": "{}", "schemaType": "JSON"})).into_response(),
+        let app = Router::new()
+            .route(
+                "/schemas/ids/{id}",
+                get(move |Path(id): Path<i32>| {
+                    let hits = hits.clone();
+                    async move {
+                        hits.fetch_add(1, Ordering::SeqCst);
+                        match id {
+                            7 => Json(serde_json::json!({"schema": "\"string\""})).into_response(),
+                            8 => Json(serde_json::json!({"schema": "syntax = \"proto3\";", "schemaType": "PROTOBUF"})).into_response(),
+                            9 => Json(serde_json::json!({"schema": "{}", "schemaType": "JSON"})).into_response(),
+                            _ => axum::http::StatusCode::NOT_FOUND.into_response(),
+                        }
+                    }
+                }),
+            )
+            .route(
+                "/subjects",
+                get(|| async { Json(serde_json::json!(["sr-avro-value", "sr-json-value"])) }),
+            )
+            .route(
+                "/subjects/{subject}/versions",
+                get(|Path(subject): Path<String>| async move {
+                    match subject.as_str() {
+                        "sr-avro-value" => Json(serde_json::json!([1, 2, 3])).into_response(),
                         _ => axum::http::StatusCode::NOT_FOUND.into_response(),
                     }
-                }
-            }),
-        );
+                }),
+            )
+            .route(
+                "/subjects/{subject}/versions/{version}",
+                get(|Path((subject, version)): Path<(String, String)>| async move {
+                    match (subject.as_str(), version.as_str()) {
+                        ("sr-avro-value", "latest") | ("sr-avro-value", "3") => Json(serde_json::json!({
+                            "subject": "sr-avro-value", "id": 42, "version": 3, "schema": "\"string\""
+                        }))
+                        .into_response(),
+                        ("sr-avro-value", "1") => Json(serde_json::json!({
+                            "subject": "sr-avro-value", "id": 40, "version": 1,
+                            "schemaType": "JSON", "schema": "{}"
+                        }))
+                        .into_response(),
+                        _ => axum::http::StatusCode::NOT_FOUND.into_response(),
+                    }
+                }),
+            );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         format!("http://{addr}")
+    }
+
+    #[tokio::test]
+    async fn lists_subjects() {
+        let sr = SchemaRegistry::new(&mock_sr(Arc::new(AtomicUsize::new(0))).await);
+        assert_eq!(sr.subjects().await.unwrap(), vec!["sr-avro-value", "sr-json-value"]);
+    }
+
+    /// One call returns the version list AND the requested version's schema
+    /// (latest when unspecified) — the detail page is a single query.
+    #[tokio::test]
+    async fn subject_detail_returns_versions_and_the_requested_schema() {
+        let sr = SchemaRegistry::new(&mock_sr(Arc::new(AtomicUsize::new(0))).await);
+        let latest = sr.subject_detail("sr-avro-value", None).await.unwrap();
+        assert_eq!(latest.versions, vec![1, 2, 3]);
+        assert_eq!(latest.version, 3);
+        assert_eq!(latest.id, 42);
+        assert_eq!(latest.schema, "\"string\"");
+        assert_eq!(latest.schema_type, "AVRO"); // registry omits the field for avro
+
+        let v1 = sr.subject_detail("sr-avro-value", Some(1)).await.unwrap();
+        assert_eq!(v1.version, 1);
+        assert_eq!(v1.schema_type, "JSON");
+    }
+
+    #[tokio::test]
+    async fn unknown_subject_is_a_not_found_error() {
+        let sr = SchemaRegistry::new(&mock_sr(Arc::new(AtomicUsize::new(0))).await);
+        let err = sr.subject_detail("nope", None).await.unwrap_err();
+        assert!(matches!(err, SubjectError::NotFound));
     }
 
     use axum::response::IntoResponse;
