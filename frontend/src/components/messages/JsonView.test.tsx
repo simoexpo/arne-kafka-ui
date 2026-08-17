@@ -1,6 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { render, screen } from '@testing-library/react'
-import userEvent from '@testing-library/user-event'
+import { fireEvent, render, screen } from '@testing-library/react'
 import { JsonView } from './JsonView'
 
 describe('JsonView', () => {
@@ -17,7 +16,7 @@ describe('JsonView', () => {
   })
 
   it('renders an expanded object with opening/closing braces and quoted keys', () => {
-    const { container } = render(<JsonView value={{ id: 3, tier: 'gold' }} depth={0} />)
+    const { container } = render(<JsonView value={{ id: 3, tier: 'gold' }} />)
     const text = container.textContent!
     expect(text.startsWith('{')).toBe(true)
     expect(text.trim().endsWith('}')).toBe(true)
@@ -32,20 +31,24 @@ describe('JsonView', () => {
     expect(text).not.toMatch(/"b": 2,/)
   })
 
-  it('collapses a node beyond the default-open depth into a placeholder, hiding its members', () => {
-    render(<JsonView value={{ level1: { level2: { deep: 'value' } } }} />)
-    expect(screen.queryByText('deep')).not.toBeInTheDocument()
-    expect(screen.getByText('level2')).toBeInTheDocument()
-    expect(screen.getByText('…')).toBeInTheDocument()
+  // Owner ruling 2026-08-17: opening the inspect view shows the WHOLE
+  // JSON — every nesting level expanded — with collapsing still available
+  // per node.
+  it('renders fully expanded at every depth', () => {
+    render(<JsonView value={{ a: { b: { c: { d: { e: 'deep-leaf' } } } }, nums: [1, 2, 3] }} />)
+    expect(screen.getByText('"deep-leaf"')).toBeInTheDocument()
+    expect(screen.getByText('3')).toBeInTheDocument()
   })
 
-  it('toggles a collapsed node open when its summary/arrow is clicked', async () => {
-    const user = userEvent.setup()
-    render(<JsonView value={{ level1: { level2: { deep: 'value' } } }} />)
-    expect(screen.queryByText('deep')).not.toBeInTheDocument()
-
-    await user.click(screen.getByText('level2'))
-    expect(screen.getByText('deep')).toBeInTheDocument()
+  it('a node can still be collapsed by hand', () => {
+    // jsdom doesn't implement native <details> click-activation, so this
+    // fires the `toggle` event the browser would dispatch after the click.
+    const { container } = render(<JsonView value={{ a: { b: 1 } }} />)
+    const details = container.querySelectorAll('details')
+    const inner = details[details.length - 1]
+    inner.open = false
+    fireEvent(inner, new Event('toggle'))
+    expect(screen.queryByText('1')).not.toBeInTheDocument()
   })
 
   it('renders arrays with brackets, comma-separated, without index keys', () => {

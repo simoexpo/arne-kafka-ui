@@ -27,18 +27,16 @@ function entriesOf(value: object): [string, unknown][] {
     : Object.entries(value as Record<string, unknown>)
 }
 
-export function JsonView({ value, depth = 0 }: { value: unknown; depth?: number }) {
-  return <JsonNode value={value} depth={depth} keyName={null} isLast />
+export function JsonView({ value }: { value: unknown }) {
+  return <JsonNode value={value} keyName={null} isLast />
 }
 
 function JsonNode({
   value,
-  depth,
   keyName,
   isLast,
 }: {
   value: unknown
-  depth: number
   keyName: string | null
   isLast: boolean
 }) {
@@ -69,7 +67,6 @@ function JsonNode({
 
   return (
     <CollapsibleNode
-      depth={depth}
       keyName={keyName}
       isLast={isLast}
       isArray={isArray}
@@ -81,7 +78,6 @@ function JsonNode({
 }
 
 function CollapsibleNode({
-  depth,
   keyName,
   isLast,
   isArray,
@@ -89,7 +85,6 @@ function CollapsibleNode({
   openBracket,
   closeBracket,
 }: {
-  depth: number
   keyName: string | null
   isLast: boolean
   isArray: boolean
@@ -97,7 +92,9 @@ function CollapsibleNode({
   openBracket: string
   closeBracket: string
 }) {
-  const [isOpen, setIsOpen] = useState(depth < 2)
+  // Fully expanded on open (owner ruling 2026-08-17): inspecting a message
+  // shows the whole JSON; collapsing stays available per node.
+  const [isOpen, setIsOpen] = useState(true)
   return (
     <details open={isOpen} onToggle={(e) => setIsOpen(e.currentTarget.open)}>
       {/* MessageRow wraps its expanded content in a click handler that stops
@@ -126,7 +123,6 @@ function CollapsibleNode({
               <div key={isArray ? i : k}>
                 <JsonNode
                   value={v}
-                  depth={depth + 1}
                   keyName={isArray ? null : k}
                   isLast={i === entries.length - 1}
                 />
