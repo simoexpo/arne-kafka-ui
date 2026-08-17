@@ -49,6 +49,11 @@ impl ApiError {
                message: format!("subject '{subject}' does not exist"),
                cluster: Some(cluster.into()), retriable: false }
     }
+    pub fn schema_id_not_found(cluster: &str, id: i32) -> Self {
+        Self { status: StatusCode::NOT_FOUND, code: "schema_id_not_found",
+               message: format!("no subject registered schema id {id}"),
+               cluster: Some(cluster.into()), retriable: false }
+    }
     pub fn schema_registry(cluster: &str, message: impl Into<String>) -> Self {
         Self { status: StatusCode::BAD_GATEWAY, code: "schema_registry_error",
                message: message.into(), cluster: Some(cluster.into()), retriable: true }

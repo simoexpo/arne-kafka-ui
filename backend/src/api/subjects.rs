@@ -8,39 +8,39 @@ use serde_json::json;
 use std::sync::Arc;
 
 #[derive(Debug, PartialEq, serde::Serialize)]
-pub struct SubjectUsage {
-    pub topic: String,
-    /// "topic_name" (subject is `<topic>-key`/`<topic>-value`) or
-    /// "topic_record_name" (subject is `<topic>-<fully.qualified.Record>`).
-    pub strategy: &'static str,
+pub struct SubjectStrategy {
+    /// "topic_name", "record_name", "topic_record_name", or `None` when
+    /// nothing can be honestly claimed.
+    pub strategy: Option<&'static str>,
+    pub topic: Option<String>,
     /// key/value for the topic-name strategy; not derivable otherwise.
     pub role: Option<&'static str>,
 }
 
-/// The registry does not record which topics use a schema — usage is
-/// inferred from the subject NAME per Confluent's naming strategies, and
-/// only claimed for topics that actually exist. A subject following the
-/// record-name strategy derives no topic at all (empty result — the UI
-/// says so). The topic-record heuristic requires a dotted remainder (a
-/// fully-qualified record name), so `orders-eu` the topic never
-/// false-matches `orders-eu-value` the subject.
-fn infer_usage(subject: &str, topics: &[String]) -> Vec<SubjectUsage> {
-    let mut out = Vec::new();
+/// The registry does not record which topics use a schema. The strategy is
+/// resolved from evidence only: topic-name needs the topic to exist;
+/// record-name and topic-record-name need the subject to carry the
+/// record's fully qualified name AS DECLARED BY THE SCHEMA ITSELF (`fqn`),
+/// never guessed from the name's shape. Anything unprovable stays `None`.
+fn resolve_strategy(subject: &str, topics: &[String], fqn: Option<&str>) -> SubjectStrategy {
     for (suffix, role) in [("-value", "value"), ("-key", "key")] {
         if let Some(t) = subject.strip_suffix(suffix)
             && topics.iter().any(|name| name == t)
         {
-            out.push(SubjectUsage { topic: t.to_string(), strategy: "topic_name", role: Some(role) });
+            return SubjectStrategy { strategy: Some("topic_name"), topic: Some(t.to_string()), role: Some(role) };
         }
     }
-    for t in topics {
-        if let Some(remainder) = subject.strip_prefix(&format!("{t}-"))
-            && remainder.contains('.')
+    if let Some(fqn) = fqn {
+        if subject == fqn {
+            return SubjectStrategy { strategy: Some("record_name"), topic: None, role: None };
+        }
+        if let Some(t) = subject.strip_suffix(&format!("-{fqn}"))
+            && topics.iter().any(|name| name == t)
         {
-            out.push(SubjectUsage { topic: t.clone(), strategy: "topic_record_name", role: None });
+            return SubjectStrategy { strategy: Some("topic_record_name"), topic: Some(t.to_string()), role: None };
         }
     }
-    out
+    SubjectStrategy { strategy: None, topic: None, role: None }
 }
 
 fn registry_for(state: &AppState, cluster: &str) -> Result<Arc<SchemaRegistry>, ApiError> {
@@ -109,19 +109,76 @@ pub async fn detail(
     })))
 }
 
-pub async fn usage(
+/// Resolves a schema id (as shown on a message) to the subject that
+/// registered it — the message tab's link into the schemas section.
+pub async fn subject_of_id(
+    State(state): State<AppState>,
+    Path((cluster, id)): Path<(String, i32)>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let sr = registry_for(&state, &cluster)?;
+    let hit = sr.subject_of_id(id).await.map_err(|e| match e {
+        SubjectError::NotFound => ApiError::schema_id_not_found(&cluster, id),
+        other => subject_error(&cluster, "", other),
+    })?;
+    Ok(Json(json!({ "subject": hit.subject, "version": hit.version, "as_of": crate::util::now_ms() })))
+}
+
+pub async fn strategy(
     State(state): State<AppState>,
     Path((cluster, subject)): Path<(String, String)>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let handle = state.registry.get(&cluster)?;
-    // Consistent with the rest of the schemas page: without a registry the
-    // subject itself is a fiction here.
-    if handle.schema_registry.is_none() {
-        return Err(ApiError::no_schema_registry(&cluster));
-    }
+    let sr = handle.schema_registry.clone().ok_or_else(|| ApiError::no_schema_registry(&cluster))?;
+    let detail = sr
+        .subject_detail(&subject, None)
+        .await
+        .map_err(|e| subject_error(&cluster, &subject, e))?;
+    let fqn = match detail.schema_type.as_str() {
+        "AVRO" => crate::message::avro::record_fqn(&detail.schema),
+        "PROTOBUF" => crate::message::proto::message_fqn(&detail.schema),
+        _ => None,
+    };
     let topics = crate::cluster::admin::topic_names(handle).await?;
+    let resolved = resolve_strategy(&subject, &topics, fqn.as_deref());
     Ok(Json(json!({
-        "usages": infer_usage(&subject, &topics),
+        "strategy": resolved.strategy,
+        "topic": resolved.topic,
+        "role": resolved.role,
+        "as_of": crate::util::now_ms(),
+    })))
+}
+
+pub async fn compatibility_level(
+    State(state): State<AppState>,
+    Path((cluster, subject)): Path<(String, String)>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let sr = registry_for(&state, &cluster)?;
+    let level = sr
+        .subject_compatibility_level(&subject)
+        .await
+        .map_err(|e| subject_error(&cluster, &subject, e))?;
+    Ok(Json(json!({ "level": level, "as_of": crate::util::now_ms() })))
+}
+
+#[derive(Deserialize)]
+pub struct CompatibilityCheckBody {
+    pub schema: String,
+    pub schema_type: String,
+}
+
+pub async fn check_compatibility(
+    State(state): State<AppState>,
+    Path((cluster, subject)): Path<(String, String)>,
+    Json(body): Json<CompatibilityCheckBody>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let sr = registry_for(&state, &cluster)?;
+    let check = sr
+        .check_compatibility(&subject, &body.schema, &body.schema_type)
+        .await
+        .map_err(|e| subject_error(&cluster, &subject, e))?;
+    Ok(Json(json!({
+        "is_compatible": check.is_compatible,
+        "messages": check.messages,
         "as_of": crate::util::now_ms(),
     })))
 }
@@ -136,27 +193,37 @@ mod tests {
 
     #[test]
     fn topic_name_strategy_matches_only_existing_topics() {
-        let usage = infer_usage("orders-value", &topics(&["orders", "payments"]));
-        assert_eq!(usage, vec![SubjectUsage { topic: "orders".into(), strategy: "topic_name", role: Some("value") }]);
-        assert!(infer_usage("ghost-value", &topics(&["orders"])).is_empty());
-        let key = infer_usage("orders-key", &topics(&["orders"]));
-        assert_eq!(key[0].role, Some("key"));
+        let s = resolve_strategy("orders-value", &topics(&["orders", "payments"]), None);
+        assert_eq!(s, SubjectStrategy { strategy: Some("topic_name"), topic: Some("orders".into()), role: Some("value") });
+        assert_eq!(resolve_strategy("ghost-value", &topics(&["orders"]), None).strategy, None);
+        assert_eq!(resolve_strategy("orders-key", &topics(&["orders"]), None).role, Some("key"));
+    }
+
+    /// The record's fully qualified name comes from the SCHEMA (not the
+    /// name's shape), so record-name and topic-record-name are verified,
+    /// never guessed.
+    #[test]
+    fn record_name_strategy_is_verified_against_the_schema_fqn() {
+        let s = resolve_strategy("com.acme.Order", &topics(&["orders"]), Some("com.acme.Order"));
+        assert_eq!(s, SubjectStrategy { strategy: Some("record_name"), topic: None, role: None });
+        // Same name WITHOUT a matching schema FQN stays honestly unknown.
+        assert_eq!(resolve_strategy("com.acme.Order", &topics(&["orders"]), None).strategy, None);
+        assert_eq!(resolve_strategy("com.acme.Order", &topics(&["orders"]), Some("com.acme.Other")).strategy, None);
     }
 
     #[test]
-    fn topic_record_name_strategy_requires_a_dotted_record_remainder() {
-        let usage = infer_usage("orders-com.acme.Order", &topics(&["orders", "orders-eu"]));
-        assert_eq!(usage, vec![SubjectUsage { topic: "orders".into(), strategy: "topic_record_name", role: None }]);
-        // `orders-eu-value` is the topic-name strategy for topic `orders-eu`,
-        // never a topic-record match for `orders` (remainder has no dot).
-        let tn = infer_usage("orders-eu-value", &topics(&["orders", "orders-eu"]));
-        assert_eq!(tn.len(), 1);
-        assert_eq!(tn[0].strategy, "topic_name");
-        assert_eq!(tn[0].topic, "orders-eu");
+    fn topic_record_name_requires_existing_topic_and_exact_fqn_remainder() {
+        let s = resolve_strategy("orders-com.acme.Order", &topics(&["orders", "orders-eu"]), Some("com.acme.Order"));
+        assert_eq!(s, SubjectStrategy { strategy: Some("topic_record_name"), topic: Some("orders".into()), role: None });
+        assert_eq!(resolve_strategy("ghost-com.acme.Order", &topics(&["orders"]), Some("com.acme.Order")).strategy, None);
     }
 
+    /// `orders-eu-value` is the topic-name strategy for topic `orders-eu`,
+    /// even when a shorter topic (`orders`) is also a prefix.
     #[test]
-    fn record_name_strategy_derives_no_topic() {
-        assert!(infer_usage("com.acme.Order", &topics(&["orders"])).is_empty());
+    fn topic_name_wins_over_prefix_coincidences() {
+        let s = resolve_strategy("orders-eu-value", &topics(&["orders", "orders-eu"]), None);
+        assert_eq!(s.strategy, Some("topic_name"));
+        assert_eq!(s.topic.as_deref(), Some("orders-eu"));
     }
 }

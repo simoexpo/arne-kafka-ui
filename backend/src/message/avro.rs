@@ -4,6 +4,21 @@ use apache_avro::Schema;
 /// decoding, so callers that decode many messages against the same schema
 /// id should parse once and reuse the result via `decode_with_schema` (see
 /// `SchemaRegistry::parsed`'s cache), rather than calling this per message.
+/// The record's fully qualified name — the subject itself under the
+/// record-name strategy: `namespace.name`, a name that's already dotted,
+/// or `None` for primitives/non-records.
+pub fn record_fqn(schema_json: &str) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_str(schema_json).ok()?;
+    let name = v.get("name")?.as_str()?;
+    if name.contains('.') {
+        return Some(name.to_string());
+    }
+    match v.get("namespace").and_then(|n| n.as_str()) {
+        Some(ns) => Some(format!("{ns}.{name}")),
+        None => Some(name.to_string()),
+    }
+}
+
 pub fn parse_schema(schema_json: &str) -> Result<Schema, String> {
     Schema::parse_str(schema_json).map_err(|e| format!("avro schema parse: {e}"))
 }
@@ -35,6 +50,23 @@ mod tests {
     use super::*;
     use apache_avro::types::{Record, Value};
     use apache_avro::Schema;
+
+    /// The record's fully qualified name IS the subject under the
+    /// record-name strategy — namespace + name, a possibly-already-dotted
+    /// name, or nothing for a primitive/non-record schema.
+    #[test]
+    fn record_fqn_joins_namespace_and_name() {
+        assert_eq!(
+            record_fqn(r#"{"type":"record","name":"Order","namespace":"com.acme","fields":[]}"#),
+            Some("com.acme.Order".to_string()),
+        );
+        assert_eq!(
+            record_fqn(r#"{"type":"record","name":"com.acme.Order","fields":[]}"#),
+            Some("com.acme.Order".to_string()),
+        );
+        assert_eq!(record_fqn(r#""string""#), None);
+        assert_eq!(record_fqn("not json"), None);
+    }
 
     const SCHEMA: &str = r#"{
         "type": "record", "name": "User",

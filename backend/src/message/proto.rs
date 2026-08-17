@@ -57,6 +57,21 @@ pub fn read_message_indexes(bytes: &[u8]) -> Result<(Vec<i32>, &[u8]), String> {
 /// that decode many messages against the same schema id should parse once
 /// and reuse the result via `decode_with_descriptor` (see
 /// `SchemaRegistry::parsed`'s cache), rather than calling this per message.
+/// The first message's package-qualified name — the subject itself under
+/// the record-name strategy for protobuf schemas. `None` when the source
+/// doesn't parse or declares no message. Multi-message files use the
+/// first declaration, the registry's own convention.
+pub fn message_fqn(proto_src: &str) -> Option<String> {
+    let fd = build_descriptor(proto_src).ok()?;
+    let message = fd.messages().next()?;
+    let package = fd.proto().package();
+    if package.is_empty() {
+        Some(message.name().to_string())
+    } else {
+        Some(format!("{package}.{}", message.name()))
+    }
+}
+
 pub fn build_descriptor(proto_src: &str) -> Result<FileDescriptor, String> {
     // protobuf-parse reads files from disk; write the SR schema text to a temp file
     let call_id = CALL_COUNTER.fetch_add(1, Ordering::Relaxed);
@@ -130,6 +145,16 @@ message User {
   string name = 2;
 }
 "#;
+
+    /// The first message's fully qualified name (package-qualified) IS the
+    /// subject under the record-name strategy for protobuf schemas.
+    #[test]
+    fn message_fqn_is_the_package_qualified_first_message() {
+        assert_eq!(message_fqn(PROTO), Some("User".to_string()));
+        let with_pkg = r#"syntax = "proto3"; package com.acme; message Event { int64 id = 1; } message Other { int64 x = 1; }"#;
+        assert_eq!(message_fqn(with_pkg), Some("com.acme.Event".to_string()));
+        assert_eq!(message_fqn("not a proto"), None);
+    }
 
     // field 1 (varint) = 42, field 2 (len-delimited) = "ada"
     const USER_BYTES: &[u8] = &[0x08, 0x2a, 0x12, 0x03, b'a', b'd', b'a'];
