@@ -22,12 +22,12 @@ pub enum Filter {
 impl Filter {
     pub fn parse(kind: &str, q: &str, path: Option<&str>) -> Result<Filter, String> {
         match kind {
-            "key_eq" => Ok(Filter::KeyEquals(q.to_string())),
-            "key_contains" => Ok(Filter::KeyContains(q.to_string())),
-            "value_contains" => Ok(Filter::ValueContains(q.to_string())),
+            "key_eq" => Ok(Filter::KeyEquals(q.to_lowercase())),
+            "key_contains" => Ok(Filter::KeyContains(q.to_lowercase())),
+            "value_contains" => Ok(Filter::ValueContains(q.to_lowercase())),
             "contains" => Ok(Filter::Contains(q.to_lowercase())),
             "json_eq" => path
-                .map(|p| Filter::JsonPathEquals { path: p.to_string(), value: q.to_string() })
+                .map(|p| Filter::JsonPathEquals { path: p.to_string(), value: q.to_lowercase() })
                 .ok_or_else(|| "filter json_eq requires a path parameter".to_string()),
             other => Err(format!("unknown filter kind '{other}'")),
         }
@@ -46,32 +46,32 @@ fn json_at_path<'a>(root: &'a serde_json::Value, path: &str) -> Option<&'a serde
     Some(current)
 }
 
-fn scalar_eq(v: &serde_json::Value, expected: &str) -> bool {
+fn scalar_text(v: &serde_json::Value) -> Option<String> {
     match v {
-        serde_json::Value::String(s) => s == expected,
-        serde_json::Value::Number(n) => n.to_string() == expected,
-        serde_json::Value::Bool(b) => b.to_string() == expected,
-        serde_json::Value::Null => expected == "null",
-        _ => false,
+        serde_json::Value::String(s) => Some(s.to_lowercase()),
+        serde_json::Value::Number(n) => Some(n.to_string()),
+        serde_json::Value::Bool(b) => Some(b.to_string()),
+        serde_json::Value::Null => Some("null".to_string()),
+        _ => None,
     }
 }
 
 pub fn matches(filter: &Filter, msg: &MessageOut) -> bool {
     match filter {
-        Filter::KeyEquals(q) => msg.key.as_ref().is_some_and(|k| k.text == *q),
-        Filter::KeyContains(q) => msg.key.as_ref().is_some_and(|k| k.text.contains(q.as_str())),
+        Filter::KeyEquals(q) => msg.key.as_ref().is_some_and(|k| k.text.to_lowercase() == *q),
+        Filter::KeyContains(q) => msg.key.as_ref().is_some_and(|k| k.text.to_lowercase().contains(q.as_str())),
         // A value that failed to decode has no real content to search — its
         // `text` is just the base64 of the raw bytes, so matching against it
         // would produce false hits with no relationship to actual content.
         Filter::ValueContains(q) => msg.value.as_ref().is_some_and(|v| {
-            v.encoding != Encoding::DecodeError && v.text.contains(q.as_str())
+            v.encoding != Encoding::DecodeError && v.text.to_lowercase().contains(q.as_str())
         }),
         Filter::JsonPathEquals { path, value } => msg.value.as_ref().is_some_and(|v| {
             v.encoding != Encoding::DecodeError
                 && serde_json::from_str::<serde_json::Value>(&v.text)
                     .ok()
-                    .and_then(|root| json_at_path(&root, path).map(|found| scalar_eq(found, value)))
-                    .unwrap_or(false)
+                    .and_then(|root| json_at_path(&root, path).and_then(scalar_text))
+                    .is_some_and(|found| found == *value)
         }),
         Filter::Contains(q) => {
             let key_hit = msg.key.as_ref().is_some_and(|k| k.text.to_lowercase().contains(q.as_str()));
@@ -159,6 +159,29 @@ mod tests {
         assert!(matches!(Filter::parse("contains", "x", None), Ok(Filter::Contains(_))));
         assert!(Filter::parse("json_eq", "42", None).is_err());
         assert!(Filter::parse("sideways", "x", None).is_err());
+    }
+
+    #[test]
+    fn key_filters_are_case_insensitive() {
+        let m = msg(Some("Order-42"), "x", Encoding::Utf8);
+        assert!(matches(&Filter::parse("key_eq", "ORDER-42", None).unwrap(), &m));
+        assert!(matches(&Filter::parse("key_contains", "oRdEr", None).unwrap(), &m));
+        assert!(!matches(&Filter::parse("key_eq", "order-4", None).unwrap(), &m));
+    }
+
+    #[test]
+    fn value_contains_is_case_insensitive() {
+        let m = msg(None, "Hello KAFKA World", Encoding::Utf8);
+        assert!(matches(&Filter::parse("value_contains", "kafka", None).unwrap(), &m));
+        assert!(!matches(&Filter::parse("value_contains", "rabbit", None).unwrap(), &m));
+    }
+
+    #[test]
+    fn json_eq_is_case_insensitive_on_strings_exact_on_numbers() {
+        let m = msg(None, r#"{"user":{"name":"Alice","id":42}}"#, Encoding::Json);
+        assert!(matches(&Filter::parse("json_eq", "ALICE", Some("user.name")).unwrap(), &m));
+        assert!(matches(&Filter::parse("json_eq", "42", Some("user.id")).unwrap(), &m));
+        assert!(!matches(&Filter::parse("json_eq", "43", Some("user.id")).unwrap(), &m));
     }
 
     #[test]
