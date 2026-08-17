@@ -8,6 +8,7 @@ import type { SubjectDetail } from '../api/types'
 vi.mock('../api/client', async (importOriginal) => ({
   ...(await importOriginal<typeof client>()),
   getSubjectDetail: vi.fn(),
+  getSubjectUsage: vi.fn(),
 }))
 
 const detail = (over: Partial<SubjectDetail> = {}): SubjectDetail => ({
@@ -50,18 +51,45 @@ describe('SubjectDetailView', () => {
     expect(vi.mocked(client.getSubjectDetail)).toHaveBeenLastCalledWith('prod', 'sr-avro-value', 1, expect.anything())
   })
 
-  it('is tabbed like the topic page: Schema first, placeholders switchable', async () => {
+  it('is tabbed like the topic page: Schema first, placeholder switchable', async () => {
     vi.mocked(client.getSubjectDetail).mockResolvedValue(detail())
     await renderWithRouter(<SubjectDetailView cluster="prod" subject="sr-avro-value" />, {
       initialPath: '/c/prod/schemas/sr-avro-value',
     })
     await screen.findByText('AVRO')
-    expect(screen.getAllByRole('tab').map((t) => t.textContent)).toEqual(['Schema', 'Compatibility', 'References'])
+    expect(screen.getAllByRole('tab').map((t) => t.textContent)).toEqual(['Schema', 'Usage', 'Compatibility'])
     fireEvent.click(screen.getByRole('tab', { name: 'Compatibility' }))
     expect(screen.getByText(/nothing here yet/i)).toBeInTheDocument()
     expect(screen.queryByLabelText('version')).not.toBeInTheDocument()
     fireEvent.click(screen.getByRole('tab', { name: 'Schema' }))
     expect(screen.getByLabelText('version')).toBeInTheDocument()
+  })
+
+  it('Usage tab lists topics inferred from the subject name with their strategy', async () => {
+    vi.mocked(client.getSubjectDetail).mockResolvedValue(detail())
+    vi.mocked(client.getSubjectUsage).mockResolvedValue({
+      usages: [{ topic: 'sr-avro', strategy: 'topic_name', role: 'value' }],
+      as_of: 1,
+    })
+    await renderWithRouter(<SubjectDetailView cluster="prod" subject="sr-avro-value" />, {
+      initialPath: '/c/prod/schemas/sr-avro-value',
+    })
+    await screen.findByText('AVRO')
+    fireEvent.click(screen.getByRole('tab', { name: 'Usage' }))
+    const link = await screen.findByRole('link', { name: 'sr-avro' })
+    expect(link).toHaveAttribute('href', '/c/prod/topics/sr-avro')
+    expect(screen.getByText('topic name (value)')).toBeInTheDocument()
+  })
+
+  it('Usage tab is honest when no topic is derivable from the name', async () => {
+    vi.mocked(client.getSubjectDetail).mockResolvedValue(detail({ subject: 'com.acme.Order' }))
+    vi.mocked(client.getSubjectUsage).mockResolvedValue({ usages: [], as_of: 1 })
+    await renderWithRouter(<SubjectDetailView cluster="prod" subject="com.acme.Order" />, {
+      initialPath: '/c/prod/schemas/com.acme.Order',
+    })
+    await screen.findByText('AVRO')
+    fireEvent.click(screen.getByRole('tab', { name: 'Usage' }))
+    expect(await screen.findByText(/registry doesn't record/i)).toBeInTheDocument()
   })
 
   it('a non-JSON schema (protobuf) renders verbatim, no soft-wrap', async () => {

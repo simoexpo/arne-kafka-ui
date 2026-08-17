@@ -72,6 +72,8 @@ export interface GroupList { groups: GroupSummary[]; as_of: number }
 
 export interface SubjectList { subjects: string[]; as_of: number }
 export interface RegistrySettings { compatibility_level: string; mode: string; as_of: number }
+export interface SubjectUsage { topic: string; strategy: 'topic_name' | 'topic_record_name'; role: 'key' | 'value' | null }
+export interface SubjectUsageList { usages: SubjectUsage[]; as_of: number }
 export interface SubjectDetail {
   subject: string
   versions: number[]
