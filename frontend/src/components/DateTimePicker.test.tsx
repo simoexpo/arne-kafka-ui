@@ -7,7 +7,7 @@ import { DateTimePicker, formatDateTimeMillis, parseDateTimeMillis } from './Dat
 import { setTimeDisplayMode } from '../lib/timeDisplayMode'
 import { wheelCenteredIndex, wheelScrollTopForIndex } from '../lib/wheelGeometry'
 
-// Betrachtung has no native-popup fallback left to lean on (see report:
+// Arne has no native-popup fallback left to lean on (see report:
 // Chrome/Firefox's own `datetime-local` calendar popup is themed by the
 // OS/browser's `prefers-color-scheme`, NOT by page CSS — verified, not
 // fixable from here). This is a fully hand-rolled popover, so both themes

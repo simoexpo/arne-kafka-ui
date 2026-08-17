@@ -60,13 +60,13 @@ describe('Panel', () => {
   })
   it('full error block shows connection-lost wording and a retry hint for a plain network Error', () => {
     render(<Panel title="Brokers" error={new Error('Failed to fetch')}>content</Panel>)
-    expect(screen.getByText(/Connection to Betrachtung lost/)).toBeInTheDocument()
+    expect(screen.getByText(/Connection to Arne lost/)).toBeInTheDocument()
     expect(screen.getByText(/retrying automatically/)).toBeInTheDocument()
   })
   it('compact banner shows connection-lost wording and a retry hint too', () => {
     render(<Panel title="Brokers" error={new Error('Failed to fetch')} hasData>content</Panel>)
     const banner = screen.getByTestId('panel-error-banner')
-    expect(banner).toHaveTextContent('Connection to Betrachtung lost')
+    expect(banner).toHaveTextContent('Connection to Arne lost')
     expect(banner).toHaveTextContent(/retrying automatically/)
   })
   it('full error block shows no scary headline for an app-level resource error', () => {

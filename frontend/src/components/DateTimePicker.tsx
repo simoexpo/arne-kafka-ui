@@ -17,7 +17,7 @@ import {
 // `getComputedStyle` reports but has ZERO effect on the popup's actual
 // rendered colors. There is no CSS lever left to pull. This component
 // replaces the native picker outright with our own popover, styled
-// entirely from Betrachtung's own `dark:` classes — nothing here is at
+// entirely from Arne's own `dark:` classes — nothing here is at
 // the mercy of the browser's opinion.
 //
 // Owner ruling 2026-08-16 (picker3): calendar grid on the LEFT, three

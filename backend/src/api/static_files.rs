@@ -8,7 +8,7 @@ use rust_embed::RustEmbed;
 struct Assets;
 
 const PLACEHOLDER: &str =
-    "<!doctype html><html><body><h1>betrachtung</h1><p>frontend not built — run `npm run build` in frontend/ and rebuild.</p></body></html>";
+    "<!doctype html><html><body><h1>arne</h1><p>frontend not built — run `npm run build` in frontend/ and rebuild.</p></body></html>";
 
 /// Router-wide fallback for any request matching no declared route.
 ///

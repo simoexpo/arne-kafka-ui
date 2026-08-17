@@ -61,7 +61,7 @@ pub fn build_descriptor(proto_src: &str) -> Result<FileDescriptor, String> {
     // protobuf-parse reads files from disk; write the SR schema text to a temp file
     let call_id = CALL_COUNTER.fetch_add(1, Ordering::Relaxed);
     let dir = std::env::temp_dir().join(format!(
-        "betrachtung-proto-{}-{}",
+        "arne-proto-{}-{}",
         std::process::id(),
         call_id
     ));

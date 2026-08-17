@@ -1,4 +1,4 @@
-# Betrachtung
+# Arne
 
 A fast, trustworthy Kafka UI for developers. Read-only v1: topic monitoring
 and message lookup, built to report what is actually in the
@@ -24,7 +24,7 @@ With `just`:
 just dev              # backend on :8080 + frontend on :5173 (proxies /api)
 just test             # backend + frontend test suites
 just lint             # clippy + frontend build
-just docker           # build the production image (betrachtung:dev)
+just docker           # build the production image (arne:dev)
 just playground       # docker-compose Kafka + schema registry + demo producer
 just playground-down  # tear the playground down
 just smoke            # run the end-to-end smoke check
@@ -47,7 +47,7 @@ cd backend && cargo clippy --all-targets -- -D warnings
 cd frontend && npm run build
 
 # docker
-docker build -t betrachtung:dev .
+docker build -t arne:dev .
 
 # playground
 docker compose -f docker-compose.dev.yml up -d
@@ -63,7 +63,7 @@ producer per cluster continuously writing JSON messages to three topics —
 `demo-orders` (`cleanup.policy=delete`), `demo-users`
 (`cleanup.policy=compact`), and `demo-audit`
 (`cleanup.policy=compact,delete`) — useful for pointing a locally-running
-Betrachtung at real data without a real cluster. Point `config.yaml` at
+Arne at real data without a real cluster. Point `config.yaml` at
 `localhost:9092` and/or `localhost:9093` (see `config.example.yaml`) to use
 it.
 
@@ -81,10 +81,10 @@ by `npm install`).
 
 ## Deployment
 
-Betrachtung ships as a single Docker image with the frontend embedded in
+Arne ships as a single Docker image with the frontend embedded in
 the backend binary. Mount your config and run — assuming your config is
 at `./config.yaml`:
 
 ```
-docker run -p 8080:8080 -v $(pwd)/config.yaml:/etc/betrachtung/config.yaml betrachtung:dev
+docker run -p 8080:8080 -v $(pwd)/config.yaml:/etc/arne/config.yaml arne:dev
 ```

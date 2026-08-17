@@ -20,7 +20,7 @@ interface TimelineState {
   exhausted: { back: boolean; forward: boolean }
   // A structured error, not a bare string: consumers (Panel's describeError)
   // need `code`/`cluster`/`retriable` to tell a kafka-side failure from a
-  // real connection-to-Betrachtung loss. Server-emitted `error` events
+  // real connection-to-Arne loss. Server-emitted `error` events
   // become an ApiError carrying that structure; a transport failure
   // (EventSource's onerror) legitimately IS connection-lost and is a plain
   // Error with the established wording.
@@ -194,7 +194,7 @@ export function useTimelinePage(cluster: string, topic: string): UseTimelinePage
           // treat any transport failure as terminal too rather than let the
           // browser retry into a zombie stream. Unlike a server-emitted
           // `error` event, this one is genuinely a lost connection to
-          // Betrachtung itself — a plain Error, not an ApiError, so
+          // Arne itself — a plain Error, not an ApiError, so
           // describeError's generic connection-lost banner is exactly right.
           handle.close()
           handleRef.current = null

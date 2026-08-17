@@ -491,9 +491,9 @@ describe('Timeline', () => {
     // generic "retrying automatically" hint — reconnecting the tail really
     // is manual (no auto-reconnect exists), so it must still be visible.
     // The reason carries only what the headline doesn't already say:
-    // "Connection to Betrachtung lost — connection lost — …" stuttered.
+    // "Connection to Arne lost — connection lost — …" stuttered.
     expect(
-      screen.getByText('live stopped — Connection to Betrachtung lost — retrying is manual'),
+      screen.getByText('live stopped — Connection to Arne lost — retrying is manual'),
     ).toBeInTheDocument()
   })
 
@@ -526,7 +526,7 @@ describe('Timeline', () => {
     })
 
     expect(screen.getByText(/Kafka unreachable/)).toBeInTheDocument()
-    expect(screen.queryByText(/Connection to Betrachtung lost/)).not.toBeInTheDocument()
+    expect(screen.queryByText(/Connection to Arne lost/)).not.toBeInTheDocument()
   })
 
   it('a page transport error still shows the generic connection-lost banner', async () => {
@@ -540,7 +540,7 @@ describe('Timeline', () => {
       FakeEventSource.instances[1].fireTransportError()
     })
 
-    expect(screen.getByText(/Connection to Betrachtung lost/)).toBeInTheDocument()
+    expect(screen.getByText(/Connection to Arne lost/)).toBeInTheDocument()
   })
 
   // Review fix (M1+M2, 2026-08-15): a bad offset jump (no message at the
@@ -575,7 +575,7 @@ describe('Timeline', () => {
     })
 
     expect(screen.getByText('no message with a timestamp at partition 1 offset 9999')).toBeInTheDocument()
-    expect(screen.queryByText(/Connection to Betrachtung lost/)).not.toBeInTheDocument()
+    expect(screen.queryByText(/Connection to Arne lost/)).not.toBeInTheDocument()
   })
 
   it('renders a decode-error row loudly instead of skipping it', async () => {

@@ -63,6 +63,38 @@ dependencies = [
 ]
 
 [[package]]
+name = "arne"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "apache-avro",
+ "axum",
+ "base64 0.23.1",
+ "futures-util",
+ "http-body-util",
+ "libc",
+ "mime_guess",
+ "protobuf",
+ "protobuf-json-mapping",
+ "protobuf-parse",
+ "rdkafka",
+ "reqwest",
+ "rust-embed",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "testcontainers",
+ "testcontainers-modules",
+ "thiserror 2.0.20",
+ "tokio",
+ "tokio-stream",
+ "tower",
+ "tracing",
+ "tracing-subscriber",
+ "urlencoding",
+]
+
+[[package]]
 name = "astral-tokio-tar"
 version = "0.6.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -209,38 +241,6 @@ name = "base64"
 version = "0.23.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ac07cdecf99051d9a5238b80f35af32cdeba5b336e55d957b318b50137e18da5"
-
-[[package]]
-name = "betrachtung"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "apache-avro",
- "axum",
- "base64 0.23.1",
- "futures-util",
- "http-body-util",
- "libc",
- "mime_guess",
- "protobuf",
- "protobuf-json-mapping",
- "protobuf-parse",
- "rdkafka",
- "reqwest",
- "rust-embed",
- "serde",
- "serde_json",
- "serde_yaml",
- "testcontainers",
- "testcontainers-modules",
- "thiserror 2.0.20",
- "tokio",
- "tokio-stream",
- "tower",
- "tracing",
- "tracing-subscriber",
- "urlencoding",
-]
 
 [[package]]
 name = "bigdecimal"

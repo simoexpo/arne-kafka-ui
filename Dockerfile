@@ -33,9 +33,9 @@ FROM debian:bookworm-slim
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/*
-RUN useradd --system --uid 10001 betrachtung
-COPY --from=backend /build/backend/target/release/betrachtung /usr/local/bin/betrachtung
-USER betrachtung
+RUN useradd --system --uid 10001 arne
+COPY --from=backend /build/backend/target/release/arne /usr/local/bin/arne
+USER arne
 EXPOSE 8080
-ENTRYPOINT ["/usr/local/bin/betrachtung"]
-CMD ["/etc/betrachtung/config.yaml"]
+ENTRYPOINT ["/usr/local/bin/arne"]
+CMD ["/etc/arne/config.yaml"]

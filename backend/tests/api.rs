@@ -1,8 +1,8 @@
 mod support;
 
 use axum::http::StatusCode;
-use betrachtung::api::app;
-use betrachtung::cluster::{ClusterHandle, HealthStatus};
+use arne::api::app;
+use arne::cluster::{ClusterHandle, HealthStatus};
 use std::sync::Arc;
 use support::*;
 use tower::ServiceExt;
@@ -196,7 +196,7 @@ async fn topic_consumers_lists_groups_reading_the_topic() {
 /// fetch per group, this would see 2 of each instead of 1.
 #[tokio::test]
 async fn topic_consumers_shares_metadata_and_watermarks_across_groups() {
-    use betrachtung::cluster::admin::{group_metadata_fetch_count, group_watermark_fetch_count};
+    use arne::cluster::admin::{group_metadata_fetch_count, group_watermark_fetch_count};
 
     let bootstrap = start_kafka().await;
     let topic = "fanin-topic";
@@ -227,7 +227,7 @@ async fn unknown_group_is_404() {
 
 #[tokio::test]
 async fn throughput_endpoint_reports_positive_rate_after_producing() {
-    use betrachtung::cluster::sampler::spawn_sampler;
+    use arne::cluster::sampler::spawn_sampler;
     use std::time::Duration;
 
     let bootstrap = start_kafka().await;
@@ -704,13 +704,13 @@ async fn timeline_direction_flip_reads_back_pages_continuation_forward_and_gets_
     let (_, back_end) = back.iter().find(|(n, _)| n == "page_end").expect("page_end present").clone();
     assert_eq!(back_end["exhausted"], false, "20 records exist below the anchor, only 6 taken: {back_end}");
     let continuation = back_end["cursor"].as_str().expect("non-exhausted page must carry a continuation cursor").to_string();
-    let decoded = betrachtung::message::timeline::Cursor::decode(&continuation).unwrap();
+    let decoded = arne::message::timeline::Cursor::decode(&continuation).unwrap();
     assert_eq!(decoded.positions, vec![(0, 7), (1, 7)], "continuation must sit at the lowest offset taken per partition");
 
     // The decoded blob is still tagged `direction: Back` (minted by a back
     // page) — following it with `direction=forward` must be honored, not
     // rejected, per v1.6's direction-belongs-to-the-request ruling.
-    assert_eq!(decoded.direction, betrachtung::message::timeline::Direction::Back);
+    assert_eq!(decoded.direction, arne::message::timeline::Direction::Back);
     let forward = collect_sse(
         app(state),
         &format!("/api/clusters/test/topics/tl-flip-topic/timeline?direction=forward&limit=6&cursor={}", urlencoding::encode(&continuation)),
@@ -1082,8 +1082,8 @@ async fn timeline_cursor_with_unknown_partition_terminates_properly() {
     produce(&bootstrap, "tl-unknown-partition-topic", 3).await;
     let state = state_for(&bootstrap, vec![]);
 
-    let cursor = betrachtung::message::timeline::Cursor {
-        direction: betrachtung::message::timeline::Direction::Forward,
+    let cursor = arne::message::timeline::Cursor {
+        direction: arne::message::timeline::Direction::Forward,
         positions: vec![(0, 0), (99, 5)],
     }.encode();
     let events = collect_sse(
@@ -1158,7 +1158,7 @@ async fn timeline_filter_scans_until_limit_with_progress() {
 
 #[tokio::test]
 async fn timeline_filter_budget_exhaustion_reports_and_continues() {
-    use betrachtung::config::Limits;
+    use arne::config::Limits;
     let bootstrap = start_kafka().await;
     create_topic(&bootstrap, "tl-budget-topic", 1).await;
     let records: Vec<(String, String, i64)> = (0..300i64)
@@ -1198,7 +1198,7 @@ async fn timeline_filter_budget_exhaustion_reports_and_continues() {
 /// 3 more, landing on 6 total against a budget of 4.
 #[tokio::test]
 async fn timeline_budget_never_overshoots_with_multiple_partitions() {
-    use betrachtung::config::Limits;
+    use arne::config::Limits;
     let bootstrap = start_kafka().await;
     create_topic(&bootstrap, "tl-budget-multi-topic", 3).await;
     for p in 0..3i32 {
@@ -1267,8 +1267,8 @@ async fn timeline_unfiltered_page_crosses_a_hole_in_one_request() {
 /// check stands between "stop" and "spin forever".
 #[tokio::test]
 async fn timeline_scan_stops_on_client_disconnect() {
-    use betrachtung::config::Limits;
-    use betrachtung::message::fetch::fetch_call_count;
+    use arne::config::Limits;
+    use arne::message::fetch::fetch_call_count;
     use futures_util::StreamExt;
 
     let bootstrap = start_kafka().await;

@@ -21,7 +21,7 @@ describe('describeError', () => {
   it('a plain network Error is a connection-lost failure with a retry hint', () => {
     expect(describeError(new Error('Failed to fetch'))).toEqual({
       kind: 'backend',
-      headline: 'Connection to Betrachtung lost',
+      headline: 'Connection to Arne lost',
       hint: 'retrying automatically — the server may be restarting or unreachable from your network',
     })
   })
@@ -34,7 +34,7 @@ describe('describeError', () => {
     const err = new ApiError(502, 'http_502', 'request failed with status 502', null, true)
     expect(describeError(err)).toEqual({
       kind: 'backend',
-      headline: 'Connection to Betrachtung lost',
+      headline: 'Connection to Arne lost',
       hint: 'retrying automatically — the server may be restarting or unreachable from your network',
     })
   })
@@ -50,7 +50,7 @@ describe('describeError', () => {
   })
 
   // Wire contract with the backend's `ApiError::fetch_deadline`: a scan
-  // stalled under Betrachtung's OWN read deadline. Its message blames that
+  // stalled under Arne's OWN read deadline. Its message blames that
   // deadline, so it must never render under the "Kafka unreachable"
   // headline the kafka_* codes get — headline-free, the message stands
   // alone and uncontradicted.

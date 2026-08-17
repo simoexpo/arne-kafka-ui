@@ -1,7 +1,7 @@
-# Betrachtung — Kafka UI
+# Arne — Kafka UI
 
 Fast, reliable Kafka UI for developers. Read-only v1: topic monitoring +
-message lookup. Design spec: `docs/superpowers/specs/2026-08-09-betrachtung-kafka-ui-design.md`.
+message lookup. Design spec: `docs/superpowers/specs/2026-08-09-arne-kafka-ui-design.md`.
 
 ## Stack
 

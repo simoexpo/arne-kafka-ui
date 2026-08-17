@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// End-to-end smoke check for Betrachtung.
+// End-to-end smoke check for Arne.
 //
 // Expects the dev stack to already be running (this script boots nothing):
 //   - backend on :8080 with a `local` cluster configured

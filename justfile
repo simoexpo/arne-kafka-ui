@@ -1,4 +1,4 @@
-# Betrachtung dev commands
+# Arne dev commands
 
 default: test
 
@@ -19,7 +19,7 @@ lint:
     cd frontend && npm run lint && npx tsc -b
 
 docker:
-    docker build -t betrachtung:dev .
+    docker build -t arne:dev .
 
 # one-command playground: kafka + schema registry + demo producer
 playground:

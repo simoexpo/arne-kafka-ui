@@ -1,7 +1,7 @@
-use betrachtung::cluster::registry::ClusterRegistry;
-use betrachtung::cluster::sampler::spawn_sampler;
-use betrachtung::config::Config;
-use betrachtung::state::AppState;
+use arne::cluster::registry::ClusterRegistry;
+use arne::cluster::sampler::spawn_sampler;
+use arne::config::Config;
+use arne::state::AppState;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -30,7 +30,7 @@ async fn main() -> anyhow::Result<()> {
     let state = AppState { registry, limits: Arc::new(config.limits.clone()) };
 
     let listener = tokio::net::TcpListener::bind(("0.0.0.0", config.server.port)).await?;
-    tracing::info!("betrachtung listening on port {}", config.server.port);
-    axum::serve(listener, betrachtung::api::app(state)).await?;
+    tracing::info!("arne listening on port {}", config.server.port);
+    axum::serve(listener, arne::api::app(state)).await?;
     Ok(())
 }

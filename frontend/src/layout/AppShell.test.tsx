@@ -30,7 +30,7 @@ describe('Sidebar', () => {
     await renderWithRouter(<Sidebar cluster="prod" clusters={[...clusters]} active="topics" />, {
       initialPath: '/c/prod/topics',
     })
-    expect(screen.getByAltText('Betrachtung logo')).toHaveAttribute('src', '/logo.svg')
+    expect(screen.getByAltText('Arne logo')).toHaveAttribute('src', '/logo.svg')
   })
 
   it('surfaces a clusters-fetch failure honestly instead of silently rendering as zero other clusters', async () => {
@@ -38,7 +38,7 @@ describe('Sidebar', () => {
       <Sidebar cluster="prod" clusters={[]} active="topics" error={new Error('Failed to fetch')} />,
       { initialPath: '/c/prod/topics' },
     )
-    expect(screen.getByText(/connection to betrachtung lost/i)).toBeInTheDocument()
+    expect(screen.getByText(/connection to arne lost/i)).toBeInTheDocument()
   })
 
   // The UTC/local toggle moved out of the sidebar into the Messages tab's

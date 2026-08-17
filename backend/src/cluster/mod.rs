@@ -60,7 +60,7 @@ static THROWAWAY_SEQ: AtomicU64 = AtomicU64::new(0);
 /// debugging; the id itself is otherwise arbitrary and never reused.
 pub fn throwaway_group_id(kind: &str) -> String {
     let seq = THROWAWAY_SEQ.fetch_add(1, Ordering::Relaxed);
-    format!("betrachtung-{kind}-{}-{}-{seq}", std::process::id(), crate::util::now_ms())
+    format!("arne-{kind}-{}-{}-{seq}", std::process::id(), crate::util::now_ms())
 }
 
 pub struct ClusterHandle {

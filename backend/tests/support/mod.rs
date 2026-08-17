@@ -1,9 +1,9 @@
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use axum::Router;
-use betrachtung::cluster::registry::ClusterRegistry;
-use betrachtung::config::{ClusterConfig, Limits};
-use betrachtung::state::AppState;
+use arne::cluster::registry::ClusterRegistry;
+use arne::config::{ClusterConfig, Limits};
+use arne::state::AppState;
 use http_body_util::BodyExt;
 use rdkafka::admin::{AdminClient, AdminOptions, NewTopic, TopicReplication};
 use rdkafka::consumer::{BaseConsumer, CommitMode, Consumer};
@@ -19,7 +19,7 @@ use tower::ServiceExt;
 
 static KAFKA: OnceCell<(ContainerAsync<Kafka>, String)> = OnceCell::const_new();
 
-const KAFKA_CONTAINER_NAME: &str = "betrachtung-test-kafka";
+const KAFKA_CONTAINER_NAME: &str = "arne-test-kafka";
 
 /// The container lives in a `static`, which Rust never drops, so testcontainers'
 /// drop-based cleanup never runs. Remove the container explicitly when the test
@@ -320,7 +320,7 @@ pub async fn produce_at_many(bootstrap: &str, topic: &str, partition: i32, recor
 /// comment) risks fencing a still-open transaction from a previous run.
 pub async fn produce_transactional(bootstrap: &str, topic: &str, count: usize) {
     let unique = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
-    let txn_id = format!("betrachtung-test-txn-{}-{unique}", std::process::id());
+    let txn_id = format!("arne-test-txn-{}-{unique}", std::process::id());
     let mut cc = client(bootstrap);
     cc.set("transactional.id", &txn_id);
     let producer: FutureProducer = cc.create().unwrap();

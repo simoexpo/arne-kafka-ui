@@ -48,8 +48,8 @@ export function Sidebar({ cluster, clusters, active, error }: {
   return (
     <aside className="flex w-56 flex-col gap-6 border-r border-zinc-200 p-4 dark:border-zinc-800">
       <div className="flex items-center gap-2 text-sm font-semibold tracking-wide">
-        <img src="/logo.svg" alt="Betrachtung logo" className="h-6 w-auto" />
-        Betrachtung
+        <img src="/logo.svg" alt="Arne logo" className="h-6 w-auto" />
+        Arne
       </div>
       <nav className="flex flex-col gap-1">
         {SECTIONS.map((s) => (

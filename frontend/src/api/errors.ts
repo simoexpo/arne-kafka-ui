@@ -1,10 +1,10 @@
 import { ApiError } from './client'
 
 // Distinguishes "Kafka is unreachable" (our backend answered fine; the
-// broker didn't) from "connection to the Betrachtung server itself was
+// broker didn't) from "connection to the Arne server itself was
 // lost" (the HTTP call never got an answer — the only real-world case is
 // an already-open tab whose server restarted, crashed, or dropped off the
-// network; Betrachtung ships as one binary, so this is never phrased as
+// network; Arne ships as one binary, so this is never phrased as
 // two products) from ordinary resource errors (topic/group not found, bad
 // request, …), which render as today with no scary headline.
 export type ErrorKind = 'kafka' | 'backend' | 'app'
@@ -17,7 +17,7 @@ export interface ErrorDescription {
 const HTTP_5XX_CODE = /^http_5\d\d$/
 const CONNECTION_LOST: ErrorDescription = {
   kind: 'backend',
-  headline: 'Connection to Betrachtung lost',
+  headline: 'Connection to Arne lost',
   hint: 'retrying automatically — the server may be restarting or unreachable from your network',
 }
 
