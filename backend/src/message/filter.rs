@@ -41,9 +41,28 @@ impl Filter {
     }
 }
 
+// Path tokenizer, identical on both sides (frontend `splitPath`): unquoted
+// `.` separates segments; a double-quoted run is part of its segment with
+// the quotes stripped, so `.`/`:`/`=` inside quotes are literal. An
+// unclosed quote runs to the end. Quoting affects tokenization only.
+fn split_path(path: &str) -> Vec<String> {
+    let mut segments = Vec::new();
+    let mut current = String::new();
+    let mut in_quotes = false;
+    for c in path.chars() {
+        match c {
+            '"' => in_quotes = !in_quotes,
+            '.' if !in_quotes => segments.push(std::mem::take(&mut current)),
+            _ => current.push(c),
+        }
+    }
+    segments.push(current);
+    segments
+}
+
 fn json_at_path<'a>(root: &'a serde_json::Value, path: &str) -> Option<&'a serde_json::Value> {
     let mut current = root;
-    for seg in path.split('.') {
+    for seg in &split_path(path) {
         current = match current {
             serde_json::Value::Object(map) => map.get(seg)?,
             serde_json::Value::Array(items) => items.get(seg.parse::<usize>().ok()?)?,
@@ -308,6 +327,27 @@ mod tests {
         assert!(Filter::parse("json_contains", "x", None).is_err());
         let m = msg(None, r#"{"a":"x"}"#, Encoding::DecodeError);
         assert!(!matches(&Filter::parse("json_contains", "x", Some("a")).unwrap(), &m));
+    }
+
+    /// Owner ruling 2026-08-17: a double-quoted run inside a path is part
+    /// of its segment with quotes stripped, so field names containing
+    /// `.`/`:`/`=` are addressable — `path."to.value"` names `to.value`.
+    #[test]
+    fn quoted_path_segments_address_fields_with_special_characters() {
+        let m = msg(None, r#"{"a.b":1,"x":{"b=c":"hit","d:e":[7]}}"#, Encoding::Json);
+        assert!(matches(&Filter::parse("json_eq", "1", Some(r#""a.b""#)).unwrap(), &m));
+        assert!(matches(&Filter::parse("json_eq", "hit", Some(r#"x."b=c""#)).unwrap(), &m));
+        assert!(matches(&Filter::parse("json_eq", "7", Some(r#"x."d:e".0"#)).unwrap(), &m));
+        assert!(!matches(&Filter::parse("json_eq", "1", Some(r#""a.c""#)).unwrap(), &m));
+    }
+
+    /// An unclosed quote runs to the end of the path; quoting is
+    /// tokenization-only, so a quoted numeric still indexes an array.
+    #[test]
+    fn quoted_path_edges() {
+        let m = msg(None, r#"{"a.b":1,"list":[5]}"#, Encoding::Json);
+        assert!(matches(&Filter::parse("json_eq", "1", Some(r#""a.b"#)).unwrap(), &m));
+        assert!(matches(&Filter::parse("json_eq", "5", Some(r#"list."0""#)).unwrap(), &m));
     }
 
     #[test]
