@@ -28,6 +28,17 @@ describe('proposalsFor', () => {
     expect(proposalsFor('VALUE.cus', ['customer.id', 'status'])).toEqual(['value.customer.id'])
   })
 
+  it('array fields propose with [] and complete a typed [] or ANY numeric index', () => {
+    const fields = ['items[].qty', 'items[].sku', 'nums[]']
+    expect(proposalsFor('value.items[].s', fields)).toEqual(['value.items[].sku'])
+    expect(proposalsFor('value.items[]', fields)).toEqual(['value.items[].qty', 'value.items[].sku'])
+    expect(proposalsFor('value.items.2.s', fields)).toEqual(['value.items.2.sku'])
+    expect(proposalsFor('value.items.10.', fields)).toEqual(['value.items.10.qty', 'value.items.10.sku'])
+    expect(proposalsFor('value.num', fields)).toEqual(['value.nums[]'])
+    expect(proposalsFor('value.nums[]', fields)).toEqual([]) // fully typed
+    expect(proposalsFor('value.nums.3', fields)).toEqual([]) // fully typed via index
+  })
+
   it('no proposals for empty, quoted, or completed-operator input', () => {
     expect(proposalsFor('', ['a'])).toEqual([])
     expect(proposalsFor('"key', ['a'])).toEqual([])

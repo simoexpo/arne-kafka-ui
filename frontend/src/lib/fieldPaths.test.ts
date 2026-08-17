@@ -13,8 +13,13 @@ describe('extractFieldPaths', () => {
     expect(extractFieldPaths(rows)).toEqual(['a.x', 'b', 'c'])
   })
 
-  it('descends arrays via .0', () => {
-    expect(extractFieldPaths([row('{"items":[{"sku":"x"}],"tags":["a"]}')])).toEqual(['items.0.sku', 'tags.0'])
+  it('emits arrays as [] any-element tokens', () => {
+    expect(extractFieldPaths([row('{"items":[{"sku":"x"}],"tags":["a"]}')])).toEqual(['items[].sku', 'tags[]'])
+    expect(extractFieldPaths([row('{"nested":[[1]]}')])).toEqual(['nested[][]'])
+  })
+
+  it('quotes names containing bracket characters too', () => {
+    expect(extractFieldPaths([row('{"a[]b":1}')])).toEqual(['"a[]b"'])
   })
 
   it('skips non-JSON, decode-error and null values', () => {

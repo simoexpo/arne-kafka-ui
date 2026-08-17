@@ -14,7 +14,11 @@ export function extractFieldPaths(rows: readonly MessageOut[], maxRows = 200, ma
     }
     if (depth >= maxDepth) return
     if (Array.isArray(node)) {
-      if (node.length > 0) walk(node[0], prefix === '' ? '0' : `${prefix}.0`, depth + 1)
+      // Arrays emit the `[]` any-element token (owner ruling 2026-08-17):
+      // a proposal like `items[].sku` matches every element, and typing an
+      // explicit index instead still completes (see filterProposals).
+      // Element 0 stands in for the shape.
+      if (node.length > 0) walk(node[0], `${prefix}[]`, depth + 1)
       return
     }
     if (node !== null && typeof node === 'object') {
@@ -23,7 +27,7 @@ export function extractFieldPaths(rows: readonly MessageOut[], maxRows = 200, ma
         // the proposal is directly typeable (`value."a.b"=1`); a name
         // containing a quote itself has no escape and is skipped.
         if (k.includes('"')) continue
-        const seg = /[.:=]/.test(k) ? `"${k}"` : k
+        const seg = /[.:=[\]]/.test(k) ? `"${k}"` : k
         walk(v, prefix === '' ? seg : `${prefix}.${seg}`, depth + 1)
       }
     }
