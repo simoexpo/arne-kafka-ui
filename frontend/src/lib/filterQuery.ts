@@ -34,14 +34,18 @@ function splitPath(path: string): string[] {
   return segments
 }
 
-// Index of the first `:`, `=`, `>` or `<` sitting outside double quotes,
-// or -1.
+// Index of the first operator start (`:`, `=`, `>`, `<`, or `!` immediately
+// followed by `=`) sitting outside double quotes, or -1. A lone `!` stays
+// literal text — the `!expr` shape is reserved for future boolean
+// composition.
 function unquotedOperatorIndex(text: string): number {
   let inQuotes = false
   for (let i = 0; i < text.length; i++) {
     const c = text[i]
     if (c === '"') inQuotes = !inQuotes
-    else if ((c === ':' || c === '=' || c === '>' || c === '<') && !inQuotes) return i
+    else if (inQuotes) continue
+    else if (c === ':' || c === '=' || c === '>' || c === '<') return i
+    else if (c === '!' && text[i + 1] === '=') return i
   }
   return -1
 }
@@ -149,6 +153,14 @@ function keyEqPredicate(q: string) {
   return (m: MessageOut) => !!m.key && m.key.text.toLowerCase() === needle
 }
 
+// `!=` matches only where the target is readable: a null key, decode-error
+// value, or missing/non-scalar field never matches — we never assert
+// content we couldn't read is "different".
+function keyNeqPredicate(q: string) {
+  const needle = q.toLowerCase()
+  return (m: MessageOut) => !!m.key && m.key.text.toLowerCase() !== needle
+}
+
 function valueContainsPredicate(q: string) {
   const needle = q.toLowerCase()
   return (m: MessageOut) =>
@@ -186,7 +198,9 @@ function jsonEqCi(a: unknown, b: unknown): boolean {
   return a === b
 }
 
-function valueEqPredicate(q: string) {
+// The `=`/`!=` equality reading of a value: `null` when unreadable
+// (missing or decode-error) — `=` needs `true`, `!=` needs `false`.
+function valueEqualsCheck(q: string) {
   const needle = q.toLowerCase()
   let expected: unknown
   let expectedIsJson = true
@@ -195,8 +209,8 @@ function valueEqPredicate(q: string) {
   } catch {
     expectedIsJson = false
   }
-  return (m: MessageOut) => {
-    if (!m.value || m.value.encoding === 'decode_error') return false
+  return (m: MessageOut): boolean | null => {
+    if (!m.value || m.value.encoding === 'decode_error') return null
     if (expectedIsJson) {
       try {
         return jsonEqCi(JSON.parse(m.value.text), expected)
@@ -206,6 +220,16 @@ function valueEqPredicate(q: string) {
     }
     return m.value.text.toLowerCase() === needle
   }
+}
+
+function valueEqPredicate(q: string) {
+  const eq = valueEqualsCheck(q)
+  return (m: MessageOut) => eq(m) === true
+}
+
+function valueNeqPredicate(q: string) {
+  const eq = valueEqualsCheck(q)
+  return (m: MessageOut) => eq(m) === false
 }
 
 function scalarText(v: unknown): string | null {
@@ -232,6 +256,14 @@ function jsonEqPredicate(path: string, q: string) {
   return (m: MessageOut) => {
     const s = jsonPathScalar(m, path)
     return s !== null && s === needle
+  }
+}
+
+function jsonNeqPredicate(path: string, q: string) {
+  const needle = q.toLowerCase()
+  return (m: MessageOut) => {
+    const s = jsonPathScalar(m, path)
+    return s !== null && s !== needle
   }
 }
 
@@ -284,6 +316,10 @@ export function parseFilterQuery(text: string): ParsedFilterQuery {
     const q = text.slice('key='.length)
     return { api: { filter: 'key_eq', q }, predicate: keyEqPredicate(q) }
   }
+  if (prefixIs(text, 'key!=')) {
+    const q = text.slice('key!='.length)
+    return { api: { filter: 'key_neq', q }, predicate: keyNeqPredicate(q) }
+  }
   const keyCmp = prefixIs(text, 'key>') || prefixIs(text, 'key<') ? cmpAt(text, 3) : null
   if (keyCmp !== null) {
     const q = text.slice(3 + keyCmp.len)
@@ -296,6 +332,10 @@ export function parseFilterQuery(text: string): ParsedFilterQuery {
   if (prefixIs(text, 'value=')) {
     const q = text.slice('value='.length)
     return { api: { filter: 'value_eq', q }, predicate: valueEqPredicate(q) }
+  }
+  if (prefixIs(text, 'value!=')) {
+    const q = text.slice('value!='.length)
+    return { api: { filter: 'value_neq', q }, predicate: valueNeqPredicate(q) }
   }
   const valueCmp = prefixIs(text, 'value>') || prefixIs(text, 'value<') ? cmpAt(text, 5) : null
   if (valueCmp !== null) {
@@ -315,6 +355,10 @@ export function parseFilterQuery(text: string): ParsedFilterQuery {
       if (ch === '=') {
         const q = rest.slice(opIdx + 1)
         return { api: { filter: 'json_eq', q, path }, predicate: jsonEqPredicate(path, q) }
+      }
+      if (ch === '!') {
+        const q = rest.slice(opIdx + 2)
+        return { api: { filter: 'json_neq', q, path }, predicate: jsonNeqPredicate(path, q) }
       }
       const c = cmpAt(rest, opIdx)!
       const q = rest.slice(opIdx + c.len)

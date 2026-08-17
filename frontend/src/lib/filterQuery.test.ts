@@ -157,6 +157,31 @@ describe('parseFilterQuery', () => {
     expect(isIncompleteFieldExpression('value.amount>')).toBe(false)
     expect(isIncompleteFieldExpression('value.amount')).toBe(true)
   })
+  it('!= parses on all three targets and mirrors = exactly, negated', () => {
+    expect(parseFilterQuery('key!=k7').api).toEqual({ filter: 'key_neq', q: 'k7' })
+    expect(parseFilterQuery('Value!=x').api).toEqual({ filter: 'value_neq', q: 'x' })
+    expect(parseFilterQuery('value.status!=open').api).toEqual({ filter: 'json_neq', q: 'open', path: 'status' })
+    const m = jsonRow('{"status":"Open","qty":2}')
+    expect(parseFilterQuery('value.status!=closed').predicate(m)).toBe(true)
+    expect(parseFilterQuery('value.status!=OPEN').predicate(m)).toBe(false)
+    expect(parseFilterQuery('value!={"qty":2,"status":"open"}').predicate(m)).toBe(false)
+    expect(parseFilterQuery('value!={"qty":3,"status":"open"}').predicate(m)).toBe(true)
+    expect(parseFilterQuery('key!=k9').predicate(mk(0, 7, 1))).toBe(true)
+    expect(parseFilterQuery('key!=K7').predicate(mk(0, 7, 1))).toBe(false)
+  })
+  it('!= never asserts about unreadable content, and a lone ! stays literal', () => {
+    const nullKey = { ...mk(0, 1, 1), key: null }
+    expect(parseFilterQuery('key!=a').predicate(nullKey)).toBe(false)
+    const err = mk(0, 1, 1, 'x')
+    err.value!.encoding = 'decode_error'
+    expect(parseFilterQuery('value!=a').predicate(err)).toBe(false)
+    const j = jsonRow('{"a":{"b":1}}')
+    expect(parseFilterQuery('value.missing!=x').predicate(j)).toBe(false)
+    expect(parseFilterQuery('value.a!=x').predicate(j)).toBe(false) // object, not scalar
+    expect(parseFilterQuery('hello!world').api).toEqual({ filter: 'contains', q: 'hello!world' })
+    expect(isIncompleteFieldExpression('value.a!=')).toBe(false)
+    expect(isIncompleteFieldExpression('value.a!')).toBe(true)
+  })
   it('decode-error values never content-match', () => {
     const f = parseFilterQuery('AAEC')
     const m = mk(0, 1, 1, 'AAECAw==')

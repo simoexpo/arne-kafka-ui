@@ -47,6 +47,7 @@ type TimelineAnchor = 'latest' | 'beginning' | 'offset' | 'timestamp'
 export type TimelineFilterKind =
   | 'contains' | 'key_contains' | 'value_contains'
   | 'key_eq' | 'value_eq' | 'json_eq' | 'json_contains'
+  | 'key_neq' | 'value_neq' | 'json_neq'
   | 'key_cmp' | 'value_cmp' | 'json_cmp'
 
 export type CmpOpWire = 'gt' | 'gte' | 'lt' | 'lte'
