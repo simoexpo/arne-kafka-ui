@@ -1,8 +1,33 @@
+import { useQuery } from '@tanstack/react-query'
 import { Link } from '@tanstack/react-router'
+import { getSubjectOfId } from '../../api/client'
 import type { DecodedPayload } from '../../api/types'
 import { CopyButton } from '../CopyButton'
 import { EncodingBadge } from './EncodingBadge'
 import { JsonView } from './JsonView'
+
+// Resolves the id to its subject+version on expansion (one request per
+// DISTINCT id, cached for the session) and links straight to the canonical
+// URL — no redirect hop. Unresolvable (registry down, id gone) degrades to
+// plain text rather than linking to an error page.
+function SchemaIdBadge({ cluster, id }: { cluster: string; id: number }) {
+  const resolved = useQuery({
+    queryKey: ['schema-id', cluster, id],
+    queryFn: ({ signal }) => getSubjectOfId(cluster, id, signal),
+    staleTime: Infinity,
+  })
+  if (!resolved.data) return <span className="text-xs">schema id {id}</span>
+  return (
+    <Link
+      to="/c/$cluster/schemas/$subject"
+      params={{ cluster, subject: resolved.data.subject }}
+      search={{ version: resolved.data.version }}
+      className="text-xs text-blue-600 hover:underline dark:text-blue-400"
+    >
+      schema id {id}
+    </Link>
+  )
+}
 
 function copyTextFor(payload: DecodedPayload): string {
   if (payload.encoding === 'json' || payload.encoding === 'avro' || payload.encoding === 'protobuf') {
@@ -33,13 +58,7 @@ export function PayloadView({
       {payload && <EncodingBadge encoding={payload.encoding} />}
       {payload && payload.schema_id !== null && (
         cluster !== undefined ? (
-          <Link
-            to="/c/$cluster/schemas/by-id/$id"
-            params={{ cluster, id: String(payload.schema_id) }}
-            className="text-xs text-blue-600 hover:underline dark:text-blue-400"
-          >
-            schema id {payload.schema_id}
-          </Link>
+          <SchemaIdBadge cluster={cluster} id={payload.schema_id} />
         ) : (
           <span className="text-xs">schema id {payload.schema_id}</span>
         )

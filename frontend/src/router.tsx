@@ -9,7 +9,6 @@ import { TopicDetailPage } from './pages/TopicDetailPage'
 import { GroupsPage } from './pages/GroupsPage'
 import { GroupDetailPage } from './pages/GroupDetailPage'
 import { SchemaPage } from './pages/SchemaPage'
-import { SchemaByIdPage } from './pages/SchemaByIdPage'
 import { SubjectDetailPage } from './pages/SubjectDetailPage'
 
 const rootRoute = createRootRoute({ component: AppShell })
@@ -21,12 +20,21 @@ const topicDetailRoute = createRoute({ getParentRoute: () => clusterRoute, path:
 const groupsRoute = createRoute({ getParentRoute: () => clusterRoute, path: 'consumers', component: GroupsPage })
 const groupDetailRoute = createRoute({ getParentRoute: () => clusterRoute, path: 'consumers/$group', component: GroupDetailPage })
 const schemaRoute = createRoute({ getParentRoute: () => clusterRoute, path: 'schemas', component: SchemaPage })
-const subjectDetailRoute = createRoute({ getParentRoute: () => clusterRoute, path: 'schemas/$subject', component: SubjectDetailPage })
-const schemaByIdRoute = createRoute({ getParentRoute: () => clusterRoute, path: 'schemas/by-id/$id', component: SchemaByIdPage })
+const subjectDetailRoute = createRoute({
+  getParentRoute: () => clusterRoute,
+  path: 'schemas/$subject',
+  component: SubjectDetailPage,
+  // The selected version lives in the URL (`?version=N`) so schema links
+  // land on an exact version and versions are shareable; absent = latest.
+  validateSearch: (search: Record<string, unknown>): { version?: number } => {
+    const v = Number(search.version)
+    return Number.isInteger(v) && v > 0 ? { version: v } : {}
+  },
+})
 
 const routeTree = rootRoute.addChildren([
   indexRoute,
-  clusterRoute.addChildren([overviewRoute, topicsRoute, topicDetailRoute, groupsRoute, groupDetailRoute, schemaRoute, subjectDetailRoute, schemaByIdRoute]),
+  clusterRoute.addChildren([overviewRoute, topicsRoute, topicDetailRoute, groupsRoute, groupDetailRoute, schemaRoute, subjectDetailRoute]),
 ])
 
 export const router = createRouter({ routeTree })

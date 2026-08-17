@@ -3,17 +3,35 @@ import userEvent from '@testing-library/user-event'
 import { render, screen } from '@testing-library/react'
 import { renderWithRouter } from '../../test/utils'
 import { PayloadView } from './PayloadView'
+import * as client from '../../api/client'
+
+vi.mock('../../api/client', async (importOriginal) => ({
+  ...(await importOriginal<typeof client>()),
+  getSubjectOfId: vi.fn(),
+}))
 
 describe('PayloadView', () => {
-  // With a cluster in hand (the message tab), the schema id links into the
-  // schemas section by ID — exact under any naming strategy, resolved
-  // server-side (owner request 2026-08-17).
-  it('schema id links to the schema page when a cluster is provided', async () => {
+  // With a cluster in hand (the message tab), the schema id resolves to its
+  // subject+version on expansion (cached per id) and links straight to the
+  // canonical URL — no redirect hop (owner ruling 2026-08-18).
+  it('schema id resolves and links to the exact subject version', async () => {
+    vi.mocked(client.getSubjectOfId).mockResolvedValue({ subject: 'sr-avro-value', version: 1, as_of: 1 })
     await renderWithRouter(
       <PayloadView payload={{ encoding: 'json', text: '{"a":1}', schema_id: 7, error: null }} label="value" cluster="prod" />,
       { initialPath: '/c/prod/topics/orders' },
     )
-    expect(screen.getByRole('link', { name: /schema id 7/ })).toHaveAttribute('href', '/c/prod/schemas/by-id/7')
+    const link = await screen.findByRole('link', { name: /schema id 7/ })
+    expect(link).toHaveAttribute('href', '/c/prod/schemas/sr-avro-value?version=1')
+  })
+
+  it('schema id stays plain text while unresolvable', async () => {
+    vi.mocked(client.getSubjectOfId).mockRejectedValue(new Error('registry down'))
+    await renderWithRouter(
+      <PayloadView payload={{ encoding: 'json', text: '{"a":1}', schema_id: 7, error: null }} label="value" cluster="prod" />,
+      { initialPath: '/c/prod/topics/orders' },
+    )
+    expect(screen.getByText(/schema id 7/)).toBeInTheDocument()
+    expect(screen.queryByRole('link', { name: /schema id 7/ })).not.toBeInTheDocument()
   })
 
   it('renders json payloads as a tree with schema id', () => {

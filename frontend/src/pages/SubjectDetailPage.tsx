@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { useMutation, useQuery } from '@tanstack/react-query'
-import { Link, useParams } from '@tanstack/react-router'
+import { Link, useNavigate, useParams, useSearch } from '@tanstack/react-router'
 import { checkCompatibility, getCompatibilityLevel, getSubjectDetail, getSubjectStrategy } from '../api/client'
 import { CopyButton } from '../components/CopyButton'
 import { JsonView } from '../components/messages/JsonView'
@@ -150,21 +150,14 @@ function CompatibilityTab({ cluster, subject, schemaType }: { cluster: string; s
 const TABS = ['Definition', 'Compatibility'] as const
 type Tab = (typeof TABS)[number]
 
-export function SubjectDetailView({
-  cluster,
-  subject,
-  // A schema-id link lands on the exact version that id belongs to, not
-  // the subject's latest (owner ruling 2026-08-18).
-  initialVersion,
-}: {
-  cluster: string
-  subject: string
-  initialVersion?: number
-}) {
+export function SubjectDetailView({ cluster, subject }: { cluster: string; subject: string }) {
   const [tab, setTab] = useState<Tab>('Definition')
-  // `undefined` = the registry's latest; the served version lands in
-  // `detail.data.version`, which is what the selector displays.
-  const [version, setVersion] = useState<number | undefined>(initialVersion)
+  // The selected version lives in the URL (`?version=N`, absent = latest):
+  // schema-id links land on an exact version, version views are shareable,
+  // and back/forward walks the version history. The selector navigates.
+  const search = useSearch({ strict: false }) as { version?: number }
+  const version = typeof search.version === 'number' ? search.version : undefined
+  const navigate = useNavigate()
   const detail = useQuery({
     queryKey: ['subject', cluster, subject, version ?? 'latest'],
     queryFn: ({ signal }) => getSubjectDetail(cluster, subject, version, signal),
@@ -208,7 +201,13 @@ export function SubjectDetailView({
                 <select
                   aria-label="version"
                   value={detail.data.version}
-                  onChange={(e) => setVersion(Number(e.target.value))}
+                  onChange={(e) =>
+                    navigate({
+                      to: '/c/$cluster/schemas/$subject',
+                      params: { cluster, subject },
+                      search: { version: Number(e.target.value) },
+                    })
+                  }
                   className="rounded border border-zinc-300 bg-transparent px-1.5 py-0.5 dark:border-zinc-700"
                 >
                   {detail.data.versions.map((v) => (
