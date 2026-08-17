@@ -22,6 +22,14 @@ describe('extractFieldPaths', () => {
     expect(extractFieldPaths(rows)).toEqual([])
   })
 
+  it('quotes segments containing . : or = so proposals stay grammar-usable', () => {
+    expect(extractFieldPaths([row('{"a.b":1,"x":{"c=d":2,"e:f":3}}')])).toEqual(['"a.b"', 'x."c=d"', 'x."e:f"'])
+  })
+
+  it('skips field names containing a double quote (unaddressable)', () => {
+    expect(extractFieldPaths([row('{"a\\"b":1,"ok":2}')])).toEqual(['ok'])
+  })
+
   it('caps depth and row sample', () => {
     const deep = row('{"a":{"b":{"c":{"d":{"e":{"f":{"g":1}}}}}}}')
     expect(extractFieldPaths([deep], 200, 3)).toEqual([])

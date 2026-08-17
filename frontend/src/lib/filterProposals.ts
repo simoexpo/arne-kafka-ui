@@ -6,7 +6,10 @@ const MAX_FIELD_ROWS = 5
 // fields are known; a quoted or completed-operator input proposes nothing.
 export function proposalsFor(text: string, fields: readonly string[]): string[] {
   if (text === '' || text.startsWith('"')) return []
-  if (text.startsWith('value.')) {
+  // Prefix matching mirrors the grammar's case-insensitive prefixes;
+  // proposals themselves stay canonical lowercase.
+  const lower = text.toLowerCase()
+  if (lower.startsWith('value.')) {
     const typed = text.slice('value.'.length)
     if (/[:=]/.test(typed)) return []
     return fields
@@ -14,8 +17,8 @@ export function proposalsFor(text: string, fields: readonly string[]): string[] 
       .slice(0, MAX_FIELD_ROWS)
       .map((f) => `value.${f}`)
   }
-  if ('key'.startsWith(text)) return ['key:', 'key=']
-  if ('value'.startsWith(text)) {
+  if ('key'.startsWith(lower)) return ['key:', 'key=']
+  if ('value'.startsWith(lower)) {
     const fieldRows = fields.slice(0, MAX_FIELD_ROWS).map((f) => `value.${f}`)
     return fieldRows.length > 0 ? ['value:', 'value=', ...fieldRows] : ['value:', 'value=', 'value.']
   }

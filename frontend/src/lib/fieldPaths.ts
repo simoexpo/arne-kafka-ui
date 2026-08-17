@@ -19,7 +19,12 @@ export function extractFieldPaths(rows: readonly MessageOut[], maxRows = 200, ma
     }
     if (node !== null && typeof node === 'object') {
       for (const [k, v] of Object.entries(node as Record<string, unknown>)) {
-        walk(v, prefix === '' ? k : `${prefix}.${k}`, depth + 1)
+        // Names containing grammar characters are emitted double-quoted so
+        // the proposal is directly typeable (`value."a.b"=1`); a name
+        // containing a quote itself has no escape and is skipped.
+        if (k.includes('"')) continue
+        const seg = /[.:=]/.test(k) ? `"${k}"` : k
+        walk(v, prefix === '' ? seg : `${prefix}.${seg}`, depth + 1)
       }
     }
   }

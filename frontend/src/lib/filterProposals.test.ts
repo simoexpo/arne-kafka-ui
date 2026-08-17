@@ -22,6 +22,12 @@ describe('proposalsFor', () => {
     expect(proposalsFor('value.customer.id', fields)).toEqual([])
   })
 
+  it('prefix matching is case-insensitive, proposals stay canonical lowercase', () => {
+    expect(proposalsFor('KEY', [])).toEqual(['key:', 'key='])
+    expect(proposalsFor('Val', [])).toEqual(['value:', 'value=', 'value.'])
+    expect(proposalsFor('VALUE.cus', ['customer.id', 'status'])).toEqual(['value.customer.id'])
+  })
+
   it('no proposals for empty, quoted, or completed-operator input', () => {
     expect(proposalsFor('', ['a'])).toEqual([])
     expect(proposalsFor('"key', ['a'])).toEqual([])
