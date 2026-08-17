@@ -1,0 +1,32 @@
+import { describe, expect, it } from 'vitest'
+import { proposalsFor } from './filterProposals'
+
+describe('proposalsFor', () => {
+  it('prefix of key proposes both key operators', () => {
+    expect(proposalsFor('k', [])).toEqual(['key:', 'key='])
+    expect(proposalsFor('key', [])).toEqual(['key:', 'key='])
+  })
+
+  it('prefix of value proposes operators plus bare value. when no fields known', () => {
+    expect(proposalsFor('val', [])).toEqual(['value:', 'value=', 'value.'])
+  })
+
+  it('prefix of value proposes up to 5 field rows instead of value. when fields known', () => {
+    const fields = ['a', 'b', 'c', 'd', 'e', 'f']
+    expect(proposalsFor('val', fields)).toEqual(['value:', 'value=', 'value.a', 'value.b', 'value.c', 'value.d', 'value.e'])
+  })
+
+  it('value. prefix filters fields by typed path, max 5, no operator rows', () => {
+    const fields = ['customer.id', 'customer.name', 'status']
+    expect(proposalsFor('value.cus', fields)).toEqual(['value.customer.id', 'value.customer.name'])
+    expect(proposalsFor('value.customer.id', fields)).toEqual([])
+  })
+
+  it('no proposals for empty, quoted, or completed-operator input', () => {
+    expect(proposalsFor('', ['a'])).toEqual([])
+    expect(proposalsFor('"key', ['a'])).toEqual([])
+    expect(proposalsFor('key:', ['a'])).toEqual([])
+    expect(proposalsFor('value.a:x', ['a'])).toEqual([])
+    expect(proposalsFor('banana', ['a'])).toEqual([])
+  })
+})
