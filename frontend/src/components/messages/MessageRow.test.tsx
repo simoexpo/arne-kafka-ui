@@ -92,6 +92,14 @@ describe('MessageRow', () => {
     expect(block.className).toMatch(/\bwhitespace-nowrap\b/)
   })
 
+  it('headers stack under the key in its column, not below the value', () => {
+    render(<MessageRow message={msg()} expanded onToggle={() => {}} />)
+    const keyColumn = screen.getByTestId('key-column')
+    expect(keyColumn).toContainElement(screen.getByText('key'))
+    expect(keyColumn).toContainElement(screen.getByTestId('headers-scroll'))
+    expect(keyColumn).not.toContainElement(screen.getByText('value'))
+  })
+
   describe('keyboard operability', () => {
     // ARIA forbids interactive descendants inside role="button" (the row
     // wraps focusable copy buttons and a JSON <details>/<summary>), and

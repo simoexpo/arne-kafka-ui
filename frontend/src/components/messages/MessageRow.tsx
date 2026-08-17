@@ -108,26 +108,29 @@ export function MessageRow({
       </div>
       {expanded && (
         <div className="mt-2 grid cursor-default grid-cols-1 gap-3 md:grid-cols-2" onClick={(e) => e.stopPropagation()}>
-          <div>
+          {/* Headers live under the key (owner ruling 2026-08-17): the key
+              is usually far shorter than the value, so its column had dead
+              space exactly where the headers fit. */}
+          <div data-testid="key-column" className="space-y-3">
             <PayloadView payload={message.key} label="key" />
+            <div>
+              <div className="mb-1 text-zinc-500">headers</div>
+              {/* Same future-proofing as PayloadView's body: capped height,
+                  scrollbars only on overflow, long pairs scroll sideways. */}
+              <div data-testid="headers-scroll" className="max-h-80 overflow-auto whitespace-nowrap">
+                {message.headers.length === 0 && <span className="text-zinc-400">no headers</span>}
+                {message.headers.map((h, i) => (
+                  <div key={i}>
+                    <span className="text-sky-800 dark:text-sky-300">{h.key}</span>
+                    <span className="text-zinc-400">: </span>
+                    {h.value}
+                  </div>
+                ))}
+              </div>
+            </div>
           </div>
           <div>
             <PayloadView payload={message.value} label="value" />
-          </div>
-          <div className="md:col-span-2">
-            <div className="mb-1 text-zinc-500">headers</div>
-            {/* Same future-proofing as PayloadView's body: capped height,
-                scrollbars only on overflow, long pairs scroll sideways. */}
-            <div data-testid="headers-scroll" className="max-h-80 overflow-auto whitespace-nowrap">
-              {message.headers.length === 0 && <span className="text-zinc-400">no headers</span>}
-              {message.headers.map((h, i) => (
-                <div key={i}>
-                  <span className="text-sky-800 dark:text-sky-300">{h.key}</span>
-                  <span className="text-zinc-400">: </span>
-                  {h.value}
-                </div>
-              ))}
-            </div>
           </div>
         </div>
       )}
