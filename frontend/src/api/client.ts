@@ -1,5 +1,5 @@
 import type {
-  ClustersResponse, GroupDetail, GroupList, Overview, SubjectDetail, SubjectList,
+  ClustersResponse, GroupDetail, GroupList, Overview, RegistrySettings, SubjectDetail, SubjectList,
   Throughput, TopicConsumers, TopicDetail, TopicList,
 } from './types'
 
@@ -65,5 +65,6 @@ export const getThroughput = (c: string, t: string, signal?: AbortSignal) => fet
 export const getGroups = (c: string, signal?: AbortSignal) => fetchJson<GroupList>(`/api/clusters/${enc(c)}/groups`, signal)
 export const getGroupDetail = (c: string, g: string, signal?: AbortSignal) => fetchJson<GroupDetail>(`/api/clusters/${enc(c)}/groups/${enc(g)}`, signal)
 export const getSubjects = (c: string, signal?: AbortSignal) => fetchJson<SubjectList>(`/api/clusters/${enc(c)}/subjects`, signal)
+export const getRegistrySettings = (c: string, signal?: AbortSignal) => fetchJson<RegistrySettings>(`/api/clusters/${enc(c)}/schema-registry`, signal)
 export const getSubjectDetail = (c: string, s: string, version?: number, signal?: AbortSignal) =>
   fetchJson<SubjectDetail>(`/api/clusters/${enc(c)}/subjects/${enc(s)}${version !== undefined ? `?version=${version}` : ''}`, signal)

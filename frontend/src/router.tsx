@@ -19,8 +19,8 @@ const topicsRoute = createRoute({ getParentRoute: () => clusterRoute, path: 'top
 const topicDetailRoute = createRoute({ getParentRoute: () => clusterRoute, path: 'topics/$topic', component: TopicDetailPage })
 const groupsRoute = createRoute({ getParentRoute: () => clusterRoute, path: 'consumers', component: GroupsPage })
 const groupDetailRoute = createRoute({ getParentRoute: () => clusterRoute, path: 'consumers/$group', component: GroupDetailPage })
-const schemaRoute = createRoute({ getParentRoute: () => clusterRoute, path: 'schema', component: SchemaPage })
-const subjectDetailRoute = createRoute({ getParentRoute: () => clusterRoute, path: 'schema/$subject', component: SubjectDetailPage })
+const schemaRoute = createRoute({ getParentRoute: () => clusterRoute, path: 'schemas', component: SchemaPage })
+const subjectDetailRoute = createRoute({ getParentRoute: () => clusterRoute, path: 'schemas/$subject', component: SubjectDetailPage })
 
 const routeTree = rootRoute.addChildren([
   indexRoute,

@@ -17,7 +17,7 @@ describe('Sidebar', () => {
     expect(screen.getByRole('link', { name: /overview/i })).toHaveAttribute('href', '/c/prod/overview')
     expect(screen.getByRole('link', { name: /topics/i })).toHaveAttribute('href', '/c/prod/topics')
     expect(screen.getByRole('link', { name: /consumers/i })).toHaveAttribute('href', '/c/prod/consumers')
-    expect(screen.getByRole('link', { name: /schema/i })).toHaveAttribute('href', '/c/prod/schema')
+    expect(screen.getByRole('link', { name: /schema/i })).toHaveAttribute('href', '/c/prod/schemas')
     expect(screen.getByText('prod')).toBeInTheDocument()
     // switcher lists the other cluster as a link preserving the section
     expect(screen.getByRole('link', { name: /dead/i })).toHaveAttribute('href', '/c/dead/topics')

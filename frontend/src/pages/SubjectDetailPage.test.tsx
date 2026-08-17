@@ -25,7 +25,7 @@ describe('SubjectDetailView', () => {
   it('shows versions with the served one selected, type, id, and the schema as JSON', async () => {
     vi.mocked(client.getSubjectDetail).mockResolvedValue(detail())
     await renderWithRouter(<SubjectDetailView cluster="prod" subject="sr-avro-value" />, {
-      initialPath: '/c/prod/schema/sr-avro-value',
+      initialPath: '/c/prod/schemas/sr-avro-value',
     })
     expect(await screen.findByText('AVRO')).toBeInTheDocument()
     expect(screen.getByText('id 42')).toBeInTheDocument()
@@ -41,7 +41,7 @@ describe('SubjectDetailView', () => {
   it('selecting a version re-queries with that version', async () => {
     vi.mocked(client.getSubjectDetail).mockResolvedValue(detail())
     await renderWithRouter(<SubjectDetailView cluster="prod" subject="sr-avro-value" />, {
-      initialPath: '/c/prod/schema/sr-avro-value',
+      initialPath: '/c/prod/schemas/sr-avro-value',
     })
     await screen.findByText('AVRO')
     vi.mocked(client.getSubjectDetail).mockResolvedValue(detail({ version: 1, id: 40 }))
@@ -50,12 +50,26 @@ describe('SubjectDetailView', () => {
     expect(vi.mocked(client.getSubjectDetail)).toHaveBeenLastCalledWith('prod', 'sr-avro-value', 1, expect.anything())
   })
 
+  it('is tabbed like the topic page: Schema first, placeholders switchable', async () => {
+    vi.mocked(client.getSubjectDetail).mockResolvedValue(detail())
+    await renderWithRouter(<SubjectDetailView cluster="prod" subject="sr-avro-value" />, {
+      initialPath: '/c/prod/schemas/sr-avro-value',
+    })
+    await screen.findByText('AVRO')
+    expect(screen.getAllByRole('tab').map((t) => t.textContent)).toEqual(['Schema', 'Compatibility', 'References'])
+    fireEvent.click(screen.getByRole('tab', { name: 'Compatibility' }))
+    expect(screen.getByText(/nothing here yet/i)).toBeInTheDocument()
+    expect(screen.queryByLabelText('version')).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('tab', { name: 'Schema' }))
+    expect(screen.getByLabelText('version')).toBeInTheDocument()
+  })
+
   it('a non-JSON schema (protobuf) renders verbatim, no soft-wrap', async () => {
     vi.mocked(client.getSubjectDetail).mockResolvedValue(
       detail({ schema_type: 'PROTOBUF', schema: 'syntax = "proto3"; message Event { int64 id = 1; }' }),
     )
     await renderWithRouter(<SubjectDetailView cluster="prod" subject="sr-proto-value" />, {
-      initialPath: '/c/prod/schema/sr-proto-value',
+      initialPath: '/c/prod/schemas/sr-proto-value',
     })
     expect(await screen.findByText('PROTOBUF')).toBeInTheDocument()
     const pre = screen.getByTestId('schema-body').querySelector('pre')

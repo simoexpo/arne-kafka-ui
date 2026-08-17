@@ -10,7 +10,7 @@ export function useClusters() {
   return useQuery({ queryKey: ['clusters'], queryFn: ({ signal }) => getClusters(signal), refetchInterval: 10_000 })
 }
 
-const SECTIONS = ['overview', 'topics', 'consumers', 'schema'] as const
+const SECTIONS = ['overview', 'topics', 'consumers', 'schemas'] as const
 type Section = (typeof SECTIONS)[number]
 
 // Registered route path per section — kept as literals (rather than a single
@@ -20,7 +20,7 @@ const SECTION_PATHS = {
   overview: '/c/$cluster/overview',
   topics: '/c/$cluster/topics',
   consumers: '/c/$cluster/consumers',
-  schema: '/c/$cluster/schema',
+  schemas: '/c/$cluster/schemas',
 } as const satisfies Record<Section, string>
 
 // Derives the active sidebar section from the exact path segment that follows
@@ -33,7 +33,7 @@ export function sectionFromPathname(pathname: string, cluster: string): Section 
   const prefix = `/c/${encodeURIComponent(cluster)}/`
   if (!pathname.startsWith(prefix)) return 'overview'
   const segment = pathname.slice(prefix.length).split('/')[0]
-  return segment === 'topics' || segment === 'consumers' || segment === 'schema' ? segment : 'overview'
+  return segment === 'topics' || segment === 'consumers' || segment === 'schemas' ? segment : 'overview'
 }
 
 export function Sidebar({ cluster, clusters, active, error }: {

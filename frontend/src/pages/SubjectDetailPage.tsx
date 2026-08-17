@@ -25,7 +25,14 @@ function SchemaBody({ schema }: { schema: string }) {
   )
 }
 
+// Placeholder tabs deliberately (owner request 2026-08-17): the owner has
+// ideas for what lives behind them — the structure ships first, mirroring
+// the topic detail page's tab pattern.
+const TABS = ['Schema', 'Compatibility', 'References'] as const
+type Tab = (typeof TABS)[number]
+
 export function SubjectDetailView({ cluster, subject }: { cluster: string; subject: string }) {
+  const [tab, setTab] = useState<Tab>('Schema')
   // `undefined` = the registry's latest; the served version lands in
   // `detail.data.version`, which is what the selector displays.
   const [version, setVersion] = useState<number | undefined>(undefined)
@@ -34,7 +41,7 @@ export function SubjectDetailView({ cluster, subject }: { cluster: string; subje
     queryFn: ({ signal }) => getSubjectDetail(cluster, subject, version, signal),
   })
   return (
-    <div className="h-full space-y-4 overflow-y-auto">
+    <div className="flex h-full flex-col gap-4 overflow-y-auto">
       <div className="flex items-center gap-3">
         <h1 className="flex items-center gap-1.5 font-mono text-lg font-semibold">
           {subject}
@@ -42,6 +49,25 @@ export function SubjectDetailView({ cluster, subject }: { cluster: string; subje
         </h1>
         <StalenessChip asOf={detail.data?.as_of ?? null} refreshing={detail.isFetching} failed={detail.isError} />
       </div>
+      <div role="tablist" className="flex gap-1 border-b border-zinc-200 dark:border-zinc-800">
+        {TABS.map((t) => (
+          <button
+            key={t}
+            role="tab"
+            aria-selected={t === tab}
+            onClick={() => setTab(t)}
+            className={`px-3 py-1.5 text-sm ${
+              t === tab
+                ? 'border-b-2 border-zinc-900 font-medium dark:border-zinc-100'
+                : 'text-zinc-500 hover:text-zinc-800 dark:hover:text-zinc-300'
+            }`}
+          >
+            {t}
+          </button>
+        ))}
+      </div>
+      {tab !== 'Schema' && <p className="text-sm text-zinc-500">nothing here yet</p>}
+      {tab === 'Schema' && (
       <Panel title="schema" error={detail.error} loading={detail.isPending} hasData={detail.data !== undefined}>
         {detail.data && (
           <div className="space-y-3">
@@ -69,11 +95,12 @@ export function SubjectDetailView({ cluster, subject }: { cluster: string; subje
           </div>
         )}
       </Panel>
+      )}
     </div>
   )
 }
 
 export function SubjectDetailPage() {
-  const { cluster, subject } = useParams({ from: '/c/$cluster/schema/$subject' })
+  const { cluster, subject } = useParams({ from: '/c/$cluster/schemas/$subject' })
   return <SubjectDetailView cluster={cluster} subject={subject} />
 }
