@@ -7,6 +7,7 @@ pub enum Filter {
     ValueContains(String),
     ValueEquals { text: String, json: Option<serde_json::Value> },
     JsonPathEquals { path: String, value: String },
+    JsonPathContains { path: String, value: String },
     /// Case-insensitive contains on key text OR value text — the bare-text
     /// filter box of the timeline design (`filter=contains&q=...`). The
     /// value side keeps the same decode-error exclusion as `ValueContains`
@@ -32,6 +33,9 @@ impl Filter {
             "json_eq" => path
                 .map(|p| Filter::JsonPathEquals { path: p.to_string(), value: q.to_lowercase() })
                 .ok_or_else(|| "filter json_eq requires a path parameter".to_string()),
+            "json_contains" => path
+                .map(|p| Filter::JsonPathContains { path: p.to_string(), value: q.to_lowercase() })
+                .ok_or_else(|| "filter json_contains requires a path parameter".to_string()),
             other => Err(format!("unknown filter kind '{other}'")),
         }
     }
@@ -105,6 +109,13 @@ pub fn matches(filter: &Filter, msg: &MessageOut) -> bool {
                     .ok()
                     .and_then(|root| json_at_path(&root, path).and_then(scalar_text))
                     .is_some_and(|found| found == *value)
+        }),
+        Filter::JsonPathContains { path, value } => msg.value.as_ref().is_some_and(|v| {
+            v.encoding != Encoding::DecodeError
+                && serde_json::from_str::<serde_json::Value>(&v.text)
+                    .ok()
+                    .and_then(|root| json_at_path(&root, path).and_then(scalar_text))
+                    .is_some_and(|found| found.contains(value.as_str()))
         }),
         Filter::Contains(q) => {
             let key_hit = msg.key.as_ref().is_some_and(|k| k.text.to_lowercase().contains(q.as_str()));
@@ -243,6 +254,29 @@ mod tests {
     fn value_eq_never_matches_decode_error() {
         let m = msg(None, "blob", Encoding::DecodeError);
         assert!(!matches(&Filter::parse("value_eq", "blob", None).unwrap(), &m));
+    }
+
+    #[test]
+    fn json_contains_matches_scalar_substring_case_insensitively() {
+        let m = msg(None, r#"{"user":{"name":"Alice Smith","id":42}}"#, Encoding::Json);
+        assert!(matches(&Filter::parse("json_contains", "SMITH", Some("user.name")).unwrap(), &m));
+        assert!(matches(&Filter::parse("json_contains", "4", Some("user.id")).unwrap(), &m));
+        assert!(!matches(&Filter::parse("json_contains", "bob", Some("user.name")).unwrap(), &m));
+    }
+
+    #[test]
+    fn json_contains_empty_needle_means_field_exists_as_scalar() {
+        let m = msg(None, r#"{"a":{"b":1},"c":"x"}"#, Encoding::Json);
+        assert!(matches(&Filter::parse("json_contains", "", Some("c")).unwrap(), &m));
+        assert!(!matches(&Filter::parse("json_contains", "", Some("a")).unwrap(), &m)); // object, not scalar
+        assert!(!matches(&Filter::parse("json_contains", "", Some("missing")).unwrap(), &m));
+    }
+
+    #[test]
+    fn json_contains_requires_path_and_never_matches_decode_error() {
+        assert!(Filter::parse("json_contains", "x", None).is_err());
+        let m = msg(None, r#"{"a":"x"}"#, Encoding::DecodeError);
+        assert!(!matches(&Filter::parse("json_contains", "x", Some("a")).unwrap(), &m));
     }
 
     #[test]
