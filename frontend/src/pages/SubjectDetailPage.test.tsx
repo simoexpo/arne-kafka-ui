@@ -41,7 +41,7 @@ describe('SubjectDetailView', () => {
       initialPath: '/c/prod/schemas/sr-avro-value',
     })
     expect(screen.getAllByRole('tab').map((t) => t.textContent)).toEqual(['Definition', 'Compatibility'])
-    expect(await screen.findByText('AVRO')).toBeInTheDocument()
+    expect(await screen.findByText('avro')).toBeInTheDocument()
     expect(screen.getByText('id 42')).toBeInTheDocument()
     const select = screen.getByLabelText('version') as HTMLSelectElement
     expect(select.value).toBe('3')
@@ -58,7 +58,7 @@ describe('SubjectDetailView', () => {
     await renderWithRouter(<SubjectDetailView cluster="prod" subject="weird" />, {
       initialPath: '/c/prod/schemas/weird',
     })
-    await screen.findByText('AVRO')
+    await screen.findByText('avro')
     expect(await screen.findByText(/not derivable/i)).toBeInTheDocument()
   })
 
@@ -67,7 +67,7 @@ describe('SubjectDetailView', () => {
     await renderWithRouter(<SubjectDetailView cluster="prod" subject="sr-avro-value" />, {
       initialPath: '/c/prod/schemas/sr-avro-value',
     })
-    await screen.findByText('AVRO')
+    await screen.findByText('avro')
     vi.mocked(client.getSubjectDetail).mockResolvedValue(detail({ version: 1, id: 40 }))
     fireEvent.change(screen.getByLabelText('version'), { target: { value: '1' } })
     expect(await screen.findByText('id 40')).toBeInTheDocument()
@@ -81,7 +81,7 @@ describe('SubjectDetailView', () => {
     await renderWithRouter(<SubjectDetailView cluster="prod" subject="sr-proto-value" />, {
       initialPath: '/c/prod/schemas/sr-proto-value',
     })
-    expect(await screen.findByText('PROTOBUF')).toBeInTheDocument()
+    expect(await screen.findByText('protobuf')).toBeInTheDocument()
     const pre = screen.getByTestId('schema-body').querySelector('pre')
     expect(pre?.textContent).toContain('syntax = "proto3"')
     expect(pre?.className).toMatch(/\bwhitespace-pre\b/)
@@ -93,7 +93,7 @@ describe('SubjectDetailView', () => {
     await renderWithRouter(<SubjectDetailView cluster="prod" subject="sr-avro-value" />, {
       initialPath: '/c/prod/schemas/sr-avro-value',
     })
-    await screen.findByText('AVRO')
+    await screen.findByText('avro')
     fireEvent.click(screen.getByRole('tab', { name: 'Compatibility' }))
     expect(await screen.findByText('BACKWARD')).toBeInTheDocument()
     fireEvent.change(screen.getByLabelText('candidate schema'), { target: { value: '{"type":"long"}' } })
@@ -112,7 +112,7 @@ describe('SubjectDetailView', () => {
     await renderWithRouter(<SubjectDetailView cluster="prod" subject="sr-avro-value" />, {
       initialPath: '/c/prod/schemas/sr-avro-value',
     })
-    await screen.findByText('AVRO')
+    await screen.findByText('avro')
     fireEvent.click(screen.getByRole('tab', { name: 'Compatibility' }))
     await screen.findByText('BACKWARD')
     fireEvent.change(screen.getByLabelText('candidate schema'), { target: { value: '{"type":"string"}' } })

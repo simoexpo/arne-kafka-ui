@@ -3,6 +3,7 @@ import { useMutation, useQuery } from '@tanstack/react-query'
 import { Link, useNavigate, useParams, useSearch } from '@tanstack/react-router'
 import { checkCompatibility, getCompatibilityLevel, getSubjectDetail, getSubjectStrategy } from '../api/client'
 import { CopyButton } from '../components/CopyButton'
+import { EncodingBadge } from '../components/messages/EncodingBadge'
 import { JsonView } from '../components/messages/JsonView'
 import { Panel } from '../components/Panel'
 import { StalenessChip } from '../components/StalenessChip'
@@ -22,6 +23,21 @@ function SchemaBody({ schema }: { schema: string }) {
     <div data-testid="schema-body" className="overflow-auto whitespace-nowrap font-mono text-sm">
       {isJson ? <JsonView value={parsed} /> : <pre className="whitespace-pre">{schema}</pre>}
     </div>
+  )
+}
+
+// The registry's type IS an encoding the message view already badges —
+// same component, same colors, one visual language (consistency review
+// 2026-08-18). An unexpected type falls back to a neutral bordered chip.
+const SCHEMA_TYPE_ENCODING = { AVRO: 'avro', PROTOBUF: 'protobuf', JSON: 'json' } as const
+
+function SchemaTypeBadge({ schemaType }: { schemaType: string }) {
+  const encoding = SCHEMA_TYPE_ENCODING[schemaType as keyof typeof SCHEMA_TYPE_ENCODING]
+  if (encoding !== undefined) return <EncodingBadge encoding={encoding} />
+  return (
+    <span className="rounded border border-zinc-300 px-1.5 py-0.5 font-mono text-xs text-zinc-600 dark:border-zinc-700 dark:text-zinc-400">
+      {schemaType}
+    </span>
   )
 }
 
@@ -87,7 +103,7 @@ function CompatibilityTab({ cluster, subject, schemaType }: { cluster: string; s
       <div className="space-y-3">
         <div className="flex items-center gap-1.5 text-sm text-zinc-500">
           effective level
-          <span className="rounded bg-zinc-100 px-1.5 py-0.5 text-xs font-medium text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300">
+          <span className="rounded border border-zinc-300 px-1.5 py-0.5 font-mono text-xs text-zinc-600 dark:border-zinc-700 dark:text-zinc-400">
             {level.data?.level}
           </span>
         </div>
@@ -100,7 +116,7 @@ function CompatibilityTab({ cluster, subject, schemaType }: { cluster: string; s
           }}
           placeholder="paste a candidate schema…"
           rows={10}
-          className="w-full rounded border border-zinc-300 bg-transparent p-2 font-mono text-sm outline-none focus:border-zinc-500 dark:border-zinc-700"
+          className="w-full rounded border border-zinc-300 bg-transparent px-3 py-1.5 font-mono text-sm outline-none focus:border-zinc-500 dark:border-zinc-700"
         />
         <div className="flex items-center gap-3">
           <label className="flex items-center gap-1.5 text-sm text-zinc-500">
@@ -109,7 +125,7 @@ function CompatibilityTab({ cluster, subject, schemaType }: { cluster: string; s
               aria-label="candidate schema type"
               value={candidateType}
               onChange={(e) => setCandidateType(e.target.value)}
-              className="rounded border border-zinc-300 bg-transparent px-1.5 py-0.5 dark:border-zinc-700"
+              className="rounded border border-zinc-300 px-1 py-0.5 dark:border-zinc-700 dark:bg-zinc-950"
             >
               {['AVRO', 'PROTOBUF', 'JSON'].map((t) => (
                 <option key={t} value={t}>{t}</option>
@@ -120,7 +136,7 @@ function CompatibilityTab({ cluster, subject, schemaType }: { cluster: string; s
             type="button"
             disabled={candidate.trim() === '' || check.isPending}
             onClick={() => check.mutate()}
-            className="rounded border border-zinc-300 px-3 py-1 text-sm hover:bg-zinc-100 disabled:opacity-50 dark:border-zinc-700 dark:hover:bg-zinc-800"
+            className="rounded border border-zinc-300 px-2 py-0.5 text-sm text-zinc-600 hover:bg-zinc-100 disabled:opacity-50 dark:border-zinc-700 dark:text-zinc-400 dark:hover:bg-zinc-800"
           >
             check compatibility
           </button>
@@ -208,16 +224,14 @@ export function SubjectDetailView({ cluster, subject }: { cluster: string; subje
                       search: { version: Number(e.target.value) },
                     })
                   }
-                  className="rounded border border-zinc-300 bg-transparent px-1.5 py-0.5 dark:border-zinc-700"
+                  className="rounded border border-zinc-300 px-1 py-0.5 dark:border-zinc-700 dark:bg-zinc-950"
                 >
                   {detail.data.versions.map((v) => (
                     <option key={v} value={v}>{v}</option>
                   ))}
                 </select>
               </label>
-              <span className="rounded bg-zinc-100 px-1.5 py-0.5 text-xs font-medium text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300">
-                {detail.data.schema_type}
-              </span>
+              <SchemaTypeBadge schemaType={detail.data.schema_type} />
               <span className="text-zinc-500">id {detail.data.id}</span>
               <CopyButton text={detail.data.schema} label="schema" />
             </div>

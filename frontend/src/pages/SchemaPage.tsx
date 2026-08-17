@@ -33,13 +33,13 @@ export function SchemaView({ cluster }: { cluster: string }) {
         <div className="flex items-center gap-4 text-sm text-zinc-600 dark:text-zinc-400">
           <span className="flex items-center gap-1.5">
             compatibility
-            <span className="rounded bg-zinc-100 px-1.5 py-0.5 text-xs font-medium text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300">
+            <span className="rounded border border-zinc-300 px-1.5 py-0.5 font-mono text-xs text-zinc-600 dark:border-zinc-700 dark:text-zinc-400">
               {settings.data.compatibility_level}
             </span>
           </span>
           <span className="flex items-center gap-1.5">
             mode
-            <span className="rounded bg-zinc-100 px-1.5 py-0.5 text-xs font-medium text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300">
+            <span className="rounded border border-zinc-300 px-1.5 py-0.5 font-mono text-xs text-zinc-600 dark:border-zinc-700 dark:text-zinc-400">
               {settings.data.mode}
             </span>
           </span>
