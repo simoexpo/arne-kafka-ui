@@ -15,23 +15,71 @@ interface ParsedFilterQuery {
 
 const alwaysTrue = () => true
 
+// Unquoted `[]`: quantifies over the array — ANY element may satisfy the
+// rest of the path (owner ruling 2026-08-17).
+const ANY_ELEMENT = Symbol('any-element')
+type Segment = string | typeof ANY_ELEMENT
+
 // Path tokenizer, identical on both sides (backend `split_path`): unquoted
 // `.` separates segments; a double-quoted run is part of its segment with
-// the quotes stripped, so `.`/`:`/`=` inside quotes are literal. An
-// unclosed quote runs to the end. Quoting affects tokenization only.
-function splitPath(path: string): string[] {
-  const segments: string[] = []
+// the quotes stripped, so `.`/`:`/`=`/`[]` inside quotes are literal. An
+// unclosed quote runs to the end. An unquoted `[]` pair emits an
+// any-element marker. Quoting affects tokenization only.
+function splitPath(path: string): Segment[] {
+  const segments: Segment[] = []
   let current = ''
   let inQuotes = false
-  for (const c of path) {
+  let afterMarker = false
+  for (let i = 0; i < path.length; i++) {
+    const c = path[i]
     if (c === '"') inQuotes = !inQuotes
     else if (c === '.' && !inQuotes) {
-      segments.push(current)
+      // The separator right after a `[]` marker introduces the next
+      // segment — it must not mint an empty name (which never resolves);
+      // a genuinely empty segment (`a..b`) still does.
+      if (!(afterMarker && current === '')) segments.push(current)
       current = ''
-    } else current += c
+      afterMarker = false
+    } else if (c === '[' && !inQuotes && path[i + 1] === ']') {
+      if (current !== '') segments.push(current)
+      current = ''
+      segments.push(ANY_ELEMENT)
+      afterMarker = true
+      i++
+    } else {
+      current += c
+      afterMarker = false
+    }
   }
-  segments.push(current)
+  if (!(afterMarker && current === '')) segments.push(current)
   return segments
+}
+
+// Every JSON node the path can reach: exactly one without `[]` markers,
+// one per matching element combination with them.
+function pathCandidates(root: unknown, path: string): unknown[] {
+  const out: unknown[] = []
+  const walk = (node: unknown, segs: readonly Segment[]) => {
+    if (segs.length === 0) {
+      out.push(node)
+      return
+    }
+    const [first, ...rest] = segs
+    if (first === ANY_ELEMENT) {
+      if (Array.isArray(node)) for (const v of node) walk(v, rest)
+      return
+    }
+    if (Array.isArray(node)) {
+      if (!/^\+?\d+$/.test(first)) return
+      const idx = Number(first)
+      if (idx < node.length) walk(node[idx], rest)
+    } else if (node !== null && typeof node === 'object') {
+      const obj = node as Record<string, unknown>
+      if (first in obj) walk(obj[first], rest)
+    }
+  }
+  walk(root, splitPath(path))
+  return out
 }
 
 // Index of the first operator start (`:`, `=`, `>`, `<`, or `!` immediately
@@ -101,43 +149,28 @@ function valueCmpPredicate(op: CmpOpWire, q: string) {
   }
 }
 
-function jsonCmpPredicate(path: string, op: CmpOpWire, q: string) {
-  const expected = jsonNumber(q)
-  return (m: MessageOut) => {
-    if (expected === null || !m.value || m.value.encoding === 'decode_error') return false
-    let root: unknown
-    try {
-      root = JSON.parse(m.value.text)
-    } catch {
-      return false
-    }
-    const found = jsonAtPath(root, path)
-    if (!found.found) return false
-    const target = scalarNumber(found.value)
-    return target !== null && cmpHolds(op, target, expected)
+// True when some node the path reaches in a readable JSON value (exactly
+// one node without `[]` markers, any element combination with them)
+// satisfies `pred`.
+function anyJsonPathMatch(m: MessageOut, path: string, pred: (c: unknown) => boolean): boolean {
+  if (!m.value || m.value.encoding === 'decode_error') return false
+  let root: unknown
+  try {
+    root = JSON.parse(m.value.text)
+  } catch {
+    return false
   }
+  return pathCandidates(root, path).some(pred)
 }
 
-function jsonAtPath(root: unknown, path: string): { found: true; value: unknown } | { found: false } {
-  let current: unknown = root
-  for (const seg of splitPath(path)) {
-    if (Array.isArray(current)) {
-      // Mirrors the server's `parse::<usize>()`: digits with an optional
-      // leading `+` only — `Number('')`/`Number(' ')` coercing to 0 must
-      // never turn a malformed segment into index 0.
-      if (!/^\+?\d+$/.test(seg)) return { found: false }
-      const idx = Number(seg)
-      if (idx >= current.length) return { found: false }
-      current = current[idx]
-    } else if (current !== null && typeof current === 'object') {
-      const obj = current as Record<string, unknown>
-      if (!(seg in obj)) return { found: false }
-      current = obj[seg]
-    } else {
-      return { found: false }
-    }
-  }
-  return { found: true, value: current }
+function jsonCmpPredicate(path: string, op: CmpOpWire, q: string) {
+  const expected = jsonNumber(q)
+  return (m: MessageOut) =>
+    expected !== null &&
+    anyJsonPathMatch(m, path, (c) => {
+      const target = scalarNumber(c)
+      return target !== null && cmpHolds(op, target, expected)
+    })
 }
 
 // Every predicate mirrors the server exactly (backend/src/message/filter.rs):
@@ -239,40 +272,27 @@ function scalarText(v: unknown): string | null {
   return null
 }
 
-function jsonPathScalar(m: MessageOut, path: string): string | null {
-  if (!m.value || m.value.encoding === 'decode_error') return null
-  let root: unknown
-  try {
-    root = JSON.parse(m.value.text)
-  } catch {
-    return null
-  }
-  const found = jsonAtPath(root, path)
-  return found.found ? scalarText(found.value) : null
-}
-
 function jsonEqPredicate(path: string, q: string) {
   const needle = q.toLowerCase()
-  return (m: MessageOut) => {
-    const s = jsonPathScalar(m, path)
-    return s !== null && s === needle
-  }
+  return (m: MessageOut) => anyJsonPathMatch(m, path, (c) => scalarText(c) === needle)
 }
 
 function jsonNeqPredicate(path: string, q: string) {
   const needle = q.toLowerCase()
-  return (m: MessageOut) => {
-    const s = jsonPathScalar(m, path)
-    return s !== null && s !== needle
-  }
+  return (m: MessageOut) =>
+    anyJsonPathMatch(m, path, (c) => {
+      const s = scalarText(c)
+      return s !== null && s !== needle
+    })
 }
 
 function jsonContainsPredicate(path: string, q: string) {
   const needle = q.toLowerCase()
-  return (m: MessageOut) => {
-    const s = jsonPathScalar(m, path)
-    return s !== null && s.includes(needle)
-  }
+  return (m: MessageOut) =>
+    anyJsonPathMatch(m, path, (c) => {
+      const s = scalarText(c)
+      return s !== null && s.includes(needle)
+    })
 }
 
 // Owner ruling 2026-08-17: operator prefixes match case-insensitively
