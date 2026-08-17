@@ -13,7 +13,7 @@ export function SchemaByIdView({ cluster, id }: { cluster: string; id: number })
     queryFn: ({ signal }) => getSubjectOfId(cluster, id, signal),
   })
   if (resolved.data) {
-    return <SubjectDetailView cluster={cluster} subject={resolved.data.subject} />
+    return <SubjectDetailView cluster={cluster} subject={resolved.data.subject} initialVersion={resolved.data.version} />
   }
   return (
     <Panel

@@ -150,11 +150,21 @@ function CompatibilityTab({ cluster, subject, schemaType }: { cluster: string; s
 const TABS = ['Definition', 'Compatibility'] as const
 type Tab = (typeof TABS)[number]
 
-export function SubjectDetailView({ cluster, subject }: { cluster: string; subject: string }) {
+export function SubjectDetailView({
+  cluster,
+  subject,
+  // A schema-id link lands on the exact version that id belongs to, not
+  // the subject's latest (owner ruling 2026-08-18).
+  initialVersion,
+}: {
+  cluster: string
+  subject: string
+  initialVersion?: number
+}) {
   const [tab, setTab] = useState<Tab>('Definition')
   // `undefined` = the registry's latest; the served version lands in
   // `detail.data.version`, which is what the selector displays.
-  const [version, setVersion] = useState<number | undefined>(undefined)
+  const [version, setVersion] = useState<number | undefined>(initialVersion)
   const detail = useQuery({
     queryKey: ['subject', cluster, subject, version ?? 'latest'],
     queryFn: ({ signal }) => getSubjectDetail(cluster, subject, version, signal),
