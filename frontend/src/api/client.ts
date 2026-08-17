@@ -1,5 +1,5 @@
 import type {
-  ClustersResponse, GroupDetail, GroupList, Overview,
+  ClustersResponse, GroupDetail, GroupList, Overview, SubjectDetail, SubjectList,
   Throughput, TopicConsumers, TopicDetail, TopicList,
 } from './types'
 
@@ -64,3 +64,6 @@ export const getTopicConsumers = (c: string, t: string, signal?: AbortSignal) =>
 export const getThroughput = (c: string, t: string, signal?: AbortSignal) => fetchJson<Throughput>(`/api/clusters/${enc(c)}/topics/${enc(t)}/throughput`, signal)
 export const getGroups = (c: string, signal?: AbortSignal) => fetchJson<GroupList>(`/api/clusters/${enc(c)}/groups`, signal)
 export const getGroupDetail = (c: string, g: string, signal?: AbortSignal) => fetchJson<GroupDetail>(`/api/clusters/${enc(c)}/groups/${enc(g)}`, signal)
+export const getSubjects = (c: string, signal?: AbortSignal) => fetchJson<SubjectList>(`/api/clusters/${enc(c)}/subjects`, signal)
+export const getSubjectDetail = (c: string, s: string, version?: number, signal?: AbortSignal) =>
+  fetchJson<SubjectDetail>(`/api/clusters/${enc(c)}/subjects/${enc(s)}${version !== undefined ? `?version=${version}` : ''}`, signal)

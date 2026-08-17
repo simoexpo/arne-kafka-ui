@@ -69,6 +69,17 @@ export interface GroupSummary {
   total_lag: number
 }
 export interface GroupList { groups: GroupSummary[]; as_of: number }
+
+export interface SubjectList { subjects: string[]; as_of: number }
+export interface SubjectDetail {
+  subject: string
+  versions: number[]
+  version: number
+  id: number
+  schema_type: string
+  schema: string
+  as_of: number
+}
 export interface MemberInfo { member_id: string; client_id: string; client_host: string }
 export interface GroupDetail {
   group_id: string
