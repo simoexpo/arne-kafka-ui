@@ -39,12 +39,15 @@ export function FilterInput({
 
   const onKeyDown = (e: KeyboardEvent<HTMLInputElement>) => {
     if (!open) return
+    // Step from the CLAMPED position: rows can shrink under a stale raw
+    // highlight (field set changed while open), and stepping from the raw
+    // value would jump arbitrarily instead of moving one visible row.
     if (e.key === 'ArrowDown') {
       e.preventDefault()
-      setHighlight((h) => (h + 1) % rows.length)
+      setHighlight((h) => (Math.min(h, rows.length - 1) + 1) % rows.length)
     } else if (e.key === 'ArrowUp') {
       e.preventDefault()
-      setHighlight((h) => (h - 1 + rows.length) % rows.length)
+      setHighlight((h) => (Math.min(h, rows.length - 1) - 1 + rows.length) % rows.length)
     } else if (e.key === 'Enter' || e.key === 'Tab') {
       e.preventDefault()
       accept(rows[highlightClamped])
@@ -72,7 +75,7 @@ export function FilterInput({
           ? {
               role: 'combobox',
               'aria-expanded': open,
-              'aria-controls': listId,
+              'aria-controls': open ? listId : undefined,
               'aria-activedescendant': open ? `${listId}-${highlightClamped}` : undefined,
             }
           : {})}

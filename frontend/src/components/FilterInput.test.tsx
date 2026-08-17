@@ -61,21 +61,37 @@ describe('FilterInput combobox', () => {
     expect(onChange).toHaveBeenCalledWith('key:')
   })
 
-  it('Escape dismisses until the text changes', () => {
+  it('Escape dismisses until the text changes, then the dropdown returns', () => {
     const { input } = setup()
     fireEvent.keyDown(input, { key: 'Escape' })
     expect(screen.queryByRole('listbox')).not.toBeInTheDocument()
+    // The value prop stays 'k' (parent-controlled), so the change event's
+    // only observable effect here is resetting the dismissal.
     fireEvent.change(input, { target: { value: 'ke' } })
-    // the change resets the dismissal; the parent re-render supplies the new
-    // value in real usage, so reopening is covered by the integration test
+    expect(screen.getByRole('listbox')).toBeInTheDocument()
   })
 
-  it('click accepts a proposal without blurring the input', () => {
+  it('click accepts a proposal', () => {
     const { onChange } = setup()
     const row = screen.getAllByTestId('filter-proposal')[1]
     fireEvent.mouseDown(row)
     fireEvent.click(row)
     expect(onChange).toHaveBeenCalledWith('key=')
+  })
+
+  it('arrow keys step from the clamped highlight after rows shrink under it', () => {
+    let rows = ['a', 'b', 'c', 'd', 'e', 'f', 'g']
+    const onChange = vi.fn()
+    render(<FilterInput value="x" onChange={onChange} placeholder="p" ariaLabel="dyn" proposals={() => rows} />)
+    const input = screen.getByLabelText('dyn')
+    fireEvent.focus(input)
+    for (let i = 0; i < 6; i++) fireEvent.keyDown(input, { key: 'ArrowDown' }) // highlight raw = 6
+    rows = ['a', 'b', 'c'] // shrink without a text change (e.g. field set changed)
+    fireEvent.blur(input)
+    fireEvent.focus(input) // re-render with 3 rows; clamped display = row 2
+    fireEvent.keyDown(input, { key: 'ArrowDown' }) // must step from the CLAMPED row, wrapping to 0
+    fireEvent.keyDown(input, { key: 'Enter' })
+    expect(onChange).toHaveBeenCalledWith('a')
   })
 
   it('no proposals prop means no combobox semantics', () => {

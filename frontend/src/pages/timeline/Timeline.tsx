@@ -864,17 +864,18 @@ export function Timeline({
 
   // Field-path extraction runs lazily on the first proposal computation (a
   // keystroke in the filter box), never on row churn itself, and is cached
-  // until the window's rows identity changes.
+  // until the store's rows identity changes. Deliberately the COMMITTED
+  // store rows, not the display `rows` above: `previewWithOverlay` mints a
+  // fresh array every render, which would re-run extraction per keystroke
+  // exactly while a scan is accumulating matches.
   const fieldPathsCacheRef = useRef<{ rows: readonly MessageOut[]; paths: string[] } | null>(null)
-  const filterProposals = useCallback(
-    (text: string) => {
-      const cache = fieldPathsCacheRef.current
-      const paths = cache && cache.rows === rows ? cache.paths : extractFieldPaths(rows)
-      if (!cache || cache.rows !== rows) fieldPathsCacheRef.current = { rows, paths }
-      return proposalsFor(text, paths)
-    },
-    [rows],
-  )
+  const filterProposals = useCallback((text: string) => {
+    const committed = storeRef.current.rows()
+    const cache = fieldPathsCacheRef.current
+    const paths = cache && cache.rows === committed ? cache.paths : extractFieldPaths(committed)
+    if (!cache || cache.rows !== committed) fieldPathsCacheRef.current = { rows: committed, paths }
+    return proposalsFor(text, paths)
+  }, [])
 
   const handlePillClick = () => {
     const decision = nextPause(
