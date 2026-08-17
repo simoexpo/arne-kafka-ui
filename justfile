@@ -19,7 +19,7 @@ lint:
     cd frontend && npm run lint && npx tsc -b
 
 docker:
-    docker build -t arne:dev .
+    docker build -t arne-kafka-ui:dev .
 
 # one-command playground: kafka + schema registry + demo producer
 playground:

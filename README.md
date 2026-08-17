@@ -24,7 +24,7 @@ With `just`:
 just dev              # backend on :8080 + frontend on :5173 (proxies /api)
 just test             # backend + frontend test suites
 just lint             # clippy + frontend build
-just docker           # build the production image (arne:dev)
+just docker           # build the production image (arne-kafka-ui:dev)
 just playground       # docker-compose Kafka + schema registry + demo producer
 just playground-down  # tear the playground down
 just smoke            # run the end-to-end smoke check
@@ -47,7 +47,7 @@ cd backend && cargo clippy --all-targets -- -D warnings
 cd frontend && npm run build
 
 # docker
-docker build -t arne:dev .
+docker build -t arne-kafka-ui:dev .
 
 # playground
 docker compose -f docker-compose.dev.yml up -d
@@ -86,5 +86,5 @@ the backend binary. Mount your config and run — assuming your config is
 at `./config.yaml`:
 
 ```
-docker run -p 8080:8080 -v $(pwd)/config.yaml:/etc/arne/config.yaml arne:dev
+docker run -p 8080:8080 -v $(pwd)/config.yaml:/etc/arne/config.yaml arne-kafka-ui:dev
 ```
