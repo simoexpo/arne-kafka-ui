@@ -15,6 +15,10 @@ describe('FilterHelp', () => {
     }
     expect(pop).toHaveTextContent(/case-insensitive/i)
     expect(pop).toHaveTextContent(/key or value/i)
+    // The two documented limitations (design spec 2026-08-17) must be
+    // discoverable here, not just true.
+    expect(pop).toHaveTextContent(/field names containing/i)
+    expect(pop).toHaveTextContent(/outer quotes/i)
   })
 
   it('closes on Escape and on outside click', async () => {
