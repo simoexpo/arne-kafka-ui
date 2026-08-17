@@ -756,4 +756,43 @@ describe('Timeline filter box', () => {
     fireEvent.keyDown(input, { key: 'Enter' })
     expect((input as HTMLInputElement).value).toBe('value.status')
   })
+
+  it('holds the filter while composing — open dropdown or operatorless field path never applies', async () => {
+    render(<Timeline cluster="prod" topic="orders" />)
+    await emit(0, 'match', mk(1, { value: { encoding: 'json', text: '{"status":"open"}', schema_id: null, error: null } }))
+    await emit(0, 'page_end', { cursor: null, exhausted: true })
+    const before = FakeEventSource.instances.length
+
+    const input = screen.getByLabelText('filter messages')
+    fireEvent.focus(input)
+    typeFilter('val')
+    await settle(600)
+    expect(FakeEventSource.instances.length).toBe(before)
+
+    typeFilter('value.status')
+    await settle(600)
+    expect(FakeEventSource.instances.length).toBe(before)
+
+    typeFilter('value.status:open')
+    await settle(600)
+    expect(FakeEventSource.instances.length).toBe(before + 1)
+    expect(FakeEventSource.instances.at(-1)!.url).toContain('filter=json_contains')
+  })
+
+  it('Escape releases the hold and the bare text applies', async () => {
+    render(<Timeline cluster="prod" topic="orders" />)
+    await emit(0, 'page_end', { cursor: null, exhausted: true })
+    const before = FakeEventSource.instances.length
+
+    const input = screen.getByLabelText('filter messages')
+    fireEvent.focus(input)
+    typeFilter('val')
+    await settle(600)
+    expect(FakeEventSource.instances.length).toBe(before)
+
+    fireEvent.keyDown(input, { key: 'Escape' })
+    await settle(600)
+    expect(FakeEventSource.instances.length).toBe(before + 1)
+    expect(FakeEventSource.instances.at(-1)!.url).toContain('filter=contains&q=val')
+  })
 })

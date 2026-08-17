@@ -1,4 +1,4 @@
-import { useId, useRef, useState } from 'react'
+import { useEffect, useId, useRef, useState } from 'react'
 import type { KeyboardEvent } from 'react'
 
 export function FilterInput({
@@ -9,6 +9,7 @@ export function FilterInput({
   className = 'w-72',
   fullWidth = false,
   proposals,
+  onOpenChange,
 }: {
   value: string
   onChange: (value: string) => void
@@ -20,6 +21,9 @@ export function FilterInput({
   // this prop the input has no combobox semantics at all — the other filter
   // boxes (topics, groups) stay plain inputs.
   proposals?: (text: string) => readonly string[]
+  // Fires when the dropdown opens/closes — the parent holds the filter
+  // while it's open (spec "Hold while composing").
+  onOpenChange?: (open: boolean) => void
 }) {
   const inputRef = useRef<HTMLInputElement>(null)
   const listId = useId()
@@ -30,6 +34,10 @@ export function FilterInput({
   const rows = proposals && focused && !dismissed ? proposals(value) : []
   const open = rows.length > 0
   const highlightClamped = Math.min(highlight, rows.length - 1)
+
+  useEffect(() => {
+    onOpenChange?.(open)
+  }, [open, onOpenChange])
 
   const accept = (row: string) => {
     onChange(row)

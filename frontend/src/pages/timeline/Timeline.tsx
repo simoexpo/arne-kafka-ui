@@ -6,7 +6,7 @@ import type { MessageListHandle } from '../../components/messages/MessageList'
 import { Panel } from '../../components/Panel'
 import { describeError } from '../../api/errors'
 import { extractFieldPaths } from '../../lib/fieldPaths'
-import { parseFilterQuery, type FilterQueryApi } from '../../lib/filterQuery'
+import { isIncompleteFieldExpression, parseFilterQuery, type FilterQueryApi } from '../../lib/filterQuery'
 import { proposalsFor } from '../../lib/filterProposals'
 import { formatWindowRange } from '../../lib/format'
 import { decodeCursor } from '../../lib/timelineCursor'
@@ -712,8 +712,16 @@ export function Timeline({
   // jump's freshly loaded window and highlight — the later-clicked jump
   // undone by the earlier-typed filter, inverting intent order.
   const filterDebounceIdRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  // Hold while composing (spec, owner ruling 2026-08-17): an open proposals
+  // dropdown or a `value.`-path still missing its operator means the user
+  // is mid-expression — applying the half-typed text would filter the
+  // window by it and destroy the very content the field proposals are
+  // extracted from. The hold releases (this effect re-runs) when the
+  // dropdown closes or the text stops being an operatorless field path.
+  const [proposalsOpen, setProposalsOpen] = useState(false)
   useEffect(() => {
     if (filterText === appliedFilterRef.current) return
+    if (proposalsOpen || isIncompleteFieldExpression(filterText)) return
     const id = setTimeout(() => {
       filterDebounceIdRef.current = null
       appliedFilterRef.current = filterText
@@ -725,7 +733,7 @@ export function Timeline({
       if (filterDebounceIdRef.current === id) filterDebounceIdRef.current = null
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [filterText])
+  }, [filterText, proposalsOpen])
 
   // Initial page: latest 100, on mount only.
   useEffect(() => {
@@ -1148,6 +1156,7 @@ export function Timeline({
         value={filterText}
         onChange={setFilterText}
         proposals={filterProposals}
+        onProposalsOpenChange={setProposalsOpen}
         progress={progressVisible ? { scanned: progressScanned, matches: progressMatches, budget: knownBudget } : null}
         onCancel={handleCancelScan}
       />
