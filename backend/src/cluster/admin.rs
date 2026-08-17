@@ -374,6 +374,20 @@ fn is_consumer_group_protocol(protocol_type: &str) -> bool {
     protocol_type == "consumer" || protocol_type.is_empty()
 }
 
+/// Topic names only — one metadata round trip, none of `list_topics`'s
+/// per-partition watermark fetches. For callers that need just the
+/// inventory of names (subject-usage inference).
+pub async fn topic_names(handle: Arc<ClusterHandle>) -> Result<Vec<String>, ApiError> {
+    tokio::task::spawn_blocking(move || {
+        let md = handle.consumer()
+            .fetch_metadata(None, ADMIN_TIMEOUT)
+            .map_err(|e| error::from_kafka(&handle.name, "fetch metadata", &e))?;
+        Ok(md.topics().iter().map(|t| t.name().to_string()).collect())
+    })
+    .await
+    .map_err(ApiError::task_join)?
+}
+
 pub async fn list_groups(handle: Arc<ClusterHandle>) -> Result<GroupList, ApiError> {
     tokio::task::spawn_blocking(move || {
         let gl = handle.consumer()

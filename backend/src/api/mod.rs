@@ -24,6 +24,7 @@ pub fn app(state: AppState) -> Router {
         .route("/api/clusters/{cluster}/schema-registry", get(subjects::registry_settings))
         .route("/api/clusters/{cluster}/subjects", get(subjects::list))
         .route("/api/clusters/{cluster}/subjects/{subject}", get(subjects::detail))
+        .route("/api/clusters/{cluster}/subjects/{subject}/usage", get(subjects::usage))
         // A bare handler (not wrapped in `get(...)`), so axum registers it as
         // an ANY-method fallback: any request to an UNMATCHED path — every
         // method, not just GET — reaches `spa_fallback` and gets the
