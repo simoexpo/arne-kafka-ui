@@ -25,6 +25,10 @@ describe('TopicsView', () => {
     await renderWithRouter(<TopicsView cluster="prod" />, { initialPath: '/c/prod/topics/orders' })
     expect(await screen.findByText('orders')).toBeInTheDocument()
     expect(screen.queryByText('__consumer_offsets')).not.toBeInTheDocument()
+    // No size column (owner ruling 2026-08-17): librdkafka has no
+    // DescribeLogDirs, so the column could only ever show '—' — removed
+    // until the library grows the API. `size_bytes` stays in the wire shape.
+    expect(screen.queryByText('size')).not.toBeInTheDocument()
     const link = screen.getByRole('link', { name: /orders/ })
     expect(link).toHaveAttribute('href', '/c/prod/topics/orders')
     // router-rendered <Link>, not a plain <a> full-reload anchor: the router

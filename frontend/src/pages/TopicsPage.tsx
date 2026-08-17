@@ -8,7 +8,6 @@ import { MessageEstimateCell } from '../components/MessageEstimateCell'
 import { Panel } from '../components/Panel'
 import { StalenessChip } from '../components/StalenessChip'
 import { Switch } from '../components/Switch'
-import { formatBytes } from '../lib/format'
 
 export function TopicsView({ cluster }: { cluster: string }) {
   const [filter, setFilter] = useState('')
@@ -47,7 +46,7 @@ export function TopicsView({ cluster }: { cluster: string }) {
             <tr>
               <th className="py-1">name</th><th>partitions</th>
               <th><abbr title="replication factor" className="cursor-help underline decoration-dotted">RF</abbr></th>
-              <th>messages</th><th>size</th>
+              <th>messages</th>
             </tr>
           </thead>
           <tbody>
@@ -70,7 +69,6 @@ export function TopicsView({ cluster }: { cluster: string }) {
                 <td>
                   <MessageEstimateCell estimate={t.message_estimate} error={t.estimate_error} />
                 </td>
-                <td className="text-zinc-400">{t.size_bytes === null ? '—' : formatBytes(t.size_bytes)}</td>
               </tr>
             ))}
           </tbody>
