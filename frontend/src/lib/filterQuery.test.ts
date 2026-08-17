@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { parseFilterQuery } from './filterQuery'
+import { isIncompleteFieldExpression, parseFilterQuery } from './filterQuery'
 import type { MessageOut } from '../api/types'
 
 const mk = (partition: number, offset: number, ts: number, text = `v${offset}`): MessageOut => ({
@@ -105,6 +105,31 @@ describe('parseFilterQuery', () => {
     // whitespace segment must be a no-match, not index 0.
     expect(parseFilterQuery('value.items. :hit').predicate(m)).toBe(false)
     expect(parseFilterQuery('value.items.1e0:hit').predicate(m)).toBe(false)
+  })
+  it('operator prefixes match case-insensitively', () => {
+    expect(parseFilterQuery('KEY:k7').api).toEqual({ filter: 'key_contains', q: 'k7' })
+    expect(parseFilterQuery('Key=k7').api).toEqual({ filter: 'key_eq', q: 'k7' })
+    expect(parseFilterQuery('VALUE=x').api).toEqual({ filter: 'value_eq', q: 'x' })
+    expect(parseFilterQuery('Value.user.id=42').api).toEqual({ filter: 'json_eq', q: '42', path: 'user.id' })
+    expect(parseFilterQuery('"KEY:k7"').api).toEqual({ filter: 'contains', q: 'KEY:k7' })
+  })
+  it('quoted path segments address fields with special characters, mirroring the server', () => {
+    expect(parseFilterQuery('value."a.b"=1').api).toEqual({ filter: 'json_eq', q: '1', path: '"a.b"' })
+    expect(parseFilterQuery('value.x."b=c":hi').api).toEqual({ filter: 'json_contains', q: 'hi', path: 'x."b=c"' })
+    const m = jsonRow('{"a.b":1,"x":{"b=c":"hit","d:e":[7]}}')
+    expect(parseFilterQuery('value."a.b"=1').predicate(m)).toBe(true)
+    expect(parseFilterQuery('value.x."b=c"=hit').predicate(m)).toBe(true)
+    expect(parseFilterQuery('value.x."d:e".0=7').predicate(m)).toBe(true)
+    expect(parseFilterQuery('value."a.c"=1').predicate(m)).toBe(false)
+  })
+  it('isIncompleteFieldExpression flags value.-paths still missing their operator', () => {
+    expect(isIncompleteFieldExpression('value.customer')).toBe(true)
+    expect(isIncompleteFieldExpression('VALUE.customer')).toBe(true)
+    expect(isIncompleteFieldExpression('value."a.b')).toBe(true)
+    expect(isIncompleteFieldExpression('value.customer=1')).toBe(false)
+    expect(isIncompleteFieldExpression('value."a.b":x')).toBe(false)
+    expect(isIncompleteFieldExpression('val')).toBe(false)
+    expect(isIncompleteFieldExpression('banana')).toBe(false)
   })
   it('decode-error values never content-match', () => {
     const f = parseFilterQuery('AAEC')

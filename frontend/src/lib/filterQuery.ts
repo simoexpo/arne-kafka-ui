@@ -14,9 +14,39 @@ interface ParsedFilterQuery {
 
 const alwaysTrue = () => true
 
+// Path tokenizer, identical on both sides (backend `split_path`): unquoted
+// `.` separates segments; a double-quoted run is part of its segment with
+// the quotes stripped, so `.`/`:`/`=` inside quotes are literal. An
+// unclosed quote runs to the end. Quoting affects tokenization only.
+function splitPath(path: string): string[] {
+  const segments: string[] = []
+  let current = ''
+  let inQuotes = false
+  for (const c of path) {
+    if (c === '"') inQuotes = !inQuotes
+    else if (c === '.' && !inQuotes) {
+      segments.push(current)
+      current = ''
+    } else current += c
+  }
+  segments.push(current)
+  return segments
+}
+
+// Index of the first `:` or `=` sitting outside double quotes, or -1.
+function unquotedOperatorIndex(text: string): number {
+  let inQuotes = false
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i]
+    if (c === '"') inQuotes = !inQuotes
+    else if ((c === ':' || c === '=') && !inQuotes) return i
+  }
+  return -1
+}
+
 function jsonAtPath(root: unknown, path: string): { found: true; value: unknown } | { found: false } {
   let current: unknown = root
-  for (const seg of path.split('.')) {
+  for (const seg of splitPath(path)) {
     if (Array.isArray(current)) {
       // Mirrors the server's `parse::<usize>()`: digits with an optional
       // leading `+` only — `Number('')`/`Number(' ')` coercing to 0 must
@@ -143,6 +173,20 @@ function jsonContainsPredicate(path: string, q: string) {
   }
 }
 
+// Owner ruling 2026-08-17: operator prefixes match case-insensitively
+// (`KEY:` = `key:`) — deliberately undocumented in the help popup.
+function prefixIs(text: string, prefix: string): boolean {
+  return text.slice(0, prefix.length).toLowerCase() === prefix
+}
+
+// A `value.`-prefixed expression whose operator hasn't been typed yet —
+// the state right after accepting a field proposal. Timeline holds the
+// filter while this is true (spec "Hold while composing"): applying it as
+// a bare contains would filter the window by half-typed text.
+export function isIncompleteFieldExpression(text: string): boolean {
+  return prefixIs(text, 'value.') && unquotedOperatorIndex(text.slice('value.'.length)) === -1
+}
+
 export function parseFilterQuery(text: string): ParsedFilterQuery {
   if (text === '') return { api: null, predicate: alwaysTrue }
 
@@ -152,25 +196,25 @@ export function parseFilterQuery(text: string): ParsedFilterQuery {
     return { api: { filter: 'contains', q }, predicate: containsPredicate(q) }
   }
 
-  if (text.startsWith('key:')) {
+  if (prefixIs(text, 'key:')) {
     const q = text.slice('key:'.length)
     return { api: { filter: 'key_contains', q }, predicate: keyContainsPredicate(q) }
   }
-  if (text.startsWith('key=')) {
+  if (prefixIs(text, 'key=')) {
     const q = text.slice('key='.length)
     return { api: { filter: 'key_eq', q }, predicate: keyEqPredicate(q) }
   }
-  if (text.startsWith('value:')) {
+  if (prefixIs(text, 'value:')) {
     const q = text.slice('value:'.length)
     return { api: { filter: 'value_contains', q }, predicate: valueContainsPredicate(q) }
   }
-  if (text.startsWith('value=')) {
+  if (prefixIs(text, 'value=')) {
     const q = text.slice('value='.length)
     return { api: { filter: 'value_eq', q }, predicate: valueEqPredicate(q) }
   }
-  if (text.startsWith('value.')) {
+  if (prefixIs(text, 'value.')) {
     const rest = text.slice('value.'.length)
-    const opIdx = rest.search(/[:=]/)
+    const opIdx = unquotedOperatorIndex(rest)
     if (opIdx > 0) {
       const path = rest.slice(0, opIdx)
       const q = rest.slice(opIdx + 1)
