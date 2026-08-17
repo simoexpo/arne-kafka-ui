@@ -365,6 +365,15 @@ pub fn group_lag_blocking(
     Ok(out)
 }
 
+/// Coordination-only groups (schema registry's "sr", Connect's "connect")
+/// never commit offsets, so the consumers page has nothing true to say
+/// about them — hidden entirely (owner ruling 2026-08-17). An empty
+/// protocol type is a consumer group with no active members: visible,
+/// that's the lagging-dead-consumer case the page exists for.
+fn is_consumer_group_protocol(protocol_type: &str) -> bool {
+    protocol_type == "consumer" || protocol_type.is_empty()
+}
+
 pub async fn list_groups(handle: Arc<ClusterHandle>) -> Result<GroupList, ApiError> {
     tokio::task::spawn_blocking(move || {
         let gl = handle.consumer()
@@ -374,6 +383,9 @@ pub async fn list_groups(handle: Arc<ClusterHandle>) -> Result<GroupList, ApiErr
         let mut watermark_cache = WatermarkCache::new();
         let mut groups = Vec::new();
         for g in gl.groups() {
+            if !is_consumer_group_protocol(g.protocol_type()) {
+                continue;
+            }
             let lag = group_lag_blocking(&handle, g.name(), &tpl, &mut watermark_cache)?;
             groups.push(GroupSummary {
                 group_id: g.name().to_string(),
@@ -507,6 +519,20 @@ pub async fn overview(handle: Arc<ClusterHandle>) -> Result<Overview, ApiError> 
 mod tests {
     use super::*;
     use std::cell::RefCell;
+
+    /// Owner ruling 2026-08-17: groups that use Kafka's membership protocol
+    /// only for coordination (schema registry's "sr", Connect's "connect")
+    /// never commit offsets — they hide from the consumers page entirely.
+    /// An EMPTY protocol type stays visible: that's a consumer group with
+    /// no active members, exactly the lagging-dead-consumer case the page
+    /// exists to surface.
+    #[test]
+    fn coordination_only_groups_are_not_consumer_groups() {
+        assert!(is_consumer_group_protocol("consumer"));
+        assert!(is_consumer_group_protocol(""));
+        assert!(!is_consumer_group_protocol("sr"));
+        assert!(!is_consumer_group_protocol("connect"));
+    }
 
     /// Owner ruling 2026-08-17: `_schemas` (the schema registry's storage
     /// topic) is formally not internal but effectively is — it hides with
