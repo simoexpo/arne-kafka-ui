@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { estimateErrorTitle, formatAgo, formatBytes, formatCount, formatRetentionValue, formatTimestamp, formatWindowRange, retentionMsHint, zoneSuffix } from './format'
+import { formatAgo, formatBytes, formatCount, formatRetentionValue, formatTimestamp, formatWindowRange, retentionMsHint, zoneSuffix } from './format'
 import { withFixedTZ } from '../test/timezone'
 
 describe('formatAgo', () => {
@@ -18,17 +18,6 @@ describe('formatCount', () => {
   it('thousands', () => expect(formatCount(1500)).toBe('1.5k'))
   it('millions', () => expect(formatCount(2_000_000)).toBe('2.0M'))
   it('billions', () => expect(formatCount(3_100_000_000)).toBe('3.1B'))
-})
-
-describe('estimateErrorTitle', () => {
-  // Kafka attribution, product voice — never the raw error alone, and never
-  // the internal operation name the backend called it with (only the
-  // underlying reason — see admin.rs's `estimate_error_message`).
-  it('attributes a watermark-fetch failure to Kafka, including the reason', () => {
-    expect(estimateErrorTitle('counting messages timed out')).toBe(
-      "Kafka couldn't provide a count — counting messages timed out",
-    )
-  })
 })
 
 describe('formatBytes', () => {

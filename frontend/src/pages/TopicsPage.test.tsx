@@ -12,9 +12,9 @@ vi.mock('../api/client', async (importOriginal) => ({
 
 const topics = {
   topics: [
-    { name: 'orders', partitions: 3, replication_factor: 2, message_estimate: 1200, estimate_error: null, size_bytes: null, internal: false },
-    { name: 'payments', partitions: 1, replication_factor: 2, message_estimate: 50, estimate_error: null, size_bytes: null, internal: false },
-    { name: '__consumer_offsets', partitions: 50, replication_factor: 3, message_estimate: 0, estimate_error: null, size_bytes: null, internal: true },
+    { name: 'orders', partitions: 3, replication_factor: 2, isr: 2, internal: false },
+    { name: 'payments', partitions: 1, replication_factor: 2, isr: 2, internal: false },
+    { name: '__consumer_offsets', partitions: 50, replication_factor: 3, isr: 3, internal: true },
   ],
   as_of: Date.now(),
 }
@@ -25,10 +25,12 @@ describe('TopicsView', () => {
     await renderWithRouter(<TopicsView cluster="prod" />, { initialPath: '/c/prod/topics/orders' })
     expect(await screen.findByText('orders')).toBeInTheDocument()
     expect(screen.queryByText('__consumer_offsets')).not.toBeInTheDocument()
-    // No size column (owner ruling 2026-08-17): librdkafka has no
-    // DescribeLogDirs, so the column could only ever show '—' — removed
-    // until the library grows the API. `size_bytes` stays in the wire shape.
+    // No size column (owner ruling 2026-08-17, librdkafka lacks
+    // DescribeLogDirs) and no messages column (owner ruling 2026-08-18,
+    // estimates cost one watermark call per partition) — the inventory is
+    // a single metadata call. Both return with librdkafka#5333.
     expect(screen.queryByText('size')).not.toBeInTheDocument()
+    expect(screen.queryByText('messages')).not.toBeInTheDocument()
     const link = screen.getByRole('link', { name: /orders/ })
     expect(link).toHaveAttribute('href', '/c/prod/topics/orders')
     // router-rendered <Link>, not a plain <a> full-reload anchor: the router
@@ -36,65 +38,34 @@ describe('TopicsView', () => {
     expect(link).toHaveAttribute('data-status', 'active')
   })
 
-  it('renders — for a topic whose message estimate is null', async () => {
-    vi.mocked(client.getTopics).mockResolvedValue({
-      // size_bytes is non-null so the only '—' in the row is attributable to
-      // the message-estimate cell, not the (already-guarded) size cell
-      topics: [
-        { name: 'flaky', partitions: 2, replication_factor: 1, message_estimate: null, estimate_error: null, size_bytes: 100, internal: false },
-      ],
-      as_of: Date.now(),
-    })
+  it('renders the worst-partition ISR count, unhighlighted when it matches RF', async () => {
+    vi.mocked(client.getTopics).mockResolvedValue(topics)
     await renderWithRouter(<TopicsView cluster="prod" />)
-    expect(await screen.findByText('flaky')).toBeInTheDocument()
-    const row = screen.getByText('flaky').closest('tr')
-    expect(row).toHaveTextContent('—')
-    expect(row).not.toHaveTextContent('null')
+    await screen.findByText('orders')
+    const row = screen.getByText('orders').closest('tr')!
+    const isr = within(row).getByTestId('isr')
+    expect(isr).toHaveTextContent('2')
+    expect(isr.className).not.toMatch(/amber/)
   })
 
-  // I5: an internal topic's null estimate (skipped on purpose) carries no
-  // `estimate_error` and gets no tooltip; a genuine watermark-fetch failure
-  // does, in product voice with kafka attribution.
-  it('shows a title explaining WHY the estimate is missing when a watermark fetch failed', async () => {
+  it('highlights ISR with a warning background when a partition is under-replicated', async () => {
     vi.mocked(client.getTopics).mockResolvedValue({
-      topics: [
-        {
-          name: 'flaky',
-          partitions: 2,
-          replication_factor: 1,
-          message_estimate: null,
-          estimate_error: 'counting messages timed out',
-          size_bytes: 100,
-          internal: false,
-        },
-      ],
+      topics: [{ name: 'degraded', partitions: 2, replication_factor: 3, isr: 2, internal: false }],
       as_of: Date.now(),
     })
     await renderWithRouter(<TopicsView cluster="prod" />)
-    await screen.findByText('flaky')
-    const row = screen.getByText('flaky').closest('tr')!
-    const dash = within(row).getByText('—')
-    expect(dash).toHaveAttribute('title', "Kafka couldn't provide a count — counting messages timed out")
-  })
-
-  it('the size-only "—" carries no estimate-error tooltip', async () => {
-    vi.mocked(client.getTopics).mockResolvedValue({
-      topics: [
-        { name: 'flaky', partitions: 2, replication_factor: 1, message_estimate: null, estimate_error: null, size_bytes: 100, internal: false },
-      ],
-      as_of: Date.now(),
-    })
-    await renderWithRouter(<TopicsView cluster="prod" />)
-    await screen.findByText('flaky')
-    const row = screen.getByText('flaky').closest('tr')!
-    expect(within(row).getByText('—')).not.toHaveAttribute('title')
+    await screen.findByText('degraded')
+    const row = screen.getByText('degraded').closest('tr')!
+    const isr = within(row).getByTestId('isr')
+    expect(isr).toHaveTextContent('2')
+    expect(isr.className).toMatch(/bg-amber/)
   })
 
   it('encodes topic names with spaces and slashes in the detail link href', async () => {
     vi.mocked(client.getTopics).mockResolvedValue({
       topics: [
-        { name: 'order events', partitions: 1, replication_factor: 1, message_estimate: 0, estimate_error: null, size_bytes: null, internal: false },
-        { name: 'a/b', partitions: 1, replication_factor: 1, message_estimate: 0, estimate_error: null, size_bytes: null, internal: false },
+        { name: 'order events', partitions: 1, replication_factor: 1, isr: 1, internal: false },
+        { name: 'a/b', partitions: 1, replication_factor: 1, isr: 1, internal: false },
       ],
       as_of: Date.now(),
     })

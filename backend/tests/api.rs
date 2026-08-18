@@ -44,11 +44,15 @@ async fn clusters_health_checks_run_in_parallel() {
     );
 }
 
+/// Owner ruling 2026-08-18: the topics inventory is a single metadata call —
+/// no message estimates (they cost one watermark round trip per partition;
+/// counts return as real sizes when librdkafka ships DescribeLogDirs,
+/// confluentinc/librdkafka#5333). ISR is the worst partition's in-sync
+/// replica count: equal to RF means healthy.
 #[tokio::test]
-async fn topics_inventory_lists_topic_with_message_estimate() {
+async fn topics_inventory_lists_topic_with_isr_and_no_estimates() {
     let bootstrap = start_kafka().await;
     create_topic(&bootstrap, "inv-topic", 3).await;
-    produce(&bootstrap, "inv-topic", 12).await;
     let state = state_for(&bootstrap, vec![]);
     let (status, body) = get_json(app(state), "/api/clusters/test/topics").await;
     assert_eq!(status, 200);
@@ -56,21 +60,14 @@ async fn topics_inventory_lists_topic_with_message_estimate() {
     let t = topics.iter().find(|t| t["name"] == "inv-topic").expect("topic listed");
     assert_eq!(t["partitions"], 3);
     assert_eq!(t["replication_factor"], 1);
-    assert_eq!(t["message_estimate"], 12);
+    assert_eq!(t["isr"], 1);
     assert_eq!(t["internal"], false);
+    assert!(t.get("message_estimate").is_none(), "estimates are gone from the inventory");
     assert!(body["as_of"].as_i64().unwrap() > 0);
 }
 
-/// Regression: `list_topics` used to `fetch_watermarks` every partition of
-/// every topic, internal ones included — `__transaction_state` alone can
-/// carry 50 partitions on a cluster with transactional producers, and any
-/// single watermark failure aborted the whole request (502, blank topic
-/// inventory). Internal topics are hidden by default and their estimates
-/// aren't shown meaningfully, so they must be skipped entirely: null
-/// estimate, no error, and — critically — the request as a whole still
-/// succeeds.
 #[tokio::test]
-async fn topics_inventory_skips_watermarks_for_internal_topics() {
+async fn topics_inventory_lists_internal_topics() {
     let bootstrap = start_kafka().await;
     // force __consumer_offsets into existence via a real committed offset,
     // rather than relying on another test having already created it
@@ -84,8 +81,6 @@ async fn topics_inventory_skips_watermarks_for_internal_topics() {
     let t = topics.iter().find(|t| t["name"] == "__consumer_offsets")
         .expect("__consumer_offsets topic listed");
     assert_eq!(t["internal"], true);
-    assert!(t["message_estimate"].is_null());
-    assert!(t["estimate_error"].is_null());
 }
 
 #[tokio::test]

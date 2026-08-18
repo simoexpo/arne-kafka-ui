@@ -3,7 +3,6 @@ use crate::error::{self, ApiError};
 use crate::util::now_ms;
 use rdkafka::admin::{AdminOptions, ResourceSpecifier};
 use rdkafka::consumer::Consumer;
-use rdkafka::error::{KafkaError, RDKafkaErrorCode};
 use rdkafka::topic_partition_list::TopicPartitionList;
 use rdkafka::Offset;
 use serde::Serialize;
@@ -16,74 +15,21 @@ pub struct TopicSummary {
     pub name: String,
     pub partitions: i32,
     pub replication_factor: i32,
-    /// `null` whenever `estimate_error` is set — a failed watermark fetch
-    /// never produces a partial or misleading count (see
-    /// `assemble_topic_estimate`: one bad partition aborts the whole
-    /// topic's estimate, not just its own contribution). Also `null` for an
-    /// internal (`__`-prefixed) topic, whose estimate is never computed.
-    pub message_estimate: Option<i64>,
-    /// `TopicSummary` derives a plain `Serialize` with no
-    /// `skip_serializing_if`, so this field is ALWAYS present on the wire —
-    /// as JSON `null` whenever there's nothing to report. Only actually
-    /// SET (non-null) when `message_estimate` is `null` because a
-    /// partition's watermark fetch failed — the Kafka-side reason a client
-    /// should render next to the blank count, per "never show stale data
-    /// silently: every metric carries its sample timestamp [or, on
-    /// failure, why it's missing]". `null` for a healthy estimate and for
-    /// an internal topic (no estimate attempted at all).
-    pub estimate_error: Option<String>,
-    pub size_bytes: Option<u64>,
+    /// The WORST partition's in-sync replica count — equal to
+    /// `replication_factor` means every partition is fully replicated
+    /// (owner ruling 2026-08-18). No message counts here: estimates cost
+    /// one watermark round trip per partition; real sizes arrive when
+    /// librdkafka ships DescribeLogDirs (confluentinc/librdkafka#5333).
+    pub isr: i32,
     pub internal: bool,
 }
 
-/// The text that ends up in `TopicSummary.estimate_error` and is rendered
-/// VERBATIM inside a tooltip by the frontend's
-/// `estimateErrorTitle` (already prefixed there with "Kafka couldn't
-/// provide a count — "). Deliberately NOT `error::from_kafka(...).message`
-/// — that helper's `"{what}: {err}"` shape leaked the internal operation
-/// name ("fetch watermarks") straight into the tooltip. This gives a plain,
-/// standalone reason: the raw broker-side text for an ordinary failure, or
-/// an honest one-line timeout message — no internal vocabulary either way.
 /// Kafka's own internals are `__`-prefixed; `_schemas` (the schema
 /// registry's storage topic) is formally a regular topic but effectively
-/// internal (owner ruling 2026-08-17) — it hides and skips estimates with
-/// the rest. Other single-underscore names are user topics.
+/// internal (owner ruling 2026-08-17) — it hides with the rest. Other
+/// single-underscore names are user topics.
 fn is_internal_topic(name: &str) -> bool {
     name.starts_with("__") || name == "_schemas"
-}
-
-fn estimate_error_message(err: &KafkaError) -> String {
-    match err.rdkafka_error_code() {
-        Some(RDKafkaErrorCode::OperationTimedOut) | Some(RDKafkaErrorCode::RequestTimedOut) => {
-            "counting messages timed out".to_string()
-        }
-        // The raw `KafkaError`/`RDKafkaErrorCode` text ("Meta data fetch
-        // error: BrokerTransportFailure (Local: Broker transport
-        // failure)") is Kafka's own diagnostic — same quality bar as any
-        // other panel's raw error detail — it just must never be prefixed
-        // with the operation name we happened to call it with.
-        _ => err.to_string(),
-    }
-}
-
-/// Sums per-partition watermark deltas for one topic, tolerating a failure:
-/// a broken partition yields `(None, Some(first_error))` instead of aborting
-/// the caller's whole request. Since a partition that fails once is not
-/// going to succeed a moment later within the same request, `fetch` is not
-/// called for any partition after the first failure — one bad partition
-/// costs one failed call, not the full remaining set.
-fn assemble_topic_estimate(
-    partition_ids: impl IntoIterator<Item = i32>,
-    mut fetch: impl FnMut(i32) -> Result<(i64, i64), String>,
-) -> (Option<i64>, Option<String>) {
-    let mut estimate = 0i64;
-    for id in partition_ids {
-        match fetch(id) {
-            Ok((lo, hi)) => estimate += hi - lo,
-            Err(e) => return (None, Some(e)),
-        }
-    }
-    (Some(estimate), None)
 }
 
 #[derive(Debug, Serialize)]
@@ -99,29 +45,12 @@ pub async fn list_topics(handle: Arc<ClusterHandle>) -> Result<TopicList, ApiErr
             .map_err(|e| error::from_kafka(&handle.name, "fetch metadata", &e))?;
         let mut topics = Vec::new();
         for t in md.topics() {
-            let internal = is_internal_topic(t.name());
-            // Internal topics (e.g. `__transaction_state`, which alone can
-            // carry 50 partitions on a cluster with transactional producers)
-            // are hidden by default and their estimates aren't shown
-            // meaningfully — skip the watermark fetches entirely rather than
-            // paying their tax on every inventory load.
-            let (message_estimate, estimate_error) = if internal {
-                (None, None)
-            } else {
-                assemble_topic_estimate(t.partitions().iter().map(|p| p.id()), |id| {
-                    handle.consumer()
-                        .fetch_watermarks(t.name(), id, ADMIN_TIMEOUT)
-                        .map_err(|e| estimate_error_message(&e))
-                })
-            };
             topics.push(TopicSummary {
                 name: t.name().to_string(),
                 partitions: t.partitions().len() as i32,
                 replication_factor: t.partitions().first().map(|p| p.replicas().len()).unwrap_or(0) as i32,
-                message_estimate,
-                estimate_error,
-                size_bytes: None, // librdkafka has no DescribeLogDirs; stable API shape, filled when possible
-                internal,
+                isr: t.partitions().iter().map(|p| p.isr().len()).min().unwrap_or(0) as i32,
+                internal: is_internal_topic(t.name()),
             });
         }
         topics.sort_by(|a, b| a.name.cmp(&b.name));
@@ -552,7 +481,6 @@ pub async fn overview(handle: Arc<ClusterHandle>) -> Result<Overview, ApiError> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::cell::RefCell;
 
     /// Owner ruling 2026-08-17: groups that use Kafka's membership protocol
     /// only for coordination (schema registry's "sr", Connect's "connect")
@@ -598,61 +526,4 @@ mod tests {
         assert!(!is_internal_topic("demo-orders"));
     }
 
-    #[test]
-    fn all_partitions_succeed_sums_estimate() {
-        let calls = RefCell::new(0);
-        let (estimate, error) = assemble_topic_estimate([0, 1, 2], |id| {
-            *calls.borrow_mut() += 1;
-            Ok((0, (i64::from(id) + 1) * 10))
-        });
-        assert_eq!(estimate, Some(10 + 20 + 30));
-        assert_eq!(error, None);
-        assert_eq!(*calls.borrow(), 3);
-    }
-
-    #[test]
-    fn partition_failure_yields_null_estimate_and_first_error() {
-        let calls = RefCell::new(0);
-        let (estimate, error) = assemble_topic_estimate([0, 1, 2], |id| {
-            *calls.borrow_mut() += 1;
-            if id == 1 { Err("boom".to_string()) } else { Ok((0, 5)) }
-        });
-        assert_eq!(estimate, None);
-        assert_eq!(error.as_deref(), Some("boom"));
-        // one broken partition must not abort the whole topic count, but it
-        // also must not keep paying for partitions after the first failure
-        assert_eq!(*calls.borrow(), 2);
-    }
-
-    #[test]
-    fn no_partitions_yields_zero_estimate() {
-        let (estimate, error) = assemble_topic_estimate(std::iter::empty(), |_: i32| -> Result<(i64, i64), String> {
-            unreachable!("fetch must not be called for a topic with no partitions")
-        });
-        assert_eq!(estimate, Some(0));
-        assert_eq!(error, None);
-    }
-
-    /// `estimate_error` (rendered verbatim in a tooltip by
-    /// `estimateErrorTitle`) must never carry the internal "fetch
-    /// watermarks:" phrasing `from_kafka`'s generic `{what}: {err}` shape
-    /// produces — only the underlying (already Kafka-attributed by the
-    /// caller's own "Kafka couldn't provide a count —" prefix) reason.
-    #[test]
-    fn estimate_error_message_never_carries_the_internal_operation_prefix() {
-        use rdkafka::error::{KafkaError, RDKafkaErrorCode};
-        let err = KafkaError::MetadataFetch(RDKafkaErrorCode::BrokerTransportFailure);
-        let msg = estimate_error_message(&err);
-        assert!(
-            !msg.to_lowercase().contains("fetch watermarks"),
-            "must not leak the internal operation name we chose to interpolate: {msg:?}"
-        );
-    }
-
-    #[test]
-    fn estimate_error_message_is_honest_about_a_timeout() {
-        use rdkafka::error::{KafkaError, RDKafkaErrorCode};
-        let err = KafkaError::MetadataFetch(RDKafkaErrorCode::OperationTimedOut);
-        assert_eq!(estimate_error_message(&err), "counting messages timed out");
-    }
 }

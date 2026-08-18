@@ -22,14 +22,9 @@ export interface TopicSummary {
   name: string
   partitions: number
   replication_factor: number
-  message_estimate: number | null
-  // Non-null only when `message_estimate` failed for a genuine reason (a
-  // partition's watermark fetch errored) — never set for an internal topic,
-  // whose estimate is skipped outright (see the backend's `list_topics`).
-  // Lets the UI tell "we didn't bother" from "we tried and Kafka refused"
-  // where `message_estimate` renders as '—' either way.
-  estimate_error: string | null
-  size_bytes: number | null
+  // The worst partition's in-sync replica count — equal to
+  // replication_factor means fully replicated.
+  isr: number
   internal: boolean
 }
 export interface TopicList { topics: TopicSummary[]; as_of: number }

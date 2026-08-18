@@ -4,7 +4,6 @@ import { Link, useParams } from '@tanstack/react-router'
 import { getTopics } from '../api/client'
 import { CopyButton } from '../components/CopyButton'
 import { FilterInput } from '../components/FilterInput'
-import { MessageEstimateCell } from '../components/MessageEstimateCell'
 import { Panel } from '../components/Panel'
 import { StalenessChip } from '../components/StalenessChip'
 import { Switch } from '../components/Switch'
@@ -46,7 +45,7 @@ export function TopicsView({ cluster }: { cluster: string }) {
             <tr>
               <th className="py-1">name</th><th>partitions</th>
               <th><abbr title="replication factor" className="cursor-help underline decoration-dotted">RF</abbr></th>
-              <th>messages</th>
+              <th><abbr title="in-sync replicas (worst partition)" className="cursor-help underline decoration-dotted">ISR</abbr></th>
             </tr>
           </thead>
           <tbody>
@@ -67,7 +66,16 @@ export function TopicsView({ cluster }: { cluster: string }) {
                 <td>{t.partitions}</td>
                 <td>{t.replication_factor}</td>
                 <td>
-                  <MessageEstimateCell estimate={t.message_estimate} error={t.estimate_error} />
+                  <span
+                    data-testid="isr"
+                    className={
+                      t.isr < t.replication_factor
+                        ? 'rounded bg-amber-100 px-1.5 py-0.5 font-semibold text-amber-800 dark:bg-amber-900/50 dark:text-amber-300'
+                        : undefined
+                    }
+                  >
+                    {t.isr}
+                  </span>
                 </td>
               </tr>
             ))}

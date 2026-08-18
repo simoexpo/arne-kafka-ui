@@ -67,10 +67,9 @@ pub fn spawn_sampler(handle: Arc<ClusterHandle>, interval: Duration) -> tokio::t
 }
 
 /// For EVERY topic, internal (`__`-prefixed) included, sums its partitions'
-/// high watermarks via `fetch_hi`, tolerating a per-topic failure the same
-/// way `admin::assemble_topic_estimate` does: one failed partition drops
-/// that topic's sample entirely rather than reporting a partial/misleading
-/// total (`complete` is all-or-nothing).
+/// high watermarks via `fetch_hi`, tolerating a per-topic failure: one
+/// failed partition drops that topic's sample entirely rather than
+/// reporting a partial/misleading total (`complete` is all-or-nothing).
 ///
 /// Internal topics are sampled deliberately, unlike `admin::list_topics`'s
 /// own `__`-prefixed skip: that skip only suppresses a *count* there, but
