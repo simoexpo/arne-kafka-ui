@@ -5,6 +5,7 @@ import { getRegistrySettings, getSubjects } from '../api/client'
 import { FilterInput } from '../components/FilterInput'
 import { Panel } from '../components/Panel'
 import { StalenessChip } from '../components/StalenessChip'
+import { Stat } from '../components/Stat'
 
 export function SchemaView({ cluster }: { cluster: string }) {
   const [filter, setFilter] = useState('')
@@ -29,25 +30,28 @@ export function SchemaView({ cluster }: { cluster: string }) {
         <h1 className="text-lg font-semibold">Schemas</h1>
         <StalenessChip asOf={subjects.data?.as_of ?? null} refreshing={subjects.isFetching} failed={subjects.isError} />
       </div>
-      {settings.data && (
-        <div className="flex items-center gap-4 text-sm text-zinc-600 dark:text-zinc-400">
-          <span className="flex items-center gap-1.5">
-            compatibility
-            <span className="rounded border border-zinc-300 px-1.5 py-0.5 font-mono text-xs text-zinc-600 dark:border-zinc-700 dark:text-zinc-400">
-              {settings.data.compatibility_level}
-            </span>
-          </span>
-          <span className="flex items-center gap-1.5">
-            mode
-            <span className="rounded border border-zinc-300 px-1.5 py-0.5 font-mono text-xs text-zinc-600 dark:border-zinc-700 dark:text-zinc-400">
-              {settings.data.mode}
-            </span>
-          </span>
-        </div>
-      )}
-      {/* Settings failing alone (subjects fine) still gets a line — a
-          silently missing block would read as "no settings exist". */}
-      {settings.isError && <p className="text-sm text-zinc-500">registry settings unavailable</p>}
+      {/* Mirrors Overview's cluster panel — the shared idiom for
+          infrastructure facts up top (owner ruling 2026-08-18). Panel also
+          renders settings failures honestly in place. */}
+      <Panel
+        title="schema registry"
+        error={settings.error}
+        loading={settings.isPending}
+        hasData={settings.data !== undefined}
+      >
+        {settings.data && (
+          <div className="space-y-3">
+            <dl className="grid grid-cols-2 gap-2 text-sm sm:grid-cols-3">
+              <Stat label="compatibility" value={settings.data.compatibility_level} />
+              <Stat label="mode" value={settings.data.mode} />
+            </dl>
+            <div className="font-mono text-sm">
+              <span className="text-zinc-500">url </span>
+              {settings.data.url}
+            </div>
+          </div>
+        )}
+      </Panel>
       <FilterInput value={filter} onChange={setFilter} placeholder="filter subjects…" ariaLabel="filter subjects" />
       <Panel
         title={`${visible.length} subjects`}

@@ -15,17 +15,21 @@ beforeEach(() => {
   vi.mocked(client.getRegistrySettings).mockResolvedValue({
     compatibility_level: 'BACKWARD',
     mode: 'READWRITE',
+    url: 'http://sr:8081',
     as_of: 1,
   })
 })
 
 describe('SchemaView', () => {
-  it('shows registry-wide settings above the list', async () => {
+  // A registry panel with Stat tiles, mirroring Overview's cluster panel —
+  // the one shared idiom for "infrastructure facts up top" (owner ruling
+  // 2026-08-18). The URL renders as a mono line like Overview's brokers.
+  it('shows a registry panel with stats and the url above the list', async () => {
     vi.mocked(client.getSubjects).mockResolvedValue({ subjects: [], as_of: 1 })
     await renderWithRouter(<SchemaView cluster="prod" />, { initialPath: '/c/prod/schemas' })
-    expect(await screen.findByText('BACKWARD')).toBeInTheDocument()
-    expect(screen.getByText('READWRITE')).toBeInTheDocument()
-    expect(screen.getByText(/compatibility/i)).toBeInTheDocument()
+    expect(await screen.findByTestId('stat-compatibility')).toHaveTextContent('BACKWARD')
+    expect(screen.getByTestId('stat-mode')).toHaveTextContent('READWRITE')
+    expect(screen.getByText('http://sr:8081')).toBeInTheDocument()
   })
 
   it('lists subjects and links to detail via SPA navigation', async () => {
