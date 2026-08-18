@@ -93,6 +93,49 @@ services:
           sleep 2
         done
 
+  demo-consumer-orders:
+    image: apache/kafka:latest
+    depends_on: [kafka]
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        sleep 15
+        /opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server kafka:19092 \
+          --group demo-orders-service --topic demo-orders >/dev/null
+
+  demo-consumer-analytics:
+    image: apache/kafka:latest
+    depends_on: [kafka]
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        sleep 15
+        /opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server kafka:19092 \
+          --group demo-analytics --include 'demo-orders|demo-users' >/dev/null
+
+  demo-consumer-batch:
+    image: apache/kafka:latest
+    depends_on: [kafka]
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        sleep 15
+        while true; do
+          timeout -s TERM 30 /opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server kafka:19092 \
+            --group demo-batch-etl --topic demo-audit >/dev/null
+          sleep 180
+        done
+
+  demo-consumer-orders2:
+    image: apache/kafka:latest
+    depends_on: [kafka2]
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        sleep 15
+        /opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server kafka2:19092 \
+          --group demo-orders-service --topic demo-orders >/dev/null
+
   demo-producer-sr:
     image: confluentinc/cp-schema-registry:7.7.1
     depends_on: [kafka, schema-registry]
