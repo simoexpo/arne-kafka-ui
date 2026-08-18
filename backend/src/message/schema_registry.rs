@@ -110,6 +110,10 @@ pub struct SchemaRegistry {
 }
 
 impl SchemaRegistry {
+    pub fn url(&self) -> &str {
+        &self.base
+    }
+
     pub fn new(url: &str) -> Self {
         Self {
             base: url.trim_end_matches('/').to_string(),

@@ -67,6 +67,19 @@ pub async fn list(
     Ok(Json(json!({ "subjects": subjects, "as_of": crate::util::now_ms() })))
 }
 
+/// The registry URL comes from the user's own config, but embedded
+/// credentials (`scheme://user:pass@host`) must never echo back through
+/// the browser — the userinfo is stripped, everything else verbatim.
+fn strip_userinfo(url: &str) -> String {
+    if let Some((scheme, rest)) = url.split_once("://") {
+        let authority_end = rest.find('/').unwrap_or(rest.len());
+        if let Some(at) = rest[..authority_end].rfind('@') {
+            return format!("{scheme}://{}", &rest[at + 1..]);
+        }
+    }
+    url.to_string()
+}
+
 pub async fn registry_settings(
     State(state): State<AppState>,
     Path(cluster): Path<String>,
@@ -79,6 +92,7 @@ pub async fn registry_settings(
     Ok(Json(json!({
         "compatibility_level": settings.compatibility_level,
         "mode": settings.mode,
+        "url": strip_userinfo(sr.url()),
         "as_of": crate::util::now_ms(),
     })))
 }
@@ -225,5 +239,21 @@ mod tests {
         let s = resolve_strategy("orders-eu-value", &topics(&["orders", "orders-eu"]), None);
         assert_eq!(s.strategy, Some("topic_name"));
         assert_eq!(s.topic.as_deref(), Some("orders-eu"));
+    }
+}
+
+#[cfg(test)]
+mod url_tests {
+    use super::strip_userinfo;
+
+    /// The registry URL comes from the user's own config, but embedded
+    /// credentials (`scheme://user:pass@host`) must never echo back
+    /// through the browser.
+    #[test]
+    fn strips_userinfo_but_nothing_else() {
+        assert_eq!(strip_userinfo("http://sr:8081"), "http://sr:8081");
+        assert_eq!(strip_userinfo("https://user:pass@sr.example.com:8081"), "https://sr.example.com:8081");
+        // An @ past the authority (path/query) is not userinfo.
+        assert_eq!(strip_userinfo("http://sr:8081/path@x"), "http://sr:8081/path@x");
     }
 }
