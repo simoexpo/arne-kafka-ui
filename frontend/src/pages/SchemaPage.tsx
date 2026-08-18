@@ -2,6 +2,7 @@ import { useMemo, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { Link, useParams } from '@tanstack/react-router'
 import { getRegistrySettings, getSubjects } from '../api/client'
+import { CopyButton } from '../components/CopyButton'
 import { FilterInput } from '../components/FilterInput'
 import { Panel } from '../components/Panel'
 import { StalenessChip } from '../components/StalenessChip'
@@ -34,7 +35,7 @@ export function SchemaView({ cluster }: { cluster: string }) {
           infrastructure facts up top (owner ruling 2026-08-18). Panel also
           renders settings failures honestly in place. */}
       <Panel
-        title="schema registry"
+        title="Schema Registry"
         error={settings.error}
         loading={settings.isPending}
         hasData={settings.data !== undefined}
@@ -42,12 +43,13 @@ export function SchemaView({ cluster }: { cluster: string }) {
         {settings.data && (
           <div className="space-y-3">
             <dl className="grid grid-cols-2 gap-2 text-sm sm:grid-cols-3">
-              <Stat label="compatibility" value={settings.data.compatibility_level} />
+              <Stat label="default compatibility" value={settings.data.compatibility_level} />
               <Stat label="mode" value={settings.data.mode} />
             </dl>
-            <div className="font-mono text-sm">
-              <span className="text-zinc-500">url </span>
+            <div className="flex items-center gap-1.5 font-mono text-sm">
+              <span className="text-zinc-500">url</span>
               {settings.data.url}
+              <CopyButton text={settings.data.url} label="registry url" />
             </div>
           </div>
         )}

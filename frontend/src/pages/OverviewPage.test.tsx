@@ -12,6 +12,20 @@ vi.mock('../api/client', async (importOriginal) => ({
 }))
 
 describe('OverviewView', () => {
+  it('broker addresses are copyable like other identifiers', async () => {
+    vi.mocked(client.getOverview).mockResolvedValue({
+      brokers: [{ id: 1, host: 'b1', port: 9092 }],
+      controller_id: null,
+      topic_count: 2,
+      partition_count: 4,
+      under_replicated_partitions: 0,
+      as_of: Date.now(),
+    })
+    vi.mocked(client.getTopics).mockResolvedValue({ topics: [], as_of: Date.now() })
+    renderWithQuery(<OverviewView cluster="prod" />)
+    expect(await screen.findByLabelText('copy b1:9092')).toBeInTheDocument()
+  })
+
   it('renders broker count, URP, and top topics by size', async () => {
     vi.mocked(client.getOverview).mockResolvedValue({
       brokers: [{ id: 1, host: 'b1', port: 9092 }],

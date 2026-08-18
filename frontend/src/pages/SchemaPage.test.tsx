@@ -24,12 +24,14 @@ describe('SchemaView', () => {
   // A registry panel with Stat tiles, mirroring Overview's cluster panel —
   // the one shared idiom for "infrastructure facts up top" (owner ruling
   // 2026-08-18). The URL renders as a mono line like Overview's brokers.
-  it('shows a registry panel with stats and the url above the list', async () => {
+  it('shows a registry panel with stats and a copyable url above the list', async () => {
     vi.mocked(client.getSubjects).mockResolvedValue({ subjects: [], as_of: 1 })
     await renderWithRouter(<SchemaView cluster="prod" />, { initialPath: '/c/prod/schemas' })
-    expect(await screen.findByTestId('stat-compatibility')).toHaveTextContent('BACKWARD')
+    expect(await screen.findByText('Schema Registry')).toBeInTheDocument()
+    expect(screen.getByTestId('stat-default compatibility')).toHaveTextContent('BACKWARD')
     expect(screen.getByTestId('stat-mode')).toHaveTextContent('READWRITE')
     expect(screen.getByText('http://sr:8081')).toBeInTheDocument()
+    expect(screen.getByLabelText('copy registry url')).toBeInTheDocument()
   })
 
   it('lists subjects and links to detail via SPA navigation', async () => {

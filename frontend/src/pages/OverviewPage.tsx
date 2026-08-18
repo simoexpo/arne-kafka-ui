@@ -1,4 +1,5 @@
 import { useQuery } from '@tanstack/react-query'
+import { CopyButton } from '../components/CopyButton'
 import { Stat } from '../components/Stat'
 import { useParams } from '@tanstack/react-router'
 import { getOverview, getTopics } from '../api/client'
@@ -45,8 +46,9 @@ export function OverviewView({ cluster }: { cluster: string }) {
         <Panel title="Brokers" error={overview.error} loading={overview.isPending} hasData={overview.data !== undefined}>
           <ul className="space-y-1 font-mono text-sm">
             {overview.data?.brokers.map((b) => (
-              <li key={b.id}>
+              <li key={b.id} className="flex items-center gap-1.5">
                 <span className="text-zinc-500">#{b.id}</span> {b.host}:{b.port}
+                <CopyButton text={`${b.host}:${b.port}`} label={`${b.host}:${b.port}`} />
               </li>
             ))}
           </ul>
