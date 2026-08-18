@@ -65,13 +65,13 @@ function CompatibilityTab({ cluster, subject, schemaType }: { cluster: string; s
   })
   return (
     <Panel
-      className="min-h-0 flex-1 overflow-y-auto"
+      className="flex min-h-0 flex-1 flex-col overflow-hidden"
       title="Test compatibility"
       error={level.error}
       loading={level.isPending}
       hasData={level.data !== undefined}
     >
-      <div className="space-y-3">
+      <div className="flex min-h-0 flex-1 flex-col gap-3">
         <div className="flex items-center gap-1.5 text-sm text-zinc-500">
           compatibility level
           <span className="rounded border border-zinc-300 px-1.5 py-0.5 font-mono text-xs text-zinc-600 dark:border-zinc-700 dark:text-zinc-400">
@@ -86,15 +86,18 @@ function CompatibilityTab({ cluster, subject, schemaType }: { cluster: string; s
             check.reset()
           }}
           placeholder="paste a candidate schema…"
-          rows={10}
-          className="w-full rounded border border-zinc-300 bg-transparent px-3 py-1.5 font-mono text-sm outline-none focus:border-zinc-500 dark:border-zinc-700"
+          // Fills every pixel the pinned page grants it; the rows below
+          // (button, verdict) keep their fixed space.
+          className="min-h-0 w-full flex-1 resize-none rounded border border-zinc-300 bg-transparent px-3 py-1.5 font-mono text-sm outline-none focus:border-zinc-500 dark:border-zinc-700"
         />
         <div className="flex items-center gap-3">
           <button
             type="button"
             disabled={candidate.trim() === '' || check.isPending}
             onClick={() => check.mutate()}
-            className="rounded border border-zinc-300 px-2 py-0.5 text-sm text-zinc-600 hover:bg-zinc-100 disabled:opacity-50 dark:border-zinc-700 dark:text-zinc-400 dark:hover:bg-zinc-800"
+            // enabled: variants — a grayed-out button must not light up on
+            // hover as if it were clickable.
+            className="rounded border border-zinc-300 px-2 py-0.5 text-sm text-zinc-600 disabled:opacity-50 enabled:hover:bg-zinc-100 dark:border-zinc-700 dark:text-zinc-400 dark:enabled:hover:bg-zinc-800"
           >
             check compatibility
           </button>
@@ -111,9 +114,11 @@ function CompatibilityTab({ cluster, subject, schemaType }: { cluster: string; s
             <p className="font-medium text-red-700 dark:text-red-400">
               not compatible with the latest version under {level.data?.level}
             </p>
-            {check.data.messages.map((m, i) => (
-              <p key={i} className="font-mono text-xs text-red-600 dark:text-red-400">{m}</p>
-            ))}
+            <div className="max-h-40 overflow-auto">
+              {check.data.messages.map((m, i) => (
+                <p key={i} className="font-mono text-xs text-red-600 dark:text-red-400">{m}</p>
+              ))}
+            </div>
           </div>
         ))}
       </div>
