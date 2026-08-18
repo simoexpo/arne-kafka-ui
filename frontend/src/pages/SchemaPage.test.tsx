@@ -43,6 +43,7 @@ describe('SchemaView', () => {
     expect(await screen.findByText('sr-avro-value')).toBeInTheDocument()
     const link = screen.getByRole('link', { name: 'sr-avro-value' })
     expect(link).toHaveAttribute('href', '/c/prod/schemas/sr-avro-value')
+    expect(screen.getByLabelText('copy sr-avro-value')).toBeInTheDocument()
     expect(screen.getByText('2 subjects')).toBeInTheDocument()
   })
 

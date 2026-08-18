@@ -13,3 +13,18 @@ describe('CopyButton', () => {
     expect(await screen.findByText(/copied/i)).toBeInTheDocument()
   })
 })
+
+// The transient "copied" hint must not occupy layout space — inside a
+// table cell it used to widen the column for 1.5s on every click. It
+// floats over adjacent content instead (owner request 2026-08-18).
+it('the copied hint floats without taking layout space', async () => {
+  const user = userEvent.setup()
+  Object.defineProperty(navigator, 'clipboard', { value: { writeText: vi.fn().mockResolvedValue(undefined) }, configurable: true })
+  render(<CopyButton text="x" label="thing" />)
+  const wrapper = screen.getByLabelText('copy thing').parentElement!
+  expect(wrapper.className).toMatch(/\brelative\b/)
+  await user.click(screen.getByLabelText('copy thing'))
+  const hint = screen.getByText('copied')
+  expect(hint.className).toMatch(/\babsolute\b/)
+  expect(hint.className).toMatch(/\bleft-full\b/)
+})

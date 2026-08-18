@@ -76,6 +76,9 @@ export function SchemaView({ cluster }: { cluster: string }) {
                   >
                     {s}
                   </Link>
+                  <span className="ml-1.5">
+                    <CopyButton text={s} label={s} />
+                  </span>
                 </td>
               </tr>
             ))}

@@ -31,7 +31,10 @@ export function CopyButton({ text, label }: { text: string; label: string }) {
   useEffect(() => () => clearTimeout(timeoutRef.current), [])
 
   return (
-    <span className="inline-flex items-center gap-1">
+    // relative + the absolutely-positioned hint below: the transient
+    // "copied" text must never occupy layout space — inside a table cell
+    // it used to widen the column for 1.5s on every click.
+    <span className="relative inline-flex items-center">
       <button
         type="button"
         aria-label={`copy ${label}`}
@@ -47,7 +50,11 @@ export function CopyButton({ text, label }: { text: string; label: string }) {
       >
         {copied ? <CheckIcon /> : <CopyIcon />}
       </button>
-      {copied && <span className="text-xs text-emerald-600 dark:text-emerald-400">copied</span>}
+      {copied && (
+        <span className="absolute left-full top-1/2 ml-1 -translate-y-1/2 whitespace-nowrap text-xs text-emerald-600 dark:text-emerald-400">
+          copied
+        </span>
+      )}
     </span>
   )
 }
