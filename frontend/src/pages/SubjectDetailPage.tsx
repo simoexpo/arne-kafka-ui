@@ -6,6 +6,7 @@ import { CopyButton } from '../components/CopyButton'
 import { EncodingBadge } from '../components/messages/EncodingBadge'
 import { JsonView } from '../components/messages/JsonView'
 import { Panel } from '../components/Panel'
+import { ProtoView } from '../components/ProtoView'
 import { StalenessChip } from '../components/StalenessChip'
 
 // Same honesty pattern as message payloads (PayloadView): a JSON-able
@@ -23,7 +24,7 @@ function SchemaBody({ schema }: { schema: string }) {
     // The ONLY scrollable region of the Definition tab (owner ruling
     // 2026-08-18): the page itself is pinned; long/wide schemas scroll here.
     <div data-testid="schema-body" className="min-h-0 flex-1 overflow-auto whitespace-nowrap font-mono text-sm">
-      {isJson ? <JsonView value={parsed} /> : <pre className="whitespace-pre">{schema}</pre>}
+      {isJson ? <JsonView value={parsed} /> : <ProtoView source={schema} />}
     </div>
   )
 }
