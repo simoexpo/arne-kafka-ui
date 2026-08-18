@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import { screen } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { renderWithRouter } from '../test/utils'
 import { GroupsView } from './GroupsPage'
 import * as client from '../api/client'
@@ -44,5 +45,20 @@ describe('GroupsView', () => {
       '/c/prod/consumers/billing%20team',
     )
     expect(screen.getByRole('link', { name: 'a/b' })).toHaveAttribute('href', '/c/prod/consumers/a%2Fb')
+  })
+
+  it('copies the group id without navigating when the row copy button is clicked', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined)
+    Object.assign(navigator, { clipboard: { writeText } })
+    vi.mocked(client.getGroups).mockResolvedValue({
+      groups: [{ group_id: 'billing', state: 'Stable', protocol_type: 'consumer', member_count: 2, total_lag: 0 }],
+      as_of: Date.now(),
+    })
+    const { router } = await renderWithRouter(<GroupsView cluster="prod" />, { initialPath: '/c/prod/consumers' })
+    await screen.findByText('billing')
+    await userEvent.click(screen.getByRole('button', { name: 'copy billing' }))
+    expect(writeText).toHaveBeenCalledWith('billing')
+    expect(await screen.findByText(/copied/i)).toBeInTheDocument()
+    expect(router.state.location.pathname).toBe('/c/prod/consumers')
   })
 })

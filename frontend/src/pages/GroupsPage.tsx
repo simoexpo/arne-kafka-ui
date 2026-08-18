@@ -1,6 +1,7 @@
 import { useQuery } from '@tanstack/react-query'
 import { Link, useParams } from '@tanstack/react-router'
 import { getGroups } from '../api/client'
+import { CopyButton } from '../components/CopyButton'
 import { Panel } from '../components/Panel'
 import { StalenessChip } from '../components/StalenessChip'
 import { formatCount } from '../lib/format'
@@ -39,6 +40,9 @@ export function GroupsView({ cluster }: { cluster: string }) {
                   >
                     {g.group_id}
                   </Link>
+                  <span className="ml-1.5">
+                    <CopyButton text={g.group_id} label={g.group_id} />
+                  </span>
                 </td>
                 <td>{g.state}</td>
                 <td className="text-zinc-500">{g.protocol_type}</td>
