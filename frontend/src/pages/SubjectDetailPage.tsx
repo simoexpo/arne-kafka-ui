@@ -57,21 +57,23 @@ function CompatibilityTab({ cluster, subject, schemaType }: { cluster: string; s
     queryFn: ({ signal }) => getCompatibilityLevel(cluster, subject, signal),
   })
   const [candidate, setCandidate] = useState('')
-  const [candidateType, setCandidateType] = useState(schemaType)
+  // No type selector: a subject's versions all share one schema type (the
+  // registry rejects mixed types), so the candidate is always tested as
+  // the subject's own type.
   const check = useMutation({
-    mutationFn: () => checkCompatibility(cluster, subject, candidate, candidateType),
+    mutationFn: () => checkCompatibility(cluster, subject, candidate, schemaType),
   })
   return (
     <Panel
       className="min-h-0 flex-1 overflow-y-auto"
-      title="compatibility"
+      title="Test compatibility"
       error={level.error}
       loading={level.isPending}
       hasData={level.data !== undefined}
     >
       <div className="space-y-3">
         <div className="flex items-center gap-1.5 text-sm text-zinc-500">
-          effective level
+          compatibility level
           <span className="rounded border border-zinc-300 px-1.5 py-0.5 font-mono text-xs text-zinc-600 dark:border-zinc-700 dark:text-zinc-400">
             {level.data?.level}
           </span>
@@ -88,19 +90,6 @@ function CompatibilityTab({ cluster, subject, schemaType }: { cluster: string; s
           className="w-full rounded border border-zinc-300 bg-transparent px-3 py-1.5 font-mono text-sm outline-none focus:border-zinc-500 dark:border-zinc-700"
         />
         <div className="flex items-center gap-3">
-          <label className="flex items-center gap-1.5 text-sm text-zinc-500">
-            type
-            <select
-              aria-label="candidate schema type"
-              value={candidateType}
-              onChange={(e) => setCandidateType(e.target.value)}
-              className="rounded border border-zinc-300 px-1 py-0.5 dark:border-zinc-700 dark:bg-zinc-950"
-            >
-              {['AVRO', 'PROTOBUF', 'JSON'].map((t) => (
-                <option key={t} value={t}>{t}</option>
-              ))}
-            </select>
-          </label>
           <button
             type="button"
             disabled={candidate.trim() === '' || check.isPending}
