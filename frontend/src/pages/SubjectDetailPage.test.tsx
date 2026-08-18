@@ -35,24 +35,28 @@ beforeEach(() => {
 })
 
 describe('SubjectDetailView', () => {
-  it('Definition tab shows versions, type, id, the schema, and the strategy section', async () => {
+  // Definition mirrors the topic Config tab's grammar (owner ruling
+  // 2026-08-18): a stat grid (format, strategy by its Confluent name,
+  // topic only when topic-based) → divider → version + copyable id →
+  // the schema itself.
+  it('Definition tab: stat grid, then version and copyable id, then the schema', async () => {
     vi.mocked(client.getSubjectDetail).mockResolvedValue(detail())
     await renderWithRouter(<SubjectDetailView cluster="prod" subject="sr-avro-value" />, {
       initialPath: '/c/prod/schemas/sr-avro-value',
     })
     expect(screen.getAllByRole('tab').map((t) => t.textContent)).toEqual(['Definition', 'Compatibility'])
     expect(await screen.findByText('avro')).toBeInTheDocument()
-    expect(screen.getByText('id 42')).toBeInTheDocument()
+    expect(await screen.findByText('TopicNameStrategy')).toBeInTheDocument()
+    const topicLink = screen.getByRole('link', { name: /sr-avro/ })
+    expect(topicLink).toHaveAttribute('href', '/c/prod/topics/sr-avro')
     const select = screen.getByLabelText('version') as HTMLSelectElement
     expect(select.value).toBe('3')
+    expect(screen.getByText('id 42')).toBeInTheDocument()
+    expect(screen.getByLabelText('copy schema id')).toBeInTheDocument()
     expect(screen.getByText('"Order"')).toBeInTheDocument()
-    // Strategy section: format is the badge above; topic links to its page.
-    const topicLink = await screen.findByRole('link', { name: 'sr-avro' })
-    expect(topicLink).toHaveAttribute('href', '/c/prod/topics/sr-avro')
-    expect(screen.getByText('topic name (value)')).toBeInTheDocument()
   })
 
-  it('Definition strategy section is honest when nothing is provable', async () => {
+  it('Definition hides the topic tile and stays honest when nothing is provable', async () => {
     vi.mocked(client.getSubjectDetail).mockResolvedValue(detail({ subject: 'weird' }))
     vi.mocked(client.getSubjectStrategy).mockResolvedValue({ strategy: null, topic: null, role: null, as_of: 1 })
     await renderWithRouter(<SubjectDetailView cluster="prod" subject="weird" />, {
@@ -60,6 +64,7 @@ describe('SubjectDetailView', () => {
     })
     await screen.findByText('avro')
     expect(await screen.findByText(/not derivable/i)).toBeInTheDocument()
+    expect(screen.queryByText('topic')).not.toBeInTheDocument()
   })
 
   it('selecting a version re-queries with that version', async () => {

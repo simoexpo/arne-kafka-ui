@@ -41,52 +41,12 @@ function SchemaTypeBadge({ schemaType }: { schemaType: string }) {
   )
 }
 
+// The Confluent class names the ecosystem knows these strategies by.
 const STRATEGY_LABEL = {
-  topic_name: 'topic name',
-  topic_record_name: 'topic-record name',
-  record_name: 'record name',
+  topic_name: 'TopicNameStrategy',
+  topic_record_name: 'TopicRecordNameStrategy',
+  record_name: 'RecordNameStrategy',
 } as const
-
-// The registry doesn't record topic associations — the strategy is
-// resolved server-side from evidence (existing topics, the schema's own
-// record name) and rendered honestly as "not derivable" when unproven.
-function StrategySection({ cluster, subject }: { cluster: string; subject: string }) {
-  const strategy = useQuery({
-    queryKey: ['subject-strategy', cluster, subject],
-    queryFn: ({ signal }) => getSubjectStrategy(cluster, subject, signal),
-  })
-  if (!strategy.data) return null
-  const s = strategy.data
-  return (
-    <div className="flex items-center gap-4 border-t border-zinc-100 pt-3 text-sm dark:border-zinc-800">
-      <span className="flex items-center gap-1.5 text-zinc-500">
-        topic
-        {s.topic === null ? (
-          <span className="text-zinc-400">—</span>
-        ) : (
-          <Link
-            to="/c/$cluster/topics/$topic"
-            params={{ cluster, topic: s.topic }}
-            className="font-mono text-blue-600 hover:underline dark:text-blue-400"
-          >
-            {s.topic}
-          </Link>
-        )}
-      </span>
-      <span className="flex items-center gap-1.5 text-zinc-500">
-        strategy
-        {s.strategy === null ? (
-          <span className="text-zinc-400">not derivable</span>
-        ) : (
-          <span className="text-zinc-700 dark:text-zinc-300">
-            {STRATEGY_LABEL[s.strategy]}
-            {s.role !== null && ` (${s.role})`}
-          </span>
-        )}
-      </span>
-    </div>
-  )
-}
 
 function CompatibilityTab({ cluster, subject, schemaType }: { cluster: string; subject: string; schemaType: string }) {
   const level = useQuery({
@@ -178,6 +138,12 @@ export function SubjectDetailView({ cluster, subject }: { cluster: string; subje
     queryKey: ['subject', cluster, subject, version ?? 'latest'],
     queryFn: ({ signal }) => getSubjectDetail(cluster, subject, version, signal),
   })
+  // Per-subject, not per-version: the strategy is resolved from the
+  // subject name plus the latest schema's record name.
+  const strategy = useQuery({
+    queryKey: ['subject-strategy', cluster, subject],
+    queryFn: ({ signal }) => getSubjectStrategy(cluster, subject, signal),
+  })
   return (
     <div className="flex h-full flex-col gap-4 overflow-y-auto">
       <div className="flex items-center gap-3">
@@ -208,10 +174,46 @@ export function SubjectDetailView({ cluster, subject }: { cluster: string; subje
         <CompatibilityTab cluster={cluster} subject={subject} schemaType={detail.data?.schema_type ?? 'AVRO'} />
       )}
       {tab === 'Definition' && (
-      <Panel title="schema" error={detail.error} loading={detail.isPending} hasData={detail.data !== undefined}>
+      <Panel title="Schema" error={detail.error} loading={detail.isPending} hasData={detail.data !== undefined}>
         {detail.data && (
-          <div className="space-y-3">
-            <div className="flex items-center gap-3 text-sm">
+          <div className="space-y-4">
+            {/* Mirrors the topic Config tab's grammar (owner ruling
+                2026-08-18): a stat grid, a divider, the version/id row,
+                then the definition itself. */}
+            <dl className="grid grid-cols-2 gap-4 sm:grid-cols-4">
+              <div>
+                <dt className="text-xs text-zinc-500">format</dt>
+                <dd className="mt-1"><SchemaTypeBadge schemaType={detail.data.schema_type} /></dd>
+              </div>
+              <div>
+                <dt className="text-xs text-zinc-500">strategy</dt>
+                <dd className="mt-1 text-sm">
+                  {strategy.data === undefined ? (
+                    <span className="text-zinc-400">…</span>
+                  ) : strategy.data.strategy === null ? (
+                    <span className="text-zinc-400">not derivable</span>
+                  ) : (
+                    STRATEGY_LABEL[strategy.data.strategy]
+                  )}
+                </dd>
+              </div>
+              {strategy.data?.topic != null && (
+                <div>
+                  <dt className="text-xs text-zinc-500">topic</dt>
+                  <dd className="mt-1 text-sm">
+                    <Link
+                      to="/c/$cluster/topics/$topic"
+                      params={{ cluster, topic: strategy.data.topic }}
+                      className="font-mono text-blue-600 hover:underline dark:text-blue-400"
+                    >
+                      {strategy.data.topic}
+                    </Link>
+                    {strategy.data.role !== null && <span className="text-zinc-500"> ({strategy.data.role})</span>}
+                  </dd>
+                </div>
+              )}
+            </dl>
+            <div className="flex items-center gap-3 border-t border-zinc-100 pt-3 text-sm dark:border-zinc-800">
               <label className="flex items-center gap-1.5 text-zinc-500">
                 version
                 <select
@@ -231,11 +233,12 @@ export function SubjectDetailView({ cluster, subject }: { cluster: string; subje
                   ))}
                 </select>
               </label>
-              <SchemaTypeBadge schemaType={detail.data.schema_type} />
-              <span className="text-zinc-500">id {detail.data.id}</span>
+              <span className="flex items-center gap-1 text-zinc-500">
+                id {detail.data.id}
+                <CopyButton text={String(detail.data.id)} label="schema id" />
+              </span>
               <CopyButton text={detail.data.schema} label="schema" />
             </div>
-            <StrategySection cluster={cluster} subject={subject} />
             <SchemaBody schema={detail.data.schema} />
           </div>
         )}
