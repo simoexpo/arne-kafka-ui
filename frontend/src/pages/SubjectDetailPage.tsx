@@ -78,49 +78,59 @@ function CompatibilityTab({ cluster, subject, schemaType }: { cluster: string; s
             {level.data?.level}
           </span>
         </div>
-        <textarea
-          aria-label="candidate schema"
-          value={candidate}
-          onChange={(e) => {
-            setCandidate(e.target.value)
-            check.reset()
-          }}
-          placeholder="paste a candidate schema…"
-          // Fills every pixel the pinned page grants it; the rows below
-          // (button, verdict) keep their fixed space.
-          className="min-h-0 w-full flex-1 resize-none rounded border border-zinc-300 bg-transparent px-3 py-1.5 font-mono text-sm outline-none focus:border-zinc-500 dark:border-zinc-700"
-        />
-        <div className="flex items-center gap-3">
-          <button
-            type="button"
-            disabled={candidate.trim() === '' || check.isPending}
-            onClick={() => check.mutate()}
-            // enabled: variants — a grayed-out button must not light up on
-            // hover as if it were clickable.
-            className="rounded border border-zinc-300 px-2 py-0.5 text-sm text-zinc-600 disabled:opacity-50 enabled:hover:bg-zinc-100 dark:border-zinc-700 dark:text-zinc-400 dark:enabled:hover:bg-zinc-800"
-          >
-            check compatibility
-          </button>
-        </div>
-        {check.isError && (
-          <p className="text-sm text-red-700 dark:text-red-400">{(check.error as Error).message}</p>
-        )}
-        {check.data && (check.data.is_compatible ? (
-          <p className="text-sm font-medium text-emerald-700 dark:text-emerald-400">
-            compatible with the latest version under {level.data?.level}
-          </p>
-        ) : (
-          <div className="space-y-1 text-sm">
-            <p className="font-medium text-red-700 dark:text-red-400">
-              not compatible with the latest version under {level.data?.level}
-            </p>
-            <div className="max-h-40 overflow-auto">
-              {check.data.messages.map((m, i) => (
-                <p key={i} className="font-mono text-xs text-red-600 dark:text-red-400">{m}</p>
-              ))}
-            </div>
+        {/* Side-by-side (owner ruling 2026-08-18): paste left, result
+            right, both full height — a verdict appearing never resizes
+            anything. A grid with an explicit auto row keeps the result box
+            EXACTLY the textarea's height: the button lives in its own row
+            below, outside both boxes. */}
+        <div className="grid min-h-0 flex-1 grid-cols-2 grid-rows-[minmax(0,1fr)_auto] gap-x-4 gap-y-3">
+          <textarea
+            aria-label="candidate schema"
+            value={candidate}
+            onChange={(e) => {
+              setCandidate(e.target.value)
+              check.reset()
+            }}
+            placeholder="paste a candidate schema…"
+            className="min-h-0 w-full resize-none rounded border border-zinc-300 bg-transparent px-3 py-1.5 font-mono text-sm outline-none focus:border-zinc-500 dark:border-zinc-700"
+          />
+          <div data-testid="compat-result" className="min-h-0 overflow-y-auto">
+            {check.isError ? (
+              <p className="text-sm text-red-700 dark:text-red-400">{(check.error as Error).message}</p>
+            ) : check.data ? (
+              check.data.is_compatible ? (
+                <p className="text-sm font-medium text-emerald-700 dark:text-emerald-400">
+                  compatible with the latest version under {level.data?.level}
+                </p>
+              ) : (
+                <div className="space-y-1 text-sm">
+                  <p className="font-medium text-red-700 dark:text-red-400">
+                    not compatible with the latest version under {level.data?.level}
+                  </p>
+                  {check.data.messages.map((m, i) => (
+                    <p key={i} className="break-all font-mono text-xs text-red-600 dark:text-red-400">{m}</p>
+                  ))}
+                </div>
+              )
+            ) : (
+              <div className="flex h-full items-center justify-center rounded border border-dashed border-zinc-200 text-sm text-zinc-400 dark:border-zinc-800">
+                {check.isPending ? 'checking…' : 'the result appears here'}
+              </div>
+            )}
           </div>
-        ))}
+          <div>
+            <button
+              type="button"
+              disabled={candidate.trim() === '' || check.isPending}
+              onClick={() => check.mutate()}
+              // enabled: variants — a grayed-out button must not light up
+              // on hover as if it were clickable.
+              className="rounded border border-zinc-300 px-2 py-0.5 text-sm text-zinc-600 disabled:opacity-50 enabled:hover:bg-zinc-100 dark:border-zinc-700 dark:text-zinc-400 dark:enabled:hover:bg-zinc-800"
+            >
+              check compatibility
+            </button>
+          </div>
+        </div>
       </div>
     </Panel>
   )

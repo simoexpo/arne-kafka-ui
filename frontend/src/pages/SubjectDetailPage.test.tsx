@@ -102,7 +102,10 @@ describe('SubjectDetailView', () => {
     expect(await screen.findByText('BACKWARD')).toBeInTheDocument()
     const box = screen.getByLabelText('candidate schema')
     expect(box.className).toMatch(/\bresize-none\b/)
-    expect(box.className).toMatch(/\bflex-1\b/)
+    // Grid split: textarea and result share row 1 (equal heights), the
+    // button lives alone in the auto row below.
+    expect(box.parentElement?.className).toMatch(/\bgrid-cols-2\b/)
+    expect(box.parentElement?.className).toMatch(/grid-rows-\[minmax\(0,1fr\)_auto\]/)
     expect(screen.getByRole('button', { name: /check compatibility/i }).className).toMatch(/enabled:hover/)
     fireEvent.change(box, { target: { value: '{"type":"long"}' } })
     fireEvent.click(screen.getByRole('button', { name: /check compatibility/i }))
