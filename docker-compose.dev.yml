@@ -46,9 +46,6 @@ services:
         /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:19092 --create --if-not-exists --topic demo-orders --partitions 3 --config cleanup.policy=delete
         /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:19092 --create --if-not-exists --topic demo-users --partitions 3 --config cleanup.policy=compact
         /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:19092 --create --if-not-exists --topic demo-audit --partitions 2 --config cleanup.policy=compact,delete
-        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:19092 --create --if-not-exists --topic sr-json --partitions 1 --config cleanup.policy=delete
-        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:19092 --create --if-not-exists --topic sr-avro --partitions 2 --config cleanup.policy=delete
-        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:19092 --create --if-not-exists --topic sr-proto --partitions 2 --config cleanup.policy=delete
         i=0
         while true; do
           i=$$((i+1))
@@ -151,6 +148,9 @@ services:
           fi
           sleep 2
         done
+        kafka-topics --bootstrap-server kafka:19092 --create --if-not-exists --topic sr-json --partitions 1 --config cleanup.policy=delete
+        kafka-topics --bootstrap-server kafka:19092 --create --if-not-exists --topic sr-avro --partitions 2 --config cleanup.policy=delete
+        kafka-topics --bootstrap-server kafka:19092 --create --if-not-exists --topic sr-proto --partitions 2 --config cleanup.policy=delete
         i=0
         while true; do
           i=$$((i+1))
