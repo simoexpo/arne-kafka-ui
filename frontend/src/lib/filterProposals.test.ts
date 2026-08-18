@@ -11,12 +11,12 @@ describe('proposalsFor', () => {
     expect(proposalsFor('val', [])).toEqual(['value:', 'value=', 'value.'])
   })
 
-  it('prefix of value proposes up to 5 field rows instead of value. when fields known', () => {
+  it('prefix of value proposes ALL field rows instead of value. when fields known', () => {
     const fields = ['a', 'b', 'c', 'd', 'e', 'f']
-    expect(proposalsFor('val', fields)).toEqual(['value:', 'value=', 'value.a', 'value.b', 'value.c', 'value.d', 'value.e'])
+    expect(proposalsFor('val', fields)).toEqual(['value:', 'value=', 'value.a', 'value.b', 'value.c', 'value.d', 'value.e', 'value.f'])
   })
 
-  it('value. prefix filters fields by typed path, max 5, no operator rows', () => {
+  it('value. prefix filters fields by typed path, uncapped, no operator rows', () => {
     const fields = ['customer.id', 'customer.name', 'status']
     expect(proposalsFor('value.cus', fields)).toEqual(['value.customer.id', 'value.customer.name'])
     expect(proposalsFor('value.customer.id', fields)).toEqual([])

@@ -39,6 +39,13 @@ export function FilterInput({
     onOpenChange?.(open)
   }, [open, onOpenChange])
 
+  // Keyboard navigation past the visible window scrolls the highlighted
+  // option into view (guarded: jsdom has no scrollIntoView).
+  useEffect(() => {
+    if (!open) return
+    document.getElementById(`${listId}-${highlightClamped}`)?.scrollIntoView?.({ block: 'nearest' })
+  }, [open, listId, highlightClamped])
+
   const accept = (row: string) => {
     onChange(row)
     setHighlight(0)
@@ -106,7 +113,10 @@ export function FilterInput({
         <ul
           id={listId}
           role="listbox"
-          className="absolute left-0 top-full z-10 mt-1 w-full rounded border border-zinc-300 bg-white py-1 text-sm shadow-lg dark:border-zinc-700 dark:bg-zinc-950"
+          // Visual cap only — every match stays in the list and scrolls
+          // into reach; a data cap silently dropped rows (owner ruling
+          // 2026-08-18).
+          className="absolute left-0 top-full z-10 mt-1 max-h-56 w-full overflow-y-auto rounded border border-zinc-300 bg-white py-1 text-sm shadow-lg dark:border-zinc-700 dark:bg-zinc-950"
         >
           {rows.map((row, i) => (
             <li

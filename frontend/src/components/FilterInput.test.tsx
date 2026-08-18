@@ -94,6 +94,16 @@ describe('FilterInput combobox', () => {
     expect(onChange).toHaveBeenCalledWith('a')
   })
 
+  it('the listbox caps its height and scrolls instead of dropping rows', () => {
+    const many = Array.from({ length: 20 }, (_, i) => `key:option-${i}`)
+    render(<FilterInput value="k" onChange={vi.fn()} placeholder="p" ariaLabel="many" proposals={() => many} />)
+    fireEvent.focus(screen.getByLabelText('many'))
+    expect(screen.getAllByTestId('filter-proposal')).toHaveLength(20)
+    const list = screen.getByRole('listbox')
+    expect(list.className).toMatch(/\bmax-h-56\b/)
+    expect(list.className).toMatch(/\boverflow-y-auto\b/)
+  })
+
   it('no proposals prop means no combobox semantics', () => {
     render(<FilterInput value="k" onChange={() => {}} placeholder="p" ariaLabel="plain" />)
     expect(screen.getByLabelText('plain')).not.toHaveAttribute('role')

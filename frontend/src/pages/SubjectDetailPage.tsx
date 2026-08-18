@@ -114,7 +114,7 @@ function CompatibilityTab({ cluster, subject, schemaType }: { cluster: string; s
               )
             ) : (
               <div className="flex h-full items-center justify-center rounded border border-dashed border-zinc-200 text-sm text-zinc-400 dark:border-zinc-800">
-                {check.isPending ? 'checking…' : 'the result appears here'}
+                {check.isPending ? 'checking…' : 'result appears here'}
               </div>
             )}
           </div>

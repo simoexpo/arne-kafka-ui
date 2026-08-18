@@ -1,5 +1,3 @@
-const MAX_FIELD_ROWS = 5
-
 interface RawToken {
   any: boolean
   raw: string
@@ -95,13 +93,12 @@ export function proposalsFor(text: string, fields: readonly string[]): string[] 
     for (const f of fields) {
       const completed = completeField(f, typed)
       if (completed !== null) out.push(`value.${completed}`)
-      if (out.length === MAX_FIELD_ROWS) break
     }
     return out
   }
   if ('key'.startsWith(lower)) return ['key:', 'key=']
   if ('value'.startsWith(lower)) {
-    const fieldRows = fields.slice(0, MAX_FIELD_ROWS).map((f) => `value.${f}`)
+    const fieldRows = fields.map((f) => `value.${f}`)
     return fieldRows.length > 0 ? ['value:', 'value=', ...fieldRows] : ['value:', 'value=', 'value.']
   }
   return []
