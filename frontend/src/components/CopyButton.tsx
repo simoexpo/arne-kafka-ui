@@ -51,7 +51,11 @@ export function CopyButton({ text, label }: { text: string; label: string }) {
         {copied ? <CheckIcon /> : <CopyIcon />}
       </button>
       {copied && (
-        <span className="absolute left-full top-1/2 ml-1 -translate-y-1/2 whitespace-nowrap text-xs text-emerald-600 dark:text-emerald-400">
+        // A balloon ABOVE the icon: to the right there is always a
+        // neighbor (title chips, table columns) to collide with; above is
+        // dead space in both. The solid background makes the overlay read
+        // as a tooltip, not a glitch.
+        <span className="absolute bottom-full left-1/2 z-10 mb-1 -translate-x-1/2 whitespace-nowrap rounded bg-zinc-800 px-1.5 py-0.5 text-xs text-emerald-400 shadow-sm dark:bg-zinc-200 dark:text-emerald-700">
           copied
         </span>
       )}

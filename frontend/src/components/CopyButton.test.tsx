@@ -26,5 +26,5 @@ it('the copied hint floats without taking layout space', async () => {
   await user.click(screen.getByLabelText('copy thing'))
   const hint = screen.getByText('copied')
   expect(hint.className).toMatch(/\babsolute\b/)
-  expect(hint.className).toMatch(/\bleft-full\b/)
+  expect(hint.className).toMatch(/\bbottom-full\b/)
 })
