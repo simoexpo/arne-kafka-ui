@@ -2,8 +2,7 @@ import { useQuery } from '@tanstack/react-query'
 import { CopyButton } from '../components/CopyButton'
 import { Stat } from '../components/Stat'
 import { useParams } from '@tanstack/react-router'
-import { getOverview, getTopics } from '../api/client'
-import { MessageEstimateCell } from '../components/MessageEstimateCell'
+import { getOverview } from '../api/client'
 import { Panel } from '../components/Panel'
 import { StalenessChip } from '../components/StalenessChip'
 
@@ -13,15 +12,6 @@ export function OverviewView({ cluster }: { cluster: string }) {
     queryFn: ({ signal }) => getOverview(cluster, signal),
     refetchInterval: 10_000,
   })
-  const topics = useQuery({
-    queryKey: ['topics', cluster],
-    queryFn: ({ signal }) => getTopics(cluster, signal),
-    refetchInterval: 30_000,
-  })
-  const top = (topics.data?.topics ?? [])
-    .filter((t) => !t.internal)
-    .sort((a, b) => (b.message_estimate ?? -1) - (a.message_estimate ?? -1))
-    .slice(0, 10)
 
   return (
     // This page owns its own scrolling region (the app shell's `main` is
@@ -54,19 +44,16 @@ export function OverviewView({ cluster }: { cluster: string }) {
           </ul>
         </Panel>
       </div>
-      <Panel title="Top topics" error={topics.error} loading={topics.isPending} hasData={topics.data !== undefined}>
+      <Panel title="Top topics" error={overview.error} loading={overview.isPending} hasData={overview.data !== undefined}>
         <table className="w-full text-left text-sm">
           <thead className="text-xs text-zinc-500">
-            <tr><th className="py-1">topic</th><th>partitions</th><th>messages</th></tr>
+            <tr><th className="py-1">topic</th><th>partitions</th></tr>
           </thead>
           <tbody>
-            {top.map((t) => (
+            {overview.data?.top_topics.map((t) => (
               <tr key={t.name} data-testid="top-topic" className="border-t border-zinc-100 dark:border-zinc-800">
                 <td className="py-1 font-mono">{t.name}</td>
                 <td>{t.partitions}</td>
-                <td>
-                  <MessageEstimateCell estimate={t.message_estimate} error={t.estimate_error} />
-                </td>
               </tr>
             ))}
           </tbody>

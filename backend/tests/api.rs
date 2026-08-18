@@ -267,6 +267,7 @@ async fn throughput_endpoint_reports_positive_rate_after_producing() {
 async fn overview_reports_brokers_and_counts() {
     let bootstrap = start_kafka().await;
     create_topic(&bootstrap, "ov-topic", 2).await;
+    create_topic(&bootstrap, "ov-small", 1).await;
     let state = state_for(&bootstrap, vec![]);
     let (status, body) = get_json(app(state), "/api/clusters/test/overview").await;
     assert_eq!(status, 200);
@@ -274,6 +275,13 @@ async fn overview_reports_brokers_and_counts() {
     assert!(body["topic_count"].as_u64().unwrap() >= 1);
     assert!(body["partition_count"].as_u64().unwrap() >= 2);
     assert_eq!(body["under_replicated_partitions"], 0);
+    let top = body["top_topics"].as_array().unwrap();
+    let names: Vec<&str> = top.iter().map(|t| t["name"].as_str().unwrap()).collect();
+    let big = names.iter().position(|n| *n == "ov-topic").unwrap();
+    let small = names.iter().position(|n| *n == "ov-small").unwrap();
+    assert!(big < small, "higher partition count ranks first: {names:?}");
+    assert_eq!(top[big]["partitions"], 2);
+    assert!(names.iter().all(|n| !n.starts_with("__")), "internal topics excluded: {names:?}");
 }
 
 #[tokio::test]

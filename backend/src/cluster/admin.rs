@@ -493,13 +493,32 @@ pub async fn topic_consumers(handle: Arc<ClusterHandle>, topic: String) -> Resul
 pub struct BrokerInfo { pub id: i32, pub host: String, pub port: i32 }
 
 #[derive(Debug, Serialize)]
+pub struct TopicPartitions { pub name: String, pub partitions: usize }
+
+#[derive(Debug, Serialize)]
 pub struct Overview {
     pub brokers: Vec<BrokerInfo>,
     pub controller_id: Option<i32>, // librdkafka metadata does not expose the controller; null in v1
     pub topic_count: usize,
     pub partition_count: usize,
     pub under_replicated_partitions: usize,
+    pub top_topics: Vec<TopicPartitions>,
     pub as_of: i64,
+}
+
+/// Ranked by partition count — the only size-ish signal the overview's one
+/// metadata call already carries. Message estimates cost O(partitions)
+/// watermark calls and real sizes need DescribeLogDirs, which librdkafka
+/// lacks (confluentinc/librdkafka#5333).
+fn top_topics_by_partitions<'a>(topics: impl IntoIterator<Item = (&'a str, usize)>) -> Vec<TopicPartitions> {
+    let mut out: Vec<TopicPartitions> = topics
+        .into_iter()
+        .filter(|(name, _)| !is_internal_topic(name))
+        .map(|(name, partitions)| TopicPartitions { name: name.to_string(), partitions })
+        .collect();
+    out.sort_by(|a, b| b.partitions.cmp(&a.partitions).then_with(|| a.name.cmp(&b.name)));
+    out.truncate(10);
+    out
 }
 
 pub async fn overview(handle: Arc<ClusterHandle>) -> Result<Overview, ApiError> {
@@ -522,6 +541,7 @@ pub async fn overview(handle: Arc<ClusterHandle>) -> Result<Overview, ApiError> 
             topic_count: md.topics().len(),
             partition_count,
             under_replicated_partitions: urp,
+            top_topics: top_topics_by_partitions(md.topics().iter().map(|t| (t.name(), t.partitions().len()))),
             as_of: now_ms(),
         })
     })
@@ -546,6 +566,25 @@ mod tests {
         assert!(is_consumer_group_protocol(""));
         assert!(!is_consumer_group_protocol("sr"));
         assert!(!is_consumer_group_protocol("connect"));
+    }
+
+    /// Owner ruling 2026-08-18: the overview's top-topics table ranks by
+    /// partition count (free from the one metadata call) instead of message
+    /// estimates (O(partitions) watermark calls) — revisit when librdkafka
+    /// ships DescribeLogDirs (confluentinc/librdkafka#5333) and real sizes
+    /// become available.
+    #[test]
+    fn top_topics_ranked_by_partitions_internal_excluded_capped_at_ten() {
+        let mut input: Vec<(String, usize)> = (0..12).map(|i| (format!("t-{i:02}"), i + 1)).collect();
+        input.push(("__consumer_offsets".into(), 50));
+        input.push(("_schemas".into(), 50));
+        input.push(("t-tie".into(), 12));
+        let top = top_topics_by_partitions(input.iter().map(|(n, p)| (n.as_str(), *p)));
+        assert_eq!(top.len(), 10);
+        assert_eq!(top[0].name, "t-11");
+        assert_eq!(top[0].partitions, 12);
+        assert_eq!(top[1].name, "t-tie"); // tie broken by name, after t-11
+        assert!(top.iter().all(|t| !t.name.starts_with("__") && t.name != "_schemas"));
     }
 
     /// Owner ruling 2026-08-17: `_schemas` (the schema registry's storage

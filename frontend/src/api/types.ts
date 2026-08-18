@@ -7,12 +7,14 @@ export interface ClusterHealth {
 export interface ClustersResponse { clusters: ClusterHealth[] }
 
 export interface BrokerInfo { id: number; host: string; port: number }
+export interface TopicPartitions { name: string; partitions: number }
 export interface Overview {
   brokers: BrokerInfo[]
   controller_id: number | null
   topic_count: number
   partition_count: number
   under_replicated_partitions: number
+  top_topics: TopicPartitions[]
   as_of: number
 }
 

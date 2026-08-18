@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { screen, within } from '@testing-library/react'
+import { screen } from '@testing-library/react'
 import { renderWithQuery } from '../test/utils'
 import { OverviewView } from './OverviewPage'
 import * as client from '../api/client'
@@ -19,27 +19,26 @@ describe('OverviewView', () => {
       topic_count: 2,
       partition_count: 4,
       under_replicated_partitions: 0,
+      top_topics: [],
       as_of: Date.now(),
     })
-    vi.mocked(client.getTopics).mockResolvedValue({ topics: [], as_of: Date.now() })
     renderWithQuery(<OverviewView cluster="prod" />)
     expect(await screen.findByLabelText('copy b1:9092')).toBeInTheDocument()
   })
 
-  it('renders broker count, URP, and top topics by size', async () => {
+  // Owner ruling 2026-08-18: top topics rank by partition count served by the
+  // overview call itself — no watermark-priced message estimates, no second
+  // query. Revisit when librdkafka ships DescribeLogDirs (librdkafka#5333).
+  it('renders broker count, URP, and top topics by partitions from the overview payload alone', async () => {
     vi.mocked(client.getOverview).mockResolvedValue({
       brokers: [{ id: 1, host: 'b1', port: 9092 }],
       controller_id: null,
       topic_count: 4,
       partition_count: 12,
       under_replicated_partitions: 0,
-      as_of: Date.now(),
-    })
-    vi.mocked(client.getTopics).mockResolvedValue({
-      topics: [
-        { name: 'big', partitions: 3, replication_factor: 1, message_estimate: 5000, estimate_error: null, size_bytes: null, internal: false },
-        { name: 'small', partitions: 1, replication_factor: 1, message_estimate: 10, estimate_error: null, size_bytes: null, internal: false },
-        { name: '__internal', partitions: 1, replication_factor: 1, message_estimate: 99999, estimate_error: null, size_bytes: null, internal: true },
+      top_topics: [
+        { name: 'big', partitions: 8 },
+        { name: 'small', partitions: 1 },
       ],
       as_of: Date.now(),
     })
@@ -48,102 +47,17 @@ describe('OverviewView', () => {
     expect(screen.getByText('12')).toBeInTheDocument() // partition count
     const topTopics = await screen.findAllByTestId('top-topic')
     expect(topTopics[0]).toHaveTextContent('big')
-    expect(screen.queryByText('__internal')).not.toBeInTheDocument() // internal excluded
+    expect(topTopics[0]).toHaveTextContent('8')
+    expect(topTopics[1]).toHaveTextContent('small')
+    expect(client.getTopics).not.toHaveBeenCalled()
   })
 
-  it('renders — for top topics whose message estimate is null, sorted after ranked ones', async () => {
-    vi.mocked(client.getOverview).mockResolvedValue({
-      brokers: [{ id: 1, host: 'b1', port: 9092 }],
-      controller_id: null,
-      topic_count: 2,
-      partition_count: 4,
-      under_replicated_partitions: 0,
-      as_of: Date.now(),
-    })
-    vi.mocked(client.getTopics).mockResolvedValue({
-      topics: [
-        { name: 'flaky', partitions: 1, replication_factor: 1, message_estimate: null, estimate_error: null, size_bytes: null, internal: false },
-        { name: 'ranked', partitions: 1, replication_factor: 1, message_estimate: 10, estimate_error: null, size_bytes: null, internal: false },
-      ],
-      as_of: Date.now(),
-    })
-    renderWithQuery(<OverviewView cluster="prod" />)
-    const topTopics = await screen.findAllByTestId('top-topic')
-    expect(topTopics[0]).toHaveTextContent('ranked')
-    expect(topTopics[1]).toHaveTextContent('flaky')
-    expect(topTopics[1]).toHaveTextContent('—')
-  })
-
-  // I5: same kafka-attributed tooltip as TopicsPage, for the "Top topics" table.
-  it('shows a title explaining WHY the estimate is missing when a watermark fetch failed', async () => {
-    vi.mocked(client.getOverview).mockResolvedValue({
-      brokers: [{ id: 1, host: 'b1', port: 9092 }],
-      controller_id: null,
-      topic_count: 1,
-      partition_count: 1,
-      under_replicated_partitions: 0,
-      as_of: Date.now(),
-    })
-    vi.mocked(client.getTopics).mockResolvedValue({
-      topics: [
-        {
-          name: 'flaky',
-          partitions: 1,
-          replication_factor: 1,
-          message_estimate: null,
-          estimate_error: 'counting messages timed out',
-          size_bytes: null,
-          internal: false,
-        },
-      ],
-      as_of: Date.now(),
-    })
-    renderWithQuery(<OverviewView cluster="prod" />)
-    const row = await screen.findByTestId('top-topic')
-    expect(within(row).getByText('—')).toHaveAttribute(
-      'title',
-      "Kafka couldn't provide a count — counting messages timed out",
-    )
-  })
-
-  it('renders an inline error in the failing panel only', async () => {
+  it('renders an inline error in every panel when the overview query fails', async () => {
     vi.mocked(client.getOverview).mockRejectedValue(
-      new client.ApiError(504, 'kafka_timeout', 'fetch metadata timed out', 'prod', true),
-    )
-    vi.mocked(client.getTopics).mockResolvedValue({ topics: [], as_of: Date.now() })
-    renderWithQuery(<OverviewView cluster="prod" />)
-    const errors = await screen.findAllByText(/kafka_timeout/)
-    expect(errors).toHaveLength(2) // both overview panels show error
-    expect(screen.getByText('Top topics')).toBeInTheDocument() // sibling panel intact
-  })
-
-  it('renders an inline error in Top topics only when the topics query fails', async () => {
-    vi.mocked(client.getOverview).mockResolvedValue({
-      brokers: [{ id: 1, host: 'b1', port: 9092 }],
-      controller_id: null,
-      topic_count: 4,
-      partition_count: 12,
-      under_replicated_partitions: 0,
-      as_of: Date.now(),
-    })
-    vi.mocked(client.getTopics).mockRejectedValue(
       new client.ApiError(504, 'kafka_timeout', 'fetch metadata timed out', 'prod', true),
     )
     renderWithQuery(<OverviewView cluster="prod" />)
     const errors = await screen.findAllByText(/kafka_timeout/)
-    expect(errors).toHaveLength(1) // only the Top topics panel shows error
-    expect(await screen.findByText('b1:9092')).toBeInTheDocument() // Cluster/Brokers panels intact
-  })
-
-  it('renders an inline error in every panel when both queries fail', async () => {
-    vi.mocked(client.getOverview).mockRejectedValue(
-      new client.ApiError(504, 'kafka_timeout', 'fetch metadata timed out', 'prod', true),
-    )
-    vi.mocked(client.getTopics).mockRejectedValue(
-      new client.ApiError(502, 'kafka_unreachable', 'no brokers reachable', 'prod', true),
-    )
-    renderWithQuery(<OverviewView cluster="prod" />)
-    expect((await screen.findAllByText(/kafka_timeout/)).length).toBe(2) // Cluster + Brokers
-    expect(screen.getAllByText(/kafka_unreachable/)).toHaveLength(1) // Top topics
+    expect(errors).toHaveLength(3) // Cluster, Brokers, Top topics
   })
 })
