@@ -51,11 +51,11 @@ export function CopyButton({ text, label }: { text: string; label: string }) {
         {copied ? <CheckIcon /> : <CopyIcon />}
       </button>
       {copied && (
-        // A balloon ABOVE the icon: to the right there is always a
-        // neighbor (title chips, table columns) to collide with; above is
-        // dead space in both. The solid background makes the overlay read
-        // as a tooltip, not a glitch.
-        <span className="absolute bottom-full left-1/2 z-10 mb-1 -translate-x-1/2 whitespace-nowrap rounded bg-zinc-800 px-1.5 py-0.5 text-xs text-emerald-400 shadow-sm dark:bg-zinc-200 dark:text-emerald-700">
+        // A balloon anchored below-right of the icon, floating (zero
+        // layout impact, so table columns never shift), surfaced with the
+        // same popover colors as FilterHelp/DateTimePicker rather than an
+        // invented palette.
+        <span className="absolute left-full top-full z-10 whitespace-nowrap rounded border border-zinc-300 bg-white px-1.5 py-0.5 text-xs text-emerald-600 shadow-lg dark:border-zinc-700 dark:bg-zinc-950 dark:text-emerald-400">
           copied
         </span>
       )}

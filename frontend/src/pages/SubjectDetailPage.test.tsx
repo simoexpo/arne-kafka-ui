@@ -52,7 +52,6 @@ describe('SubjectDetailView', () => {
     const select = screen.getByLabelText('version') as HTMLSelectElement
     expect(select.value).toBe('3')
     expect(screen.getByText('id 42')).toBeInTheDocument()
-    expect(screen.getByLabelText('copy schema id')).toBeInTheDocument()
     expect(screen.getByText('"Order"')).toBeInTheDocument()
   })
 

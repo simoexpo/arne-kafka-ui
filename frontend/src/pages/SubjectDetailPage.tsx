@@ -20,7 +20,9 @@ function SchemaBody({ schema }: { schema: string }) {
     isJson = false
   }
   return (
-    <div data-testid="schema-body" className="overflow-auto whitespace-nowrap font-mono text-sm">
+    // The ONLY scrollable region of the Definition tab (owner ruling
+    // 2026-08-18): the page itself is pinned; long/wide schemas scroll here.
+    <div data-testid="schema-body" className="min-h-0 flex-1 overflow-auto whitespace-nowrap font-mono text-sm">
       {isJson ? <JsonView value={parsed} /> : <pre className="whitespace-pre">{schema}</pre>}
     </div>
   )
@@ -59,7 +61,13 @@ function CompatibilityTab({ cluster, subject, schemaType }: { cluster: string; s
     mutationFn: () => checkCompatibility(cluster, subject, candidate, candidateType),
   })
   return (
-    <Panel title="compatibility" error={level.error} loading={level.isPending} hasData={level.data !== undefined}>
+    <Panel
+      className="min-h-0 flex-1 overflow-y-auto"
+      title="compatibility"
+      error={level.error}
+      loading={level.isPending}
+      hasData={level.data !== undefined}
+    >
       <div className="space-y-3">
         <div className="flex items-center gap-1.5 text-sm text-zinc-500">
           effective level
@@ -145,7 +153,7 @@ export function SubjectDetailView({ cluster, subject }: { cluster: string; subje
     queryFn: ({ signal }) => getSubjectStrategy(cluster, subject, signal),
   })
   return (
-    <div className="flex h-full flex-col gap-4 overflow-y-auto">
+    <div className="flex h-full flex-col gap-4 overflow-hidden">
       <div className="flex items-center gap-3">
         <h1 className="flex items-center gap-1.5 font-mono text-lg font-semibold">
           {subject}
@@ -174,9 +182,15 @@ export function SubjectDetailView({ cluster, subject }: { cluster: string; subje
         <CompatibilityTab cluster={cluster} subject={subject} schemaType={detail.data?.schema_type ?? 'AVRO'} />
       )}
       {tab === 'Definition' && (
-      <Panel title="Schema" error={detail.error} loading={detail.isPending} hasData={detail.data !== undefined}>
+      <Panel
+        className="flex min-h-0 flex-1 flex-col overflow-hidden"
+        title="Schema"
+        error={detail.error}
+        loading={detail.isPending}
+        hasData={detail.data !== undefined}
+      >
         {detail.data && (
-          <div className="space-y-4">
+          <div className="flex min-h-0 flex-1 flex-col gap-4">
             {/* Mirrors the topic Config tab's grammar (owner ruling
                 2026-08-18): a stat grid, a divider, the version/id row,
                 then the definition itself. */}
@@ -233,10 +247,7 @@ export function SubjectDetailView({ cluster, subject }: { cluster: string; subje
                   ))}
                 </select>
               </label>
-              <span className="flex items-center gap-1 text-zinc-500">
-                id {detail.data.id}
-                <CopyButton text={String(detail.data.id)} label="schema id" />
-              </span>
+              <span className="text-zinc-500">id {detail.data.id}</span>
               <CopyButton text={detail.data.schema} label="schema" />
             </div>
             <SchemaBody schema={detail.data.schema} />
