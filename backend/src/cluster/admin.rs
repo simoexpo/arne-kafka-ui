@@ -203,6 +203,41 @@ fn record_group_watermark_fetch(topic: &str) {
     *calls.lock().unwrap().entry(topic.to_string()).or_insert(0) += 1;
 }
 
+/// Per-`(scope, group)` count of real OffsetFetch round trips
+/// (`committed_offsets` calls), where scope is the topic filter of the
+/// calling endpoint ("*" for the whole-cluster group list/detail). Read only
+/// by tests: proves the consumers-tab cache and the moved-away filter
+/// suppress per-group fetches. Scoped so a concurrent test exercising
+/// `/groups` against the shared broker (which fetches EVERY group) cannot
+/// bump a topic-scoped assertion.
+static GROUP_OFFSET_FETCHES: OnceLock<Mutex<HashMap<(String, String), u64>>> = OnceLock::new();
+
+/// Bounds the counter's keyspace, which is `topics viewed × groups` — a
+/// long-lived process on a large cluster would otherwise accumulate entries
+/// forever for numbers only tests read. Far above any test's cardinality,
+/// so assertions stay exact.
+const MAX_TRACKED_GROUP_FETCHES: usize = 4096;
+
+fn record_group_offset_fetch(scope: &str, group: &str) {
+    let calls = GROUP_OFFSET_FETCHES.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut calls = calls.lock().unwrap();
+    let key = (scope.to_string(), group.to_string());
+    let room = calls.len() < MAX_TRACKED_GROUP_FETCHES;
+    match calls.get_mut(&key) {
+        Some(n) => *n += 1,
+        None if room => {
+            calls.insert(key, 1);
+        }
+        None => {}
+    }
+}
+
+pub fn group_offset_fetch_count(scope: &str, group: &str) -> u64 {
+    GROUP_OFFSET_FETCHES.get()
+        .and_then(|m| m.lock().unwrap().get(&(scope.to_string(), group.to_string())).copied())
+        .unwrap_or(0)
+}
+
 pub fn group_watermark_fetch_count(topic: &str) -> u64 {
     GROUP_WATERMARK_FETCHES.get().and_then(|m| m.lock().unwrap().get(topic).copied()).unwrap_or(0)
 }
@@ -254,10 +289,12 @@ fn cached_high_watermark(handle: &ClusterHandle, cache: &mut WatermarkCache, top
 /// client's own `group.id`.
 pub fn group_lag_blocking(
     handle: &ClusterHandle,
+    scope: &str,
     group: &str,
     tpl: &TopicPartitionList,
     watermark_cache: &mut WatermarkCache,
 ) -> Result<Vec<PartitionLag>, ApiError> {
+    record_group_offset_fetch(scope, group);
     let gc = group_consumer(&handle.config, group)
         .map_err(|e| error::from_kafka(&handle.name, "create group consumer", &e))?;
     // NotCoordinator/CoordinatorNotAvailable/CoordinatorLoadInProgress are
@@ -329,7 +366,7 @@ pub async fn list_groups(handle: Arc<ClusterHandle>) -> Result<GroupList, ApiErr
             if !is_consumer_group_protocol(g.protocol_type()) {
                 continue;
             }
-            let lag = group_lag_blocking(&handle, g.name(), &tpl, &mut watermark_cache)?;
+            let lag = group_lag_blocking(&handle, "*", g.name(), &tpl, &mut watermark_cache)?;
             groups.push(GroupSummary {
                 group_id: g.name().to_string(),
                 state: g.state().to_string(),
@@ -355,7 +392,7 @@ pub async fn group_detail(handle: Arc<ClusterHandle>, group: String) -> Result<G
         let info = info.filter(|i| i.state() != "Dead");
         let tpl = group_lag_topic_partitions(&handle, None)?;
         let mut watermark_cache = WatermarkCache::new();
-        let partitions = group_lag_blocking(&handle, &group, &tpl, &mut watermark_cache)?;
+        let partitions = group_lag_blocking(&handle, "*", &group, &tpl, &mut watermark_cache)?;
         // A group with no broker-side entry AND no committed offsets does not exist.
         let info = match (info, partitions.is_empty()) {
             (Some(i), _) => Some(i),
@@ -393,26 +430,75 @@ pub struct TopicConsumers {
     pub as_of: i64,
 }
 
+/// Owner design 2026-08-19. One group-list call classifies every group via
+/// its members' assignment blobs; only a topic's current consumers and the
+/// unfilterable groups (empty or undecodable — fail open) are OffsetFetched,
+/// and even those through the handle's age-tiered cache
+/// (`group_lag_cache`), so repeated polls refresh only what's due. A live
+/// group fully assigned to other topics is skipped outright: its residual
+/// offsets on this topic stay visible on the group's own detail page until
+/// Kafka expires them, but it is no longer a consumer of this topic.
 pub async fn topic_consumers(handle: Arc<ClusterHandle>, topic: String) -> Result<TopicConsumers, ApiError> {
     tokio::task::spawn_blocking(move || {
+        use super::group_lag_cache::{classify, needs_refresh, CachedEntry, Classification};
+        let now = now_ms();
         let gl = handle.consumer()
             .fetch_group_list(None, ADMIN_TIMEOUT)
             .map_err(|e| error::from_kafka(&handle.name, "list groups", &e))?;
-        let tpl = group_lag_topic_partitions(&handle, Some(&topic))?;
+        // Built on first use only: a poll that finds every group's lag fresh
+        // must cost nothing beyond the group list above.
+        let mut tpl: Option<TopicPartitionList> = None;
         let mut watermark_cache = WatermarkCache::new();
         let mut groups = Vec::new();
+        let mut keep = std::collections::HashSet::new();
+        let mut oldest_served = now;
         for g in gl.groups() {
-            let partitions = group_lag_blocking(&handle, g.name(), &tpl, &mut watermark_cache)?;
-            if partitions.is_empty() { continue; }
+            if !is_consumer_group_protocol(g.protocol_type()) {
+                continue;
+            }
+            let member_topics: Vec<Option<Vec<String>>> = g.members().iter()
+                .map(|m| m.assignment().and_then(super::assignment::assigned_topics))
+                .collect();
+            let class = classify(&member_topics, &topic);
+            if class == Classification::MovedAway {
+                continue;
+            }
+            keep.insert(g.name().to_string());
+            // A cached entry that vanished between the probe and the read
+            // (a concurrent poll's eviction) lands in the refresh branch
+            // rather than dropping the group from the response.
+            let cached = if needs_refresh(&class, handle.group_lag_cache.freshness(&topic, g.name()), now) {
+                None
+            } else {
+                handle.group_lag_cache.get(&topic, g.name())
+            };
+            let entry = match cached {
+                Some(e) => e,
+                None => {
+                    let tpl = match tpl {
+                        Some(ref t) => t,
+                        None => tpl.insert(group_lag_topic_partitions(&handle, Some(&topic))?),
+                    };
+                    let partitions = group_lag_blocking(&handle, &topic, g.name(), tpl, &mut watermark_cache)?;
+                    let entry = CachedEntry { partitions, sampled_at: now };
+                    handle.group_lag_cache.insert(&topic, g.name(), entry.clone());
+                    entry
+                }
+            };
+            if entry.partitions.is_empty() {
+                continue;
+            }
+            oldest_served = oldest_served.min(entry.sampled_at);
             groups.push(TopicGroupLag {
                 group_id: g.name().to_string(),
                 state: g.state().to_string(),
-                total_lag: partitions.iter().map(|p| p.lag).sum(),
-                partitions,
+                total_lag: entry.partitions.iter().map(|p| p.lag).sum(),
+                partitions: entry.partitions,
             });
         }
+        handle.group_lag_cache.evict(&topic, &|g| keep.contains(g), now);
         groups.sort_by(|a, b| a.group_id.cmp(&b.group_id));
-        Ok(TopicConsumers { topic, groups, as_of: now_ms() })
+        Ok(TopicConsumers { topic, groups, as_of: oldest_served })
     })
     .await
     .map_err(ApiError::task_join)?

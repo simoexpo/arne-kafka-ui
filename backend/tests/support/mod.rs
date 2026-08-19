@@ -207,6 +207,42 @@ pub async fn consume_and_commit(bootstrap: &str, topic: &str, group: &str, count
     .unwrap();
 }
 
+/// A consumer that stays joined to its group (heartbeating, auto-committing)
+/// until dropped — for tests that need a group in Stable state with a real
+/// member assignment, unlike `consume_and_commit`'s join-commit-leave.
+pub struct LiveConsumer {
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Drop for LiveConsumer {
+    fn drop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        if let Some(t) = self.thread.take() {
+            let _ = t.join();
+        }
+    }
+}
+
+pub fn spawn_live_consumer(bootstrap: &str, topic: &str, group: &str) -> LiveConsumer {
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let stop_flag = stop.clone();
+    let (bootstrap, topic, group) = (bootstrap.to_string(), topic.to_string(), group.to_string());
+    let thread = std::thread::spawn(move || {
+        let mut cc = client(&bootstrap);
+        cc.set("group.id", &group)
+            .set("auto.offset.reset", "earliest")
+            .set("enable.auto.commit", "true")
+            .set("auto.commit.interval.ms", "500");
+        let consumer: BaseConsumer = cc.create().unwrap();
+        consumer.subscribe(&[&topic]).unwrap();
+        while !stop_flag.load(std::sync::atomic::Ordering::Relaxed) {
+            let _ = consumer.poll(Duration::from_millis(200));
+        }
+    });
+    LiveConsumer { stop, thread: Some(thread) }
+}
+
 /// Start `app` on an ephemeral port and collect SSE events (name, json) from
 /// `path` until an `app_error` event or `max` events. ("app_error", not
 /// "error" — the wire event name deliberately avoids `EventSource`'s own

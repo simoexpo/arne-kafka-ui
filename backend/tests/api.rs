@@ -211,6 +211,101 @@ async fn topic_consumers_shares_metadata_and_watermarks_across_groups() {
     assert_eq!(group_watermark_fetch_count(topic), 1, "watermarks must be cached per (topic, partition) across the group loop, not refetched per group");
 }
 
+/// Owner ruling 2026-08-19: a live group whose members are all assigned to
+/// OTHER topics has ended its relationship with this topic — its residual
+/// committed offsets stay visible on the group's own detail page, but the
+/// topic's consumers tab no longer lists it, and (the point of the whole
+/// change) no longer pays an OffsetFetch for it on every poll.
+#[tokio::test]
+async fn topic_consumers_skips_live_groups_that_moved_to_another_topic() {
+    use arne::cluster::admin::group_offset_fetch_count;
+
+    let bootstrap = start_kafka().await;
+    create_topic(&bootstrap, "mv-a", 1).await;
+    create_topic(&bootstrap, "mv-b", 1).await;
+    produce(&bootstrap, "mv-a", 4).await;
+    produce(&bootstrap, "mv-b", 4).await;
+    // history: the group once consumed mv-a and left offsets there
+    consume_and_commit(&bootstrap, "mv-a", "mv-group", 4).await;
+    // present: the same group lives on, subscribed to mv-b only
+    let _live = spawn_live_consumer(&bootstrap, "mv-b", "mv-group");
+
+    let state = state_for(&bootstrap, vec![]);
+    // Wait until the live member is assigned and has committed on mv-b. This
+    // polls the GROUP DETAIL endpoint on purpose: the consumers tab answers
+    // from the age-tiered cache, so polling it here would keep re-reading the
+    // first (not-yet-joined) snapshot until its tier expired.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    loop {
+        let (_, body) = get_json(app(state.clone()), "/api/clusters/test/groups/mv-group").await;
+        let committed_on_b = body["state"] == "Stable"
+            && body["partitions"].as_array().is_some_and(|ps| ps.iter().any(|p| p["topic"] == "mv-b"));
+        if committed_on_b { break; }
+        assert!(std::time::Instant::now() < deadline, "mv-group never became a stable consumer of mv-b: {body}");
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+
+    
+    let (status, body) = get_json(app(state.clone()), "/api/clusters/test/topics/mv-a/consumers").await;
+    assert_eq!(status, 200);
+    let groups = body["groups"].as_array().unwrap();
+    assert!(
+        !groups.iter().any(|g| g["group_id"] == "mv-group"),
+        "a group assigned elsewhere must not appear on its old topic: {body}"
+    );
+    assert_eq!(
+        group_offset_fetch_count("mv-a", "mv-group"),
+        0,
+        "a moved-away group must never be OffsetFetched for the old topic"
+    );
+}
+
+/// Owner design 2026-08-19: the tab's lag data is cached server-side and
+/// refreshed by age tiers, so a second poll within the fast tier serves
+/// from memory — no new OffsetFetch per group, no matter how many tabs poll.
+#[tokio::test]
+async fn topic_consumers_serves_cached_lag_within_the_ttl() {
+    use arne::cluster::admin::{group_metadata_fetch_count, group_offset_fetch_count};
+
+    let bootstrap = start_kafka().await;
+    create_topic(&bootstrap, "ttl-topic", 1).await;
+    produce(&bootstrap, "ttl-topic", 5).await;
+    consume_and_commit(&bootstrap, "ttl-topic", "ttl-group", 2).await;
+    let state = state_for(&bootstrap, vec![]);
+
+    let (status, body) = get_json(app(state.clone()), "/api/clusters/test/topics/ttl-topic/consumers").await;
+    assert_eq!(status, 200);
+    let g = body["groups"].as_array().unwrap().iter()
+        .find(|g| g["group_id"] == "ttl-group").expect("empty group with offsets is shown").clone();
+    assert_eq!(g["total_lag"], 3);
+    assert!(group_offset_fetch_count("ttl-topic", "ttl-group") >= 1, "first render must inspect the group");
+    // One shared metadata build per request, never one per group.
+    assert_eq!(group_metadata_fetch_count(Some("ttl-topic")), 1);
+
+    // The pair below is the cache assertion. It starts from the SECOND
+    // render, not the first: the first inspects every group on this shared
+    // broker and can itself outlast the fast tier on a loaded machine, while
+    // a render that hits the cache is quick — so the window between these two
+    // stays comfortably inside the TTL.
+    let (status, _) = get_json(app(state.clone()), "/api/clusters/test/topics/ttl-topic/consumers").await;
+    assert_eq!(status, 200);
+    let fetches_after_warm = group_offset_fetch_count("ttl-topic", "ttl-group");
+
+    let (status, body) = get_json(app(state.clone()), "/api/clusters/test/topics/ttl-topic/consumers").await;
+    assert_eq!(status, 200);
+    assert!(body["groups"].as_array().unwrap().iter().any(|g| g["group_id"] == "ttl-group"));
+    assert_eq!(
+        group_offset_fetch_count("ttl-topic", "ttl-group"),
+        fetches_after_warm,
+        "a render inside the fast tier must serve the group's lag from cache"
+    );
+    // The partition list feeding OffsetFetch is built lazily, so a render
+    // that refreshes nothing costs only the group list. That last step isn't
+    // asserted here: this suite shares one broker, and a group another test
+    // creates (or one whose members are mid-rebalance, hence undecodable)
+    // legitimately needs inspecting between these two renders.
+}
+
 #[tokio::test]
 async fn subjects_without_a_configured_registry_answer_an_honest_envelope() {
     let bootstrap = start_kafka().await;

@@ -1,4 +1,6 @@
 pub mod admin;
+pub mod assignment;
+pub mod group_lag_cache;
 pub mod registry;
 pub mod sampler;
 
@@ -67,6 +69,7 @@ pub struct ClusterHandle {
     pub name: String,
     pub config: ClusterConfig,
     pub sampler: Arc<sampler::SamplerStore>,
+    pub group_lag_cache: group_lag_cache::GroupLagCache,
     pub schema_registry: Option<Arc<SchemaRegistry>>,
     consumer: RwLock<Arc<BaseConsumer>>,
     admin: RwLock<Arc<AdminClient<DefaultClientContext>>>,
@@ -101,6 +104,7 @@ impl ClusterHandle {
             name: config.name.clone(),
             config,
             sampler: Arc::new(sampler::SamplerStore::new(360)),
+            group_lag_cache: group_lag_cache::GroupLagCache::new(),
             schema_registry,
             consumer: RwLock::new(Arc::new(consumer)),
             admin: RwLock::new(Arc::new(admin)),
