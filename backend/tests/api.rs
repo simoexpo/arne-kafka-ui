@@ -515,6 +515,31 @@ async fn concurrent_polls_of_one_topic_inspect_each_group_once() {
     assert_eq!(inspections, 1, "one inspection served all eight pollers, not eight");
 }
 
+/// Owner design 2026-08-19: k tabs polling a list page must cost one broker
+/// round, not k. Every caller inside the window is served the SAME snapshot,
+/// which its `as_of` proves.
+#[tokio::test]
+async fn concurrent_list_requests_share_one_snapshot() {
+    let bootstrap = start_kafka().await;
+    create_topic(&bootstrap, "snap-topic", 1).await;
+    let state = state_for(&bootstrap, vec![]);
+
+    for url in ["/api/clusters/test/topics", "/api/clusters/test/groups", "/api/clusters/test/overview"] {
+        let mut set = tokio::task::JoinSet::new();
+        for _ in 0..8 {
+            let state = state.clone();
+            set.spawn(async move { get_json(app(state), url).await });
+        }
+        let mut stamps = std::collections::HashSet::new();
+        while let Some(res) = set.join_next().await {
+            let (status, body) = res.unwrap();
+            assert_eq!(status, 200, "{url}: {body}");
+            stamps.insert(body["as_of"].as_i64().expect("every list payload is stamped"));
+        }
+        assert_eq!(stamps.len(), 1, "{url}: eight callers, one shared snapshot (got {stamps:?})");
+    }
+}
+
 #[tokio::test]
 async fn overview_reports_brokers_and_counts() {
     let bootstrap = start_kafka().await;
@@ -1637,30 +1662,36 @@ async fn unknown_api_path_gets_404_envelope() {
     assert!(body["message"].as_str().unwrap().contains("/api/clusters/nope/definitely-not-a-route"));
 }
 
+/// Probes the self-heal mechanism directly (`health_blocking`), below the
+/// shared snapshot that `health()` reads: this test is about consecutive
+/// PROBES, and the cache exists precisely to stop repeated calls from
+/// probing repeatedly.
 #[tokio::test]
 async fn health_self_heals_a_stale_client() {
     // support::start_kafka() returns the shared reused test broker's
     // bootstrap; support::cluster_cfg builds a ClusterConfig for it
     let bootstrap = start_kafka().await;
     let handle = Arc::new(ClusterHandle::connect(cluster_cfg("self-heal", &bootstrap)).unwrap());
-    assert_eq!(handle.health().await.status, HealthStatus::Healthy, "sanity");
+    assert_eq!(handle.health_blocking().status, HealthStatus::Healthy, "sanity");
 
     // resident clients now point at a dead port; config still points at the
     // live broker — the stale-client wedge in miniature
     handle.replace_clients_with_bootstrap("127.0.0.1:1").unwrap();
 
     // first failure stays honest (below threshold)
-    let first = handle.health().await;
+    let first = handle.health_blocking();
     assert_eq!(first.status, HealthStatus::Unreachable);
     assert!(first.error.is_some());
 
     // second failure reaches RECOVERY_THRESHOLD: probe fresh client from
-    // config, swap, and report Healthy in the same call
-    let second = handle.health().await;
-    assert_eq!(second.status, HealthStatus::Healthy, "self-heal must land in-call");
+    // config, swap, and report Healthy in the same probe
+    let second = handle.health_blocking();
+    assert_eq!(second.status, HealthStatus::Healthy, "self-heal must land in-probe");
     assert!(second.broker_count.is_some());
 
-    // healed for real: subsequent checks stay healthy
+    // healed for real: subsequent probes stay healthy, and the public
+    // (snapshot-backed) entry point agrees
+    assert_eq!(handle.health_blocking().status, HealthStatus::Healthy);
     assert_eq!(handle.health().await.status, HealthStatus::Healthy);
 }
 

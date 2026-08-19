@@ -1,4 +1,4 @@
-use super::{ffi, single_flight, ClusterHandle, ADMIN_TIMEOUT};
+use super::{ffi, single_flight, snapshot, ClusterHandle, ADMIN_TIMEOUT};
 use crate::error::{self, ApiError};
 use crate::util::now_ms;
 use rdkafka::admin::{AdminOptions, ResourceSpecifier};
@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::{Mutex, OnceLock};
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Clone)]
 pub struct TopicSummary {
     pub name: String,
     pub partitions: i32,
@@ -30,14 +30,32 @@ fn is_internal_topic(name: &str) -> bool {
     name.starts_with("__") || name == "_schemas"
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Clone)]
 pub struct TopicList {
     pub topics: Vec<TopicSummary>,
     pub as_of: i64,
 }
 
+/// One metadata call, shared by every tab for `TOPICS_TTL_MS` (just under the
+/// page's 30s poll, so a lone tab still refreshes every poll).
+pub const TOPICS_TTL_MS: i64 = 25_000;
+
 pub async fn list_topics(handle: Arc<ClusterHandle>) -> Result<TopicList, ApiError> {
     tokio::task::spawn_blocking(move || {
+        snapshot::cached_or_refresh(
+            &handle.topics_snapshot,
+            &handle.snapshot_flight,
+            "topics",
+            TOPICS_TTL_MS,
+            || list_topics_blocking(&handle),
+        )
+    })
+    .await
+    .map_err(ApiError::task_join)?
+}
+
+fn list_topics_blocking(handle: &ClusterHandle) -> Result<TopicList, ApiError> {
+    {
         let md = handle.consumer()
             .fetch_metadata(None, ADMIN_TIMEOUT)
             .map_err(|e| error::from_kafka(&handle.name, "fetch metadata", &e))?;
@@ -53,9 +71,7 @@ pub async fn list_topics(handle: Arc<ClusterHandle>) -> Result<TopicList, ApiErr
         }
         topics.sort_by(|a, b| a.name.cmp(&b.name));
         Ok(TopicList { topics, as_of: now_ms() })
-    })
-    .await
-    .map_err(ApiError::task_join)?
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -146,7 +162,7 @@ pub struct PartitionLag {
     pub lag: i64,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Clone)]
 pub struct GroupSummary {
     pub group_id: String,
     pub state: String,
@@ -155,7 +171,7 @@ pub struct GroupSummary {
     pub total_lag: i64,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Clone)]
 pub struct GroupList { pub groups: Vec<GroupSummary>, pub as_of: i64 }
 
 #[derive(Debug, Serialize)]
@@ -383,19 +399,36 @@ pub async fn topic_names(handle: Arc<ClusterHandle>) -> Result<Vec<String>, ApiE
     .map_err(ApiError::task_join)?
 }
 
+/// Just under the consumers page's 10s poll.
+pub const GROUPS_TTL_MS: i64 = 8_000;
+
 pub async fn list_groups(handle: Arc<ClusterHandle>) -> Result<GroupList, ApiError> {
     tokio::task::spawn_blocking(move || {
+        snapshot::cached_or_refresh(
+            &handle.groups_snapshot,
+            &handle.snapshot_flight,
+            "groups",
+            GROUPS_TTL_MS,
+            || list_groups_blocking(&handle),
+        )
+    })
+    .await
+    .map_err(ApiError::task_join)?
+}
+
+fn list_groups_blocking(handle: &ClusterHandle) -> Result<GroupList, ApiError> {
+    {
         let gl = handle.consumer()
             .fetch_group_list(None, ADMIN_TIMEOUT)
             .map_err(|e| error::from_kafka(&handle.name, "list groups", &e))?;
-        let tpl = group_lag_topic_partitions(&handle, None)?;
+        let tpl = group_lag_topic_partitions(handle, None)?;
         let mut watermark_cache = WatermarkCache::new();
         let mut groups = Vec::new();
         for g in gl.groups() {
             if !is_consumer_group_protocol(g.protocol_type()) {
                 continue;
             }
-            let lag = group_lag_blocking(&handle, "*", g.name(), &tpl, &mut watermark_cache)?;
+            let lag = group_lag_blocking(handle, "*", g.name(), &tpl, &mut watermark_cache)?;
             groups.push(GroupSummary {
                 group_id: g.name().to_string(),
                 state: g.state().to_string(),
@@ -406,9 +439,7 @@ pub async fn list_groups(handle: Arc<ClusterHandle>) -> Result<GroupList, ApiErr
         }
         groups.sort_by(|a, b| a.group_id.cmp(&b.group_id));
         Ok(GroupList { groups, as_of: now_ms() })
-    })
-    .await
-    .map_err(ApiError::task_join)?
+    }
 }
 
 pub async fn group_detail(handle: Arc<ClusterHandle>, group: String) -> Result<GroupDetail, ApiError> {
@@ -633,13 +664,13 @@ pub async fn topic_consumers(handle: Arc<ClusterHandle>, topic: String) -> Resul
     .map_err(ApiError::task_join)?
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Clone)]
 pub struct BrokerInfo { pub id: i32, pub host: String, pub port: i32 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Clone)]
 pub struct TopicPartitions { pub name: String, pub partitions: usize }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Clone)]
 pub struct Overview {
     pub brokers: Vec<BrokerInfo>,
     pub controller_id: Option<i32>, // librdkafka metadata does not expose the controller; null in v1
@@ -665,8 +696,25 @@ fn top_topics_by_partitions<'a>(topics: impl IntoIterator<Item = (&'a str, usize
     out
 }
 
+/// Just under the overview's 10s poll.
+pub const OVERVIEW_TTL_MS: i64 = 8_000;
+
 pub async fn overview(handle: Arc<ClusterHandle>) -> Result<Overview, ApiError> {
     tokio::task::spawn_blocking(move || {
+        snapshot::cached_or_refresh(
+            &handle.overview_snapshot,
+            &handle.snapshot_flight,
+            "overview",
+            OVERVIEW_TTL_MS,
+            || overview_blocking(&handle),
+        )
+    })
+    .await
+    .map_err(ApiError::task_join)?
+}
+
+fn overview_blocking(handle: &ClusterHandle) -> Result<Overview, ApiError> {
+    {
         let md = handle.consumer()
             .fetch_metadata(None, ADMIN_TIMEOUT)
             .map_err(|e| error::from_kafka(&handle.name, "fetch metadata", &e))?;
@@ -688,9 +736,7 @@ pub async fn overview(handle: Arc<ClusterHandle>) -> Result<Overview, ApiError> 
             top_topics: top_topics_by_partitions(md.topics().iter().map(|t| (t.name(), t.partitions().len()))),
             as_of: now_ms(),
         })
-    })
-    .await
-    .map_err(ApiError::task_join)?
+    }
 }
 
 #[cfg(test)]

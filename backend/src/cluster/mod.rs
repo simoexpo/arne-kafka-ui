@@ -5,6 +5,7 @@ pub mod group_lag_cache;
 pub mod registry;
 pub mod sampler;
 pub mod single_flight;
+pub mod snapshot;
 
 use crate::config::{ClusterConfig, SaslMechanism};
 use crate::message::schema_registry::SchemaRegistry;
@@ -20,6 +21,11 @@ use std::time::Duration;
 
 pub const ADMIN_TIMEOUT: Duration = Duration::from_secs(10);
 pub const HEALTH_TIMEOUT: Duration = Duration::from_secs(2);
+/// Deliberately SHORT next to the other snapshots: health is the cheapest
+/// call we make (one DescribeCluster) and the one users most need current, so
+/// this window only exists to collapse simultaneous polls from several tabs —
+/// never to delay noticing that a cluster went down.
+pub const HEALTH_TTL_MS: i64 = 2_000;
 
 /// Consecutive health-check failures before probing whether a freshly built
 /// client can reach the cluster the resident one cannot.
@@ -71,6 +77,13 @@ pub struct ClusterHandle {
     pub sampler_flight: single_flight::SingleFlight<String>,
     pub group_lag_cache: group_lag_cache::GroupLagCache,
     pub lag_flight: single_flight::SingleFlight<(String, String)>,
+    /// Whole-response snapshots shared by every tab for a few seconds, so tab
+    /// count stops multiplying broker calls (owner design 2026-08-19).
+    pub topics_snapshot: snapshot::SnapshotCache<admin::TopicList>,
+    pub overview_snapshot: snapshot::SnapshotCache<admin::Overview>,
+    pub groups_snapshot: snapshot::SnapshotCache<admin::GroupList>,
+    pub health_snapshot: snapshot::SnapshotCache<ClusterHealth>,
+    pub snapshot_flight: single_flight::SingleFlight<&'static str>,
     pub schema_registry: Option<Arc<SchemaRegistry>>,
     consumer: RwLock<Arc<BaseConsumer>>,
     admin: RwLock<Arc<AdminClient<DefaultClientContext>>>,
@@ -84,11 +97,11 @@ impl std::fmt::Debug for ClusterHandle {
     }
 }
 
-#[derive(Debug, Serialize, PartialEq)]
+#[derive(Debug, Serialize, PartialEq, Clone)]
 #[serde(rename_all = "lowercase")]
 pub enum HealthStatus { Healthy, Unreachable }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Clone)]
 pub struct ClusterHealth {
     pub status: HealthStatus,
     pub broker_count: Option<usize>,
@@ -108,6 +121,11 @@ impl ClusterHandle {
             sampler_flight: single_flight::SingleFlight::new(),
             group_lag_cache: group_lag_cache::GroupLagCache::new(),
             lag_flight: single_flight::SingleFlight::new(),
+            topics_snapshot: snapshot::SnapshotCache::new(),
+            overview_snapshot: snapshot::SnapshotCache::new(),
+            groups_snapshot: snapshot::SnapshotCache::new(),
+            health_snapshot: snapshot::SnapshotCache::new(),
+            snapshot_flight: single_flight::SingleFlight::new(),
             schema_registry,
             consumer: RwLock::new(Arc::new(consumer)),
             admin: RwLock::new(Arc::new(admin)),
@@ -162,24 +180,54 @@ impl ClusterHandle {
     /// topic — megabytes on a large cluster, for a dot and a number.
     pub async fn health(self: &Arc<Self>) -> ClusterHealth {
         let this = self.clone();
+        // Shared across tabs: the nav polls every cluster every 10s from every
+        // open tab, and the answer is identical for all of them.
         let res = tokio::task::spawn_blocking(move || {
-            match ffi::describe_cluster_blocking(&this, HEALTH_TIMEOUT) {
-                Ok(described) => {
-                    this.reset_shared_failures();
-                    Ok(described.brokers.len())
-                }
-                Err(e) => {
-                    if let Some(brokers) = this.note_shared_failure_and_maybe_recover() {
-                        return Ok(brokers);
-                    }
-                    Err(e)
-                }
-            }
-        }).await;
+            snapshot::cached_or_refresh(
+                &this.health_snapshot,
+                &this.snapshot_flight,
+                "health",
+                HEALTH_TTL_MS,
+                || Ok(this.health_blocking()),
+            )
+        })
+        .await;
         match res {
-            Ok(Ok(brokers)) => ClusterHealth { status: HealthStatus::Healthy, broker_count: Some(brokers), error: None },
+            Ok(Ok(health)) => health,
             Ok(Err(e)) => ClusterHealth { status: HealthStatus::Unreachable, broker_count: None, error: Some(e.message) },
             Err(e) => ClusterHealth { status: HealthStatus::Unreachable, broker_count: None, error: Some(e.to_string()) },
+        }
+    }
+
+    /// Infallible by design: "unreachable" IS the answer, and the snapshot
+    /// above caches that answer like any other.
+    ///
+    /// Public as a test hook so the self-heal mechanism can be exercised
+    /// probe-by-probe, below the shared snapshot.
+    #[doc(hidden)]
+    pub fn health_blocking(&self) -> ClusterHealth {
+        match ffi::describe_cluster_blocking(self, HEALTH_TIMEOUT) {
+            Ok(described) => {
+                self.reset_shared_failures();
+                ClusterHealth {
+                    status: HealthStatus::Healthy,
+                    broker_count: Some(described.brokers.len()),
+                    error: None,
+                }
+            }
+            Err(e) => match self.note_shared_failure_and_maybe_recover() {
+                // A fresh client reached the cluster the resident one could not.
+                Some(brokers) => ClusterHealth {
+                    status: HealthStatus::Healthy,
+                    broker_count: Some(brokers),
+                    error: None,
+                },
+                None => ClusterHealth {
+                    status: HealthStatus::Unreachable,
+                    broker_count: None,
+                    error: Some(e.message),
+                },
+            },
         }
     }
 
