@@ -79,16 +79,25 @@ describe('SubjectDetailView', () => {
     expect(vi.mocked(client.getSubjectDetail)).toHaveBeenLastCalledWith('prod', 'sr-avro-value', 1, expect.anything())
   })
 
-  it('opens the tab named in the URL and keeps the version when tabs change', async () => {
+  it('opens the tab named in the URL, and a tab switch drops params that tab does not own', async () => {
     vi.mocked(client.getSubjectDetail).mockResolvedValue(detail())
     const { router } = await renderWithRouter(<SubjectDetailView cluster="prod" subject="sr-avro-value" />, {
       initialPath: '/c/prod/schemas/sr-avro-value?version=1&tab=compatibility',
     })
     expect(screen.getByRole('tab', { name: 'Compatibility' })).toHaveAttribute('aria-selected', 'true')
     await userEvent.click(screen.getByRole('tab', { name: 'Definition' }))
-    expect(router.state.location.search).toEqual(
-      expect.objectContaining({ tab: 'definition', version: 1 }),
-    )
+    // ?version= describes what Definition shows; it is not carried along by a
+    // tab switch (owner ruling 2026-08-19) — absent means latest, as always.
+    expect(router.state.location.search).toEqual({ tab: 'definition' })
+  })
+
+  it('picking a version keeps you on the tab you are reading', async () => {
+    vi.mocked(client.getSubjectDetail).mockResolvedValue(detail())
+    const { router } = await renderWithRouter(<SubjectDetailView cluster="prod" subject="sr-avro-value" />, {
+      initialPath: '/c/prod/schemas/sr-avro-value?tab=definition',
+    })
+    fireEvent.change(await screen.findByLabelText('version'), { target: { value: '1' } })
+    expect(router.state.location.search).toEqual(expect.objectContaining({ tab: 'definition', version: 1 }))
   })
 
   it('a non-JSON schema (protobuf) renders verbatim, no soft-wrap', async () => {
