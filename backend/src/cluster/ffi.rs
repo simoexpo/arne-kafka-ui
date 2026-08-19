@@ -37,7 +37,9 @@ impl AdminCall {
         unsafe {
             let queue = rd::rd_kafka_queue_new(rk);
             let options = rd::rd_kafka_AdminOptions_new(rk, op);
-            let mut errbuf = [0i8; 512];
+            // c_char is i8 on some targets and u8 on others (macOS vs Linux):
+            // spell it out rather than assuming one of them.
+            let mut errbuf = [0 as std::os::raw::c_char; 512];
             let rc = rd::rd_kafka_AdminOptions_set_request_timeout(
                 options,
                 timeout.as_millis() as i32,
