@@ -227,19 +227,39 @@ impl Drop for LiveConsumer {
 pub fn spawn_live_consumer(bootstrap: &str, topic: &str, group: &str) -> LiveConsumer {
     let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let stop_flag = stop.clone();
-    let (bootstrap, topic, group) = (bootstrap.to_string(), topic.to_string(), group.to_string());
+    let (label, bootstrap, topic, group) =
+        (format!("{topic}/{group}"), bootstrap.to_string(), topic.to_string(), group.to_string());
+    // The thread reports whether it got as far as subscribing, so a setup
+    // failure surfaces here instead of leaving the caller to time out waiting
+    // for a consumer that never existed.
+    let (started_tx, started_rx) = std::sync::mpsc::channel::<Result<(), String>>();
     let thread = std::thread::spawn(move || {
         let mut cc = client(&bootstrap);
         cc.set("group.id", &group)
             .set("auto.offset.reset", "earliest")
             .set("enable.auto.commit", "true")
             .set("auto.commit.interval.ms", "500");
-        let consumer: BaseConsumer = cc.create().unwrap();
-        consumer.subscribe(&[&topic]).unwrap();
+        let consumer: BaseConsumer = match cc.create() {
+            Ok(c) => c,
+            Err(e) => {
+                let _ = started_tx.send(Err(format!("create consumer: {e}")));
+                return;
+            }
+        };
+        if let Err(e) = consumer.subscribe(&[&topic]) {
+            let _ = started_tx.send(Err(format!("subscribe: {e}")));
+            return;
+        }
+        let _ = started_tx.send(Ok(()));
         while !stop_flag.load(std::sync::atomic::Ordering::Relaxed) {
             let _ = consumer.poll(Duration::from_millis(200));
         }
     });
+    match started_rx.recv_timeout(Duration::from_secs(10)) {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => panic!("live consumer {label} failed to start: {e}"),
+        Err(e) => panic!("live consumer {label} never reported startup: {e}"),
+    }
     LiveConsumer { stop, thread: Some(thread) }
 }
 

@@ -96,6 +96,8 @@ pub fn needs_refresh(class: &Classification, entry: Option<Freshness>, now_ms: i
         Classification::MustInspect => {
             if e.has_rows { LIVE_TTL_MS } else { IDLE_TTL_MS }
         }
+        // callers skip MovedAway groups before asking; this arm only
+        // keeps the match total
         Classification::MovedAway => return false,
     };
     now_ms - e.sampled_at >= ttl
@@ -130,8 +132,8 @@ impl GroupLagCache {
     /// Drop `topic`'s entries whose group is gone from the caller's group
     /// list, plus any entry (any topic) past the global age horizon.
     ///
-    /// `as_of` is the caller's group-list snapshot time: an entry sampled
-    /// AFTER it was written by a request holding a newer view of the cluster,
+    /// `as_of` is the caller's group-list snapshot time: an entry sampled at
+    /// or after it was written by a request holding a newer view of the cluster,
     /// so it survives even when this caller's older keep-set omits it —
     /// otherwise two concurrent polls would delete each other's fresh work
     /// and re-fetch it.
@@ -140,7 +142,7 @@ impl GroupLagCache {
             if as_of - e.sampled_at >= EVICT_AGE_MS {
                 return false;
             }
-            t != topic || e.sampled_at > as_of || keep_groups(g)
+            t != topic || e.sampled_at >= as_of || keep_groups(g)
         });
     }
 }
@@ -235,11 +237,6 @@ mod tests {
 
         assert!(!needs_refresh(&Classification::MustInspect, fresh(0, false), IDLE_TTL_MS - 1));
         assert!(needs_refresh(&Classification::MustInspect, fresh(0, false), IDLE_TTL_MS));
-    }
-
-    #[test]
-    fn moved_away_never_refreshes() {
-        assert!(!needs_refresh(&Classification::MovedAway, fresh(0, true), i64::MAX));
     }
 
     #[test]

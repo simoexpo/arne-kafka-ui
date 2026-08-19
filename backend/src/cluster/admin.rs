@@ -203,8 +203,9 @@ fn record_group_watermark_fetch(topic: &str) {
     *calls.lock().unwrap().entry(topic.to_string()).or_insert(0) += 1;
 }
 
-/// Per-`(scope, group)` count of real OffsetFetch round trips
-/// (`committed_offsets` calls), where scope is the topic filter of the
+/// Per-`(scope, group)` count of group-offset INSPECTIONS — one bump per
+/// `group_lag_blocking` call, whether its `committed_offsets` succeeds,
+/// errors, or takes several coordinator retries. Scope is the endpoint's
 /// calling endpoint ("*" for the whole-cluster group list/detail). Read only
 /// by tests: proves the consumers-tab cache and the moved-away filter
 /// suppress per-group fetches. Scoped so a concurrent test exercising
@@ -451,7 +452,7 @@ pub async fn topic_consumers(handle: Arc<ClusterHandle>, topic: String) -> Resul
         let mut watermark_cache = WatermarkCache::new();
         let mut groups = Vec::new();
         let mut keep = std::collections::HashSet::new();
-        let mut oldest_served = now;
+        let mut oldest_served: Option<i64> = None;
         for g in gl.groups() {
             if !is_consumer_group_protocol(g.protocol_type()) {
                 continue;
@@ -480,7 +481,9 @@ pub async fn topic_consumers(handle: Arc<ClusterHandle>, topic: String) -> Resul
                         None => tpl.insert(group_lag_topic_partitions(&handle, Some(&topic))?),
                     };
                     let partitions = group_lag_blocking(&handle, &topic, g.name(), tpl, &mut watermark_cache)?;
-                    let entry = CachedEntry { partitions, sampled_at: now };
+                    // stamped on completion, not at request start: a long
+                    // sweep must not record its last entries as already stale
+                    let entry = CachedEntry { partitions, sampled_at: now_ms() };
                     handle.group_lag_cache.insert(&topic, g.name(), entry.clone());
                     entry
                 }
@@ -488,7 +491,7 @@ pub async fn topic_consumers(handle: Arc<ClusterHandle>, topic: String) -> Resul
             if entry.partitions.is_empty() {
                 continue;
             }
-            oldest_served = oldest_served.min(entry.sampled_at);
+            oldest_served = Some(oldest_served.map_or(entry.sampled_at, |o: i64| o.min(entry.sampled_at)));
             groups.push(TopicGroupLag {
                 group_id: g.name().to_string(),
                 state: g.state().to_string(),
@@ -498,7 +501,7 @@ pub async fn topic_consumers(handle: Arc<ClusterHandle>, topic: String) -> Resul
         }
         handle.group_lag_cache.evict(&topic, &|g| keep.contains(g), now);
         groups.sort_by(|a, b| a.group_id.cmp(&b.group_id));
-        Ok(TopicConsumers { topic, groups, as_of: oldest_served })
+        Ok(TopicConsumers { topic, groups, as_of: oldest_served.unwrap_or(now) })
     })
     .await
     .map_err(ApiError::task_join)?
