@@ -395,6 +395,90 @@ async fn throughput_of_a_missing_topic_is_an_honest_404() {
     assert_eq!(body["code"], "topic_not_found");
 }
 
+/// The FFI wrappers over librdkafka calls rust-rdkafka never bound
+/// (owner-approved 2026-08-19). DescribeCluster answers "which brokers, which
+/// controller" without shipping the topic inventory; ListOffsets answers every
+/// partition's watermark in ONE invocation instead of one round trip each.
+#[tokio::test]
+async fn ffi_describe_cluster_and_batched_list_offsets_work_against_a_real_broker() {
+    use arne::cluster::ffi::{describe_cluster_blocking, list_offsets_blocking, OffsetSpec};
+    use std::time::Duration;
+
+    let bootstrap = start_kafka().await;
+    create_topic(&bootstrap, "ffi-topic", 3).await;
+    produce(&bootstrap, "ffi-topic", 9).await;
+    let state = state_for(&bootstrap, vec![]);
+    let handle = state.registry.get("test").unwrap();
+
+    let described = tokio::task::spawn_blocking({
+        let handle = handle.clone();
+        move || describe_cluster_blocking(&handle, Duration::from_secs(10))
+    })
+    .await
+    .unwrap()
+    .expect("describe cluster");
+    assert_eq!(described.brokers.len(), 1, "single-broker test cluster: {described:?}");
+    assert!(described.brokers[0].0 >= 0, "broker id is reported: {described:?}");
+    assert!(!described.brokers[0].1.is_empty(), "broker host is reported: {described:?}");
+    assert_eq!(described.controller_id, Some(described.brokers[0].0), "the only broker is the controller");
+
+    let parts: Vec<(String, i32)> = (0..3).map(|p| ("ffi-topic".to_string(), p)).collect();
+    let (latest, earliest) = tokio::task::spawn_blocking({
+        let handle = handle.clone();
+        let parts = parts.clone();
+        move || {
+            let l = list_offsets_blocking(&handle, &parts, OffsetSpec::Latest, Duration::from_secs(10));
+            let e = list_offsets_blocking(&handle, &parts, OffsetSpec::Earliest, Duration::from_secs(10));
+            (l, e)
+        }
+    })
+    .await
+    .unwrap();
+    let latest = latest.expect("list offsets latest");
+    let earliest = earliest.expect("list offsets earliest");
+    assert_eq!(latest.len(), 3, "one entry per requested partition in a single call: {latest:?}");
+    assert!(latest.iter().all(|p| p.error.is_none()), "no per-partition errors: {latest:?}");
+    assert_eq!(latest.iter().map(|p| p.offset).sum::<i64>(), 9, "9 messages across 3 partitions: {latest:?}");
+    assert_eq!(earliest.iter().map(|p| p.offset).sum::<i64>(), 0, "nothing trimmed yet: {earliest:?}");
+
+    // an empty request must not touch the broker at all
+    assert!(list_offsets_blocking(&handle, &[], OffsetSpec::Latest, Duration::from_secs(1)).unwrap().is_empty());
+}
+
+/// Committed offsets through the SHARED admin client: the old path built a
+/// throwaway consumer per group (a TCP connect + coordinator lookup each).
+#[tokio::test]
+async fn ffi_committed_offsets_read_a_groups_position_without_a_throwaway_consumer() {
+    use arne::cluster::ffi::committed_offsets_blocking;
+    use std::time::Duration;
+
+    let bootstrap = start_kafka().await;
+    create_topic(&bootstrap, "cgo-topic", 2).await;
+    produce(&bootstrap, "cgo-topic", 8).await;
+    consume_and_commit(&bootstrap, "cgo-topic", "cgo-group", 8).await;
+    let state = state_for(&bootstrap, vec![]);
+    let handle = state.registry.get("test").unwrap();
+    let wanted: Vec<(String, i32)> = (0..2).map(|p| ("cgo-topic".to_string(), p)).collect();
+
+    let (committed, untouched) = tokio::task::spawn_blocking({
+        let handle = handle.clone();
+        let wanted = wanted.clone();
+        move || {
+            let c = committed_offsets_blocking(&handle, "cgo-group", &wanted, Duration::from_secs(10));
+            let u = committed_offsets_blocking(&handle, "cgo-never-existed", &wanted, Duration::from_secs(10));
+            (c, u)
+        }
+    })
+    .await
+    .unwrap();
+
+    let committed = committed.expect("committed offsets");
+    assert_eq!(committed.values().sum::<i64>(), 8, "all 8 messages were committed: {committed:?}");
+    assert!(committed.keys().all(|(t, _)| t == "cgo-topic"), "topics are reported: {committed:?}");
+    // a group that never committed has no offsets, which is not an error
+    assert!(untouched.expect("unknown group is answerable").is_empty());
+}
+
 #[tokio::test]
 async fn overview_reports_brokers_and_counts() {
     let bootstrap = start_kafka().await;

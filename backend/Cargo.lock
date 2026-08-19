@@ -78,6 +78,7 @@ dependencies = [
  "protobuf-json-mapping",
  "protobuf-parse",
  "rdkafka",
+ "rdkafka-sys",
  "reqwest",
  "rust-embed",
  "serde",

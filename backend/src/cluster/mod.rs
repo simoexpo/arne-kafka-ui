@@ -1,5 +1,6 @@
 pub mod admin;
 pub mod assignment;
+pub mod ffi;
 pub mod group_lag_cache;
 pub mod registry;
 pub mod sampler;
@@ -42,12 +43,6 @@ pub fn build_client_config(cfg: &ClusterConfig) -> ClientConfig {
         }
     }
     cc
-}
-
-pub fn group_consumer(cfg: &ClusterConfig, group: &str) -> KafkaResult<BaseConsumer> {
-    let mut cc = build_client_config(cfg);
-    cc.set("group.id", group);
-    cc.create()
 }
 
 /// Monotonic per-process counter backing `throwaway_group_id`, shared across
@@ -153,13 +148,17 @@ impl ClusterHandle {
         Ok(())
     }
 
+    /// DescribeCluster, not metadata (owner ruling 2026-08-19): the nav polls
+    /// this for every cluster every 10s, and `fetch_metadata(None)` answers
+    /// "is it up, how many brokers" by shipping every partition of every
+    /// topic — megabytes on a large cluster, for a dot and a number.
     pub async fn health(self: &Arc<Self>) -> ClusterHealth {
         let this = self.clone();
         let res = tokio::task::spawn_blocking(move || {
-            match this.consumer().fetch_metadata(None, HEALTH_TIMEOUT) {
-                Ok(md) => {
+            match ffi::describe_cluster_blocking(&this, HEALTH_TIMEOUT) {
+                Ok(described) => {
                     this.reset_shared_failures();
-                    Ok(md.brokers().len())
+                    Ok(described.brokers.len())
                 }
                 Err(e) => {
                     if let Some(brokers) = this.note_shared_failure_and_maybe_recover() {
@@ -171,7 +170,7 @@ impl ClusterHandle {
         }).await;
         match res {
             Ok(Ok(brokers)) => ClusterHealth { status: HealthStatus::Healthy, broker_count: Some(brokers), error: None },
-            Ok(Err(e)) => ClusterHealth { status: HealthStatus::Unreachable, broker_count: None, error: Some(e.to_string()) },
+            Ok(Err(e)) => ClusterHealth { status: HealthStatus::Unreachable, broker_count: None, error: Some(e.message) },
             Err(e) => ClusterHealth { status: HealthStatus::Unreachable, broker_count: None, error: Some(e.to_string()) },
         }
     }

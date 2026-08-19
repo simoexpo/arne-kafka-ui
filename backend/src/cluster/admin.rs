@@ -1,10 +1,8 @@
-use super::{group_consumer, ClusterHandle, ADMIN_TIMEOUT};
+use super::{ffi, ClusterHandle, ADMIN_TIMEOUT};
 use crate::error::{self, ApiError};
 use crate::util::now_ms;
 use rdkafka::admin::{AdminOptions, ResourceSpecifier};
 use rdkafka::consumer::Consumer;
-use rdkafka::topic_partition_list::TopicPartitionList;
-use rdkafka::Offset;
 use serde::Serialize;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -117,17 +115,18 @@ pub async fn topic_detail(handle: Arc<ClusterHandle>, topic: String) -> Result<T
         let t = md.topics().iter()
             .find(|t| t.name() == part_topic && !t.partitions().is_empty())
             .ok_or_else(|| ApiError::topic_not_found(&part_handle.name, &part_topic))?;
-        let mut partitions = Vec::new();
-        for p in t.partitions() {
-            let (lo, hi) = part_handle.consumer()
-                .fetch_watermarks(t.name(), p.id(), ADMIN_TIMEOUT)
-                .map_err(|e| error::from_kafka(&part_handle.name, "fetch watermarks", &e))?;
-            partitions.push(PartitionInfo {
-                id: p.id(), leader: p.leader(),
-                replicas: p.replicas().to_vec(), isr: p.isr().to_vec(),
-                start_offset: lo, end_offset: hi,
-            });
-        }
+        // Two batched ListOffsets calls for the whole topic, not a sequential
+        // watermark round trip per partition: a 1000-partition topic used to
+        // cost 1000 round trips on every 10s poll of this tab.
+        let wanted: Vec<(String, i32)> = t.partitions().iter().map(|p| (part_topic.clone(), p.id())).collect();
+        let starts = ffi::offsets_by_partition(&part_handle, &wanted, ffi::OffsetSpec::Earliest, ADMIN_TIMEOUT)?;
+        let ends = ffi::offsets_by_partition(&part_handle, &wanted, ffi::OffsetSpec::Latest, ADMIN_TIMEOUT)?;
+        let partitions = t.partitions().iter().map(|p| PartitionInfo {
+            id: p.id(), leader: p.leader(),
+            replicas: p.replicas().to_vec(), isr: p.isr().to_vec(),
+            start_offset: starts.get(&p.id()).copied().unwrap_or(-1),
+            end_offset: ends.get(&p.id()).copied().unwrap_or(-1),
+        }).collect();
         Ok::<_, ApiError>(partitions)
     });
 
@@ -247,89 +246,118 @@ pub fn group_watermark_fetch_count(topic: &str) -> u64 {
 /// one metadata round trip, meant to be built ONCE per `/groups` or
 /// `/topics/{t}/consumers` request and shared across every group in the
 /// caller's loop, rather than refetched per group.
-fn group_lag_topic_partitions(handle: &ClusterHandle, topic_filter: Option<&str>) -> Result<TopicPartitionList, ApiError> {
+fn group_lag_topic_partitions(handle: &ClusterHandle, topic_filter: Option<&str>) -> Result<Vec<(String, i32)>, ApiError> {
     record_group_metadata_fetch(topic_filter);
     let md = handle.consumer()
         .fetch_metadata(topic_filter, ADMIN_TIMEOUT)
         .map_err(|e| error::from_kafka(&handle.name, "fetch metadata", &e))?;
-    let mut tpl = TopicPartitionList::new();
+    let mut out = Vec::new();
     for t in md.topics() {
         if topic_filter.is_some_and(|f| t.name() != f) { continue; }
         for p in t.partitions() {
-            tpl.add_partition(t.name(), p.id());
+            out.push((t.name().to_string(), p.id()));
         }
     }
-    Ok(tpl)
+    Ok(out)
 }
 
-/// Per-request cache of a partition's high watermark, keyed by
-/// `(topic, partition)`: shared across every group in one `/groups` or
-/// `/topics/{t}/consumers` request's loop, so a partition committed by
-/// several groups pays for one `fetch_watermarks` call, not one per group.
-type WatermarkCache = HashMap<(String, i32), i64>;
+/// Per-request high watermarks, keyed by `(topic, partition)` and filled in
+/// BATCHES: whatever a group needs and we don't already know is fetched with
+/// one ListOffsets call (librdkafka fans it out per leader broker), so a
+/// request costs a round trip or two rather than one per committed partition.
+/// Shared across every group in one `/groups` or `/topics/{t}/consumers`
+/// request, so a partition several groups read is fetched once.
+#[derive(Default)]
+pub struct WatermarkCache {
+    known: HashMap<(String, i32), i64>,
+}
 
-fn cached_high_watermark(handle: &ClusterHandle, cache: &mut WatermarkCache, topic: &str, partition: i32) -> Result<i64, ApiError> {
-    if let Some(&hi) = cache.get(&(topic.to_string(), partition)) {
-        return Ok(hi);
+impl WatermarkCache {
+    pub fn new() -> Self {
+        Self::default()
     }
-    record_group_watermark_fetch(topic);
-    let (_, hi) = handle.consumer()
-        .fetch_watermarks(topic, partition, ADMIN_TIMEOUT)
-        .map_err(|e| error::from_kafka(&handle.name, "fetch watermarks", &e))?;
-    cache.insert((topic.to_string(), partition), hi);
-    Ok(hi)
+
+    fn ensure(&mut self, handle: &ClusterHandle, wanted: &[(String, i32)]) -> Result<(), ApiError> {
+        let missing: Vec<(String, i32)> = wanted
+            .iter()
+            .filter(|key| !self.known.contains_key(*key))
+            .cloned()
+            .collect();
+        if missing.is_empty() {
+            return Ok(());
+        }
+        for topic in missing.iter().map(|(t, _)| t.as_str()).collect::<std::collections::BTreeSet<_>>() {
+            record_group_watermark_fetch(topic);
+        }
+        for p in ffi::list_offsets_blocking(handle, &missing, ffi::OffsetSpec::Latest, ADMIN_TIMEOUT)? {
+            if p.error.is_none() {
+                self.known.insert((p.topic, p.partition), p.offset);
+            }
+        }
+        Ok(())
+    }
+
+    fn get(&self, topic: &str, partition: i32) -> Option<i64> {
+        self.known.get(&(topic.to_string(), partition)).copied()
+    }
 }
 
-/// Committed offsets fetched WITHOUT joining the group (OffsetFetch only):
-/// a throwaway consumer configured with the group.id never subscribes, so
-/// it cannot trigger a rebalance of the real group. `tpl` and
-/// `watermark_cache` are the caller's request-scoped, cross-group state
-/// (`group_lag_topic_partitions`, `cached_high_watermark`) — this function
-/// itself only ever creates the one thing that must be per-group: the
-/// throwaway consumer, since `committed_offsets` is bound to the calling
-/// client's own `group.id`.
+/// Committed offsets fetched WITHOUT joining the group: ListConsumerGroupOffsets
+/// is an admin read on the shared client, so it can never trigger a rebalance
+/// of the real group and costs no connection of its own (it replaced a
+/// throwaway consumer built per group — owner-approved 2026-08-19).
+/// `partitions` and `watermark_cache` are the caller's request-scoped,
+/// cross-group state, so the metadata lookup and each partition's watermark
+/// are paid once per request, not once per group.
 pub fn group_lag_blocking(
     handle: &ClusterHandle,
     scope: &str,
     group: &str,
-    tpl: &TopicPartitionList,
+    partitions: &[(String, i32)],
     watermark_cache: &mut WatermarkCache,
 ) -> Result<Vec<PartitionLag>, ApiError> {
     record_group_offset_fetch(scope, group);
-    let gc = group_consumer(&handle.config, group)
-        .map_err(|e| error::from_kafka(&handle.name, "create group consumer", &e))?;
     // NotCoordinator/CoordinatorNotAvailable/CoordinatorLoadInProgress are
     // transient by protocol contract: the coordinator is moving or still
     // loading. Retry briefly instead of surfacing a 502 for a healthy cluster.
     let committed = {
-        use rdkafka::error::RDKafkaErrorCode::*;
         let mut attempt = 0u32;
         loop {
-            match gc.committed_offsets(tpl.clone(), ADMIN_TIMEOUT) {
+            match ffi::committed_offsets_blocking(handle, group, partitions, ADMIN_TIMEOUT) {
                 Ok(c) => break c,
-                Err(e) if attempt < 4 && matches!(
-                    e.rdkafka_error_code(),
-                    Some(NotCoordinator | CoordinatorNotAvailable | CoordinatorLoadInProgress)
-                ) => {
+                Err(e) if attempt < 4 && e.retriable && is_coordinator_hiccup(&e.message) => {
                     attempt += 1;
                     std::thread::sleep(std::time::Duration::from_millis(100 * u64::from(attempt)));
                 }
-                Err(e) => return Err(error::from_kafka(&handle.name, "fetch committed offsets", &e)),
+                Err(e) => return Err(e),
             }
         }
     };
+    // One batched watermark fetch for everything this group committed on that
+    // the request doesn't already know.
+    let needed: Vec<(String, i32)> = committed.keys().cloned().collect();
+    watermark_cache.ensure(handle, &needed)?;
     let mut out = Vec::new();
-    for e in committed.elements() {
-        if let Offset::Offset(c) = e.offset() {
-            let hi = cached_high_watermark(handle, watermark_cache, e.topic(), e.partition())?;
-            out.push(PartitionLag {
-                topic: e.topic().to_string(), partition: e.partition(),
-                committed_offset: c, end_offset: hi, lag: (hi - c).max(0),
-            });
-        }
+    for ((topic, partition), c) in committed {
+        let hi = watermark_cache.get(&topic, partition).ok_or_else(|| {
+            ApiError::kafka(&handle.name, format!("no offset reported for {topic}/{partition}"))
+        })?;
+        out.push(PartitionLag {
+            topic, partition,
+            committed_offset: c, end_offset: hi, lag: (hi - c).max(0),
+        });
     }
     out.sort_by_key(|a| (a.topic.clone(), a.partition));
     Ok(out)
+}
+
+/// The coordinator moving or still loading its state reads as a failure but
+/// isn't one — the same three conditions the old client-based path retried.
+fn is_coordinator_hiccup(message: &str) -> bool {
+    ["NOT_COORDINATOR", "COORDINATOR_NOT_AVAILABLE", "COORDINATOR_LOAD_IN_PROGRESS",
+     "Not coordinator", "Coordinator not available", "Coordinator load in progress"]
+        .iter()
+        .any(|needle| message.contains(needle))
 }
 
 /// Coordination-only groups (schema registry's "sr", Connect's "connect")
@@ -516,7 +544,7 @@ pub async fn topic_consumers(handle: Arc<ClusterHandle>, topic: String) -> Resul
             .map_err(|e| error::from_kafka(&handle.name, "list groups", &e))?;
         // Built on first use only: a poll that finds every group's lag fresh
         // must cost nothing beyond the group list above.
-        let mut tpl: Option<TopicPartitionList> = None;
+        let mut tpl: Option<Vec<(String, i32)>> = None;
         let mut watermark_cache = WatermarkCache::new();
         let mut groups = Vec::new();
         let mut unchecked = Vec::new();

@@ -14,6 +14,10 @@ protobuf = "3.7.2"
 protobuf-json-mapping = "3.7.2"
 protobuf-parse = "3.7.2"
 rdkafka = { version = "0.39.0", features = ["cmake-build", "ssl-vendored"] }
+# The raw C bindings rdkafka already compiles: a handful of librdkafka admin
+# calls (DescribeCluster, ListOffsets, ListConsumerGroupOffsets) exist in the
+# C library but were never wrapped by the safe layer — see cluster::ffi.
+rdkafka-sys = { version = "4.10", features = ["cmake-build", "ssl-vendored"] }
 reqwest = { version = "0.13.4", features = ["json"] }
 rust-embed = "8.12.0"
 serde = { version = "1.0.229", features = ["derive"] }

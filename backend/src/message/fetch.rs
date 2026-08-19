@@ -1,7 +1,7 @@
 use super::range::PartitionRange;
 use super::schema_registry::SchemaRegistry;
 use super::{decode, HeaderOut, MessageOut};
-use crate::cluster::{build_client_config, throwaway_group_id, ClusterHandle, ADMIN_TIMEOUT};
+use crate::cluster::{build_client_config, ffi, throwaway_group_id, ClusterHandle, ADMIN_TIMEOUT};
 use crate::config::ClusterConfig;
 use crate::error::ApiError;
 use rdkafka::consumer::{BaseConsumer, Consumer};
@@ -82,12 +82,18 @@ pub fn watermarks_blocking(handle: &ClusterHandle, topic: &str) -> Result<Vec<(i
     let t = md.topics().iter()
         .find(|t| t.name() == topic && !t.partitions().is_empty())
         .ok_or_else(|| ApiError::topic_not_found(&handle.name, topic))?;
+    // Two batched ListOffsets for the topic instead of a round trip per
+    // partition (the messages tab pays this on every window fetch).
+    let wanted: Vec<(String, i32)> = t.partitions().iter().map(|p| (topic.to_string(), p.id())).collect();
+    let lo = ffi::offsets_by_partition(handle, &wanted, ffi::OffsetSpec::Earliest, ADMIN_TIMEOUT)?;
+    let hi = ffi::offsets_by_partition(handle, &wanted, ffi::OffsetSpec::Latest, ADMIN_TIMEOUT)?;
     let mut wm = Vec::new();
     for p in t.partitions() {
-        let (lo, hi) = handle.consumer()
-            .fetch_watermarks(topic, p.id(), ADMIN_TIMEOUT)
-            .map_err(|e| crate::error::from_kafka(&handle.name, "fetch watermarks", &e))?;
-        wm.push((p.id(), lo, hi));
+        // A partition whose own entry failed is skipped rather than reported
+        // with a bogus range: the window would silently mis-scan it.
+        if let (Some(&lo), Some(&hi)) = (lo.get(&p.id()), hi.get(&p.id())) {
+            wm.push((p.id(), lo, hi));
+        }
     }
     Ok(wm)
 }

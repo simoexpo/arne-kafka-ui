@@ -112,14 +112,16 @@ pub fn sample_topic_blocking(handle: &ClusterHandle, topic: &str) -> Result<i64,
     let t = md.topics().iter()
         .find(|t| t.name() == topic && !t.partitions().is_empty())
         .ok_or_else(|| ApiError::topic_not_found(&handle.name, topic))?;
-    let mut total = 0i64;
-    for p in t.partitions() {
-        let (_, hi) = handle.consumer()
-            .fetch_watermarks(topic, p.id(), ADMIN_TIMEOUT)
-            .map_err(|e| error::from_kafka(&handle.name, "fetch watermarks", &e))?;
-        total += hi;
+    let wanted: Vec<(String, i32)> = t.partitions().iter().map(|p| (topic.to_string(), p.id())).collect();
+    // One batched ListOffsets for the whole topic. All-or-nothing: a partition
+    // whose entry failed would make the total silently omit its messages, so
+    // the sample is abandoned rather than reported wrong.
+    let ends = super::ffi::list_offsets_blocking(handle, &wanted, super::ffi::OffsetSpec::Latest, ADMIN_TIMEOUT)?;
+    if ends.len() != wanted.len() || ends.iter().any(|p| p.error.is_some()) {
+        let reason = ends.iter().find_map(|p| p.error.clone()).unwrap_or_else(|| "incomplete offsets".into());
+        return Err(ApiError::kafka(&handle.name, format!("sample throughput: {reason}")));
     }
-    Ok(total)
+    Ok(ends.iter().map(|p| p.offset).sum())
 }
 
 #[cfg(test)]
