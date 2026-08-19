@@ -20,7 +20,9 @@ export function Sparkline({
   const sy = (y: number) => h - pad - (y / yMax) * (h - 2 * pad)
   const pts = points.map((p) => `${sx(p.x).toFixed(1)},${sy(p.y).toFixed(1)}`).join(' ')
   return (
-    <svg role="img" aria-label="throughput sparkline" viewBox={`0 0 ${w} ${h}`} className="h-12 w-60">
+    <svg role="img" aria-label="throughput sparkline" viewBox={`0 0 ${w} ${h}`} // The plot area gets the palette's hover surface so the chart reads as
+      // its own region on the panel, not a line floating on the card.
+      className="h-12 w-60 rounded bg-zinc-100 dark:bg-zinc-800">
       <polyline
         points={pts}
         fill="none"

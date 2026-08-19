@@ -8,6 +8,13 @@ describe('Sparkline', () => {
     const svg = screen.getByRole('img', { name: /throughput/i })
     expect(svg.querySelector('polyline')).not.toBeNull()
   })
+  // Owner ruling 2026-08-19: the plot area carries its own background so the
+  // chart region reads as a chart instead of floating on the panel surface.
+  it('tints the plot area so the chart region is visible', () => {
+    render(<Sparkline points={[{ x: 1, y: 1 }, { x: 2, y: 3 }]} />)
+    expect(screen.getByRole('img', { name: /sparkline/i }).getAttribute('class')).toMatch(/bg-zinc-100/)
+  })
+
   it('renders placeholder text without points', () => {
     render(<Sparkline points={[]} />)
     expect(screen.getByText('no samples yet')).toBeInTheDocument()
