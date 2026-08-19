@@ -1,4 +1,3 @@
-import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { useParams } from '@tanstack/react-router'
 import { getTopicDetail } from '../api/client'
@@ -8,12 +7,13 @@ import { StalenessChip } from '../components/StalenessChip'
 import { ConfigTab } from './ConfigTab'
 import { ConsumersTab } from './ConsumersTab'
 import { Timeline } from './timeline/Timeline'
+import { useTabParam } from '../lib/useTabParam'
 
-const TABS = ['Messages', 'Partitions', 'Consumers', 'Config'] as const
+const TABS = ['Messages', 'Partitions', 'Activity', 'Config'] as const
 type Tab = (typeof TABS)[number]
 
 export function TopicDetailView({ cluster, topic }: { cluster: string; topic: string }) {
-  const [tab, setTab] = useState<Tab>('Messages')
+  const [tab, setTab] = useTabParam<Tab>(TABS, 'Messages')
   const detail = useQuery({
     queryKey: ['topic', cluster, topic],
     queryFn: ({ signal }) => getTopicDetail(cluster, topic, signal),
@@ -99,7 +99,7 @@ export function TopicDetailView({ cluster, topic }: { cluster: string; topic: st
             </Panel>
           </div>
         )}
-        {tab === 'Consumers' && (
+        {tab === 'Activity' && (
           <div className="h-full overflow-y-auto">
             <ConsumersTab cluster={cluster} topic={topic} />
           </div>

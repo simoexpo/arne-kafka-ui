@@ -2,8 +2,11 @@ import type { ReactNode } from 'react'
 import { ApiError } from '../api/client'
 import { describeError } from '../api/errors'
 
-export function Panel({ title, error, loading, hasData, className, children }: {
+export function Panel({ title, action, error, loading, hasData, className, children }: {
   title?: string
+  // Right-aligned in the header row, opposite the title — where a section's
+  // own freshness chip belongs (owner ruling 2026-08-19).
+  action?: ReactNode
   error?: unknown
   loading?: boolean
   hasData?: boolean
@@ -18,7 +21,12 @@ export function Panel({ title, error, loading, hasData, className, children }: {
   const failed = error != null
   return (
     <section className={`rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-950 ${className ?? ''}`}>
-      {title && <h2 className="mb-3 text-sm font-medium text-zinc-500 dark:text-zinc-400">{title}</h2>}
+      {(title || action) && (
+        <div data-testid="panel-header" className="mb-3 flex items-center justify-between gap-3">
+          <h2 className="text-sm font-medium text-zinc-500 dark:text-zinc-400">{title}</h2>
+          {action}
+        </div>
+      )}
       {failed && !hasData && <PanelError error={error} />}
       {failed && hasData && <PanelErrorBanner error={error} />}
       {failed && hasData && children}

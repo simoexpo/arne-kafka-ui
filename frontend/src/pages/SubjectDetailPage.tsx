@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { useMutation, useQuery } from '@tanstack/react-query'
 import { Link, useNavigate, useParams, useSearch } from '@tanstack/react-router'
+import { useTabParam } from '../lib/useTabParam'
 import { checkCompatibility, getCompatibilityLevel, getSubjectDetail, getSubjectStrategy } from '../api/client'
 import { CopyButton } from '../components/CopyButton'
 import { EncodingBadge } from '../components/messages/EncodingBadge'
@@ -140,7 +141,7 @@ const TABS = ['Definition', 'Compatibility'] as const
 type Tab = (typeof TABS)[number]
 
 export function SubjectDetailView({ cluster, subject }: { cluster: string; subject: string }) {
-  const [tab, setTab] = useState<Tab>('Definition')
+  const [tab, setTab] = useTabParam<Tab>(TABS, 'Definition')
   // The selected version lives in the URL (`?version=N`, absent = latest):
   // schema-id links land on an exact version, version views are shareable,
   // and back/forward walks the version history. The selector navigates.
@@ -242,7 +243,7 @@ export function SubjectDetailView({ cluster, subject }: { cluster: string; subje
                     navigate({
                       to: '/c/$cluster/schemas/$subject',
                       params: { cluster, subject },
-                      search: { version: Number(e.target.value) },
+                      search: (prev: Record<string, unknown>) => ({ ...prev, version: Number(e.target.value) }),
                     })
                   }
                   className="rounded border border-zinc-300 px-1 py-0.5 dark:border-zinc-700 dark:bg-zinc-950"

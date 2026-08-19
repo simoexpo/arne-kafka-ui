@@ -37,6 +37,26 @@ describe('ConsumersTab', () => {
     expect(screen.getByText('just now')).toBeInTheDocument()
   })
 
+  // Owner ruling 2026-08-19: each section's freshness chip belongs at the
+  // right of that section's own header, not floating inside its body.
+  it('each panel carries its own freshness chip in its header', async () => {
+    vi.mocked(client.getThroughput).mockResolvedValue({
+      topic: 'orders',
+      samples: [{ ts_ms: Date.now(), msgs_per_sec: 1, bytes_per_sec: null }],
+      as_of: Date.now(),
+    })
+    vi.mocked(client.getTopicConsumers).mockResolvedValue({
+      topic: 'orders', groups: [], unchecked: [], as_of: Date.now(),
+    })
+    renderWithQuery(<ConsumersTab cluster="prod" topic="orders" />)
+    await screen.findByText(/no consumer groups/i)
+    const headers = screen.getAllByTestId('panel-header')
+    const throughput = headers.find((h) => h.textContent?.includes('Throughput'))!
+    const consumers = headers.find((h) => h.textContent?.includes('Consumer groups'))!
+    expect(throughput).toHaveTextContent(/just now/i)
+    expect(consumers).toHaveTextContent(/just now/i)
+  })
+
   it('shows empty state when no group consumes the topic', async () => {
     vi.mocked(client.getThroughput).mockResolvedValue({ topic: 'orders', samples: [], as_of: null })
     vi.mocked(client.getTopicConsumers).mockResolvedValue({ topic: 'orders', groups: [], unchecked: [], as_of: 1000 })

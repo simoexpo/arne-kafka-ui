@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { fireEvent, screen } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { renderWithRouter } from '../test/utils'
 import { SubjectDetailView } from './SubjectDetailPage'
 import * as client from '../api/client'
@@ -76,6 +77,18 @@ describe('SubjectDetailView', () => {
     fireEvent.change(screen.getByLabelText('version'), { target: { value: '1' } })
     expect(await screen.findByText('id 40')).toBeInTheDocument()
     expect(vi.mocked(client.getSubjectDetail)).toHaveBeenLastCalledWith('prod', 'sr-avro-value', 1, expect.anything())
+  })
+
+  it('opens the tab named in the URL and keeps the version when tabs change', async () => {
+    vi.mocked(client.getSubjectDetail).mockResolvedValue(detail())
+    const { router } = await renderWithRouter(<SubjectDetailView cluster="prod" subject="sr-avro-value" />, {
+      initialPath: '/c/prod/schemas/sr-avro-value?version=1&tab=compatibility',
+    })
+    expect(screen.getByRole('tab', { name: 'Compatibility' })).toHaveAttribute('aria-selected', 'true')
+    await userEvent.click(screen.getByRole('tab', { name: 'Definition' }))
+    expect(router.state.location.search).toEqual(
+      expect.objectContaining({ tab: 'definition', version: 1 }),
+    )
   })
 
   it('a non-JSON schema (protobuf) renders verbatim, no soft-wrap', async () => {
