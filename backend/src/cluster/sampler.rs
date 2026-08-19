@@ -1,54 +1,100 @@
 use super::{ClusterHandle, ADMIN_TIMEOUT};
+use crate::error::{self, ApiError};
 use rdkafka::consumer::Consumer;
 use serde::Serialize;
 use std::collections::{HashMap, VecDeque};
-use std::sync::{Arc, RwLock};
-use std::time::Duration;
+use std::sync::RwLock;
+
+/// Demand-driven throughput sampling (owner design 2026-08-19). Nothing runs
+/// in the background: `GET /throughput` takes a sample for the topic it was
+/// asked about, at most once per sampling interval, so an unwatched cluster
+/// costs nothing at all.
+///
+/// Two timers govern it. The **sampling interval** (the caller's, from
+/// config) decouples sampling from request rate — several tabs polling one
+/// topic still produce one sample per interval. The **horizon** below bounds
+/// how old a baseline may be before it stops describing "now".
+const HORIZON_MS: i64 = 15 * 60_000;
+
+/// Slack on top of the sampling interval before a window counts as a hole:
+/// one slow poll must not read as "the viewer was away", and a zero interval
+/// (sample on every request) must still produce continuous stretches.
+const JITTER_MS: i64 = 5_000;
 
 #[derive(Debug, Clone, Copy)]
-pub struct TopicSample {
-    pub ts_ms: i64,
-    pub total_msgs: i64,
+struct TopicSample {
+    ts_ms: i64,
+    total_msgs: i64,
 }
 
 #[derive(Debug, Serialize)]
 pub struct RatePoint {
     pub ts_ms: i64,
     pub msgs_per_sec: f64,
-    pub bytes_per_sec: Option<f64>, // always None in v1 (no DescribeLogDirs in librdkafka)
+    /// How long this rate was measured over: one sampling interval while a
+    /// viewer is watching, longer for the first sample after they come back.
+    pub window_ms: i64,
+    /// False when the window spans more than one interval — the stretch was
+    /// never observed, so a chart must break its line here rather than draw
+    /// a rate we did not see.
+    pub continuous: bool,
+    pub bytes_per_sec: Option<f64>, // always None (no DescribeLogDirs in librdkafka)
 }
 
 pub struct SamplerStore {
-    window_len: usize,
     inner: RwLock<HashMap<String, VecDeque<TopicSample>>>,
 }
 
+impl Default for SamplerStore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SamplerStore {
-    pub fn new(window_len: usize) -> Self {
-        Self { window_len, inner: RwLock::new(HashMap::new()) }
+    pub fn new() -> Self {
+        Self { inner: RwLock::new(HashMap::new()) }
     }
 
-    pub fn record(&self, topic: &str, sample: TopicSample) {
+    /// Milliseconds since this topic's newest sample, or `None` if it has
+    /// never been sampled — the caller samples when this exceeds its interval.
+    pub fn age(&self, topic: &str, now_ms: i64) -> Option<i64> {
+        self.inner.read().unwrap().get(topic).and_then(|b| b.back().map(|s| now_ms - s.ts_ms))
+    }
+
+    pub fn record(&self, topic: &str, ts_ms: i64, total_msgs: i64) {
         let mut map = self.inner.write().unwrap();
         let buf = map.entry(topic.to_string()).or_default();
-        buf.push_back(sample);
-        while buf.len() > self.window_len {
-            buf.pop_front();
+        // Anything beyond the horizon can neither be drawn nor serve as a
+        // baseline; a shrinking total means the log itself moved backwards
+        // (recreated, trimmed, reset), which no rate can describe.
+        buf.retain(|s| ts_ms - s.ts_ms <= HORIZON_MS);
+        if buf.back().is_some_and(|last| total_msgs < last.total_msgs) {
+            buf.clear();
         }
+        buf.push_back(TopicSample { ts_ms, total_msgs });
     }
 
-    pub fn rate_points(&self, topic: &str) -> Vec<RatePoint> {
+    pub fn rate_points(&self, topic: &str, interval_ms: i64) -> Vec<RatePoint> {
         let map = self.inner.read().unwrap();
         let Some(buf) = map.get(topic) else { return Vec::new() };
-        buf.iter().zip(buf.iter().skip(1)).map(|(a, b)| {
-            let dt = (b.ts_ms - a.ts_ms) as f64 / 1000.0;
-            let dm = (b.total_msgs - a.total_msgs) as f64;
-            RatePoint {
-                ts_ms: b.ts_ms,
-                msgs_per_sec: if dt > 0.0 { (dm / dt).max(0.0) } else { 0.0 },
-                bytes_per_sec: None,
-            }
-        }).collect()
+        buf.iter()
+            .zip(buf.iter().skip(1))
+            .filter_map(|(a, b)| {
+                let window_ms = b.ts_ms - a.ts_ms;
+                if window_ms <= 0 {
+                    return None;
+                }
+                let delta = b.total_msgs - a.total_msgs;
+                Some(RatePoint {
+                    ts_ms: b.ts_ms,
+                    msgs_per_sec: delta as f64 / (window_ms as f64 / 1000.0),
+                    window_ms,
+                    continuous: window_ms <= interval_ms * 2 + JITTER_MS,
+                    bytes_per_sec: None,
+                })
+            })
+            .collect()
     }
 
     pub fn as_of(&self, topic: &str) -> Option<i64> {
@@ -56,182 +102,110 @@ impl SamplerStore {
     }
 }
 
-pub fn spawn_sampler(handle: Arc<ClusterHandle>, interval: Duration) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
-        loop {
-            let h = handle.clone();
-            let _ = tokio::task::spawn_blocking(move || sample_once(&h, ADMIN_TIMEOUT)).await;
-            tokio::time::sleep(interval).await;
-        }
-    })
-}
-
-/// For EVERY topic, internal (`__`-prefixed) included, sums its partitions'
-/// high watermarks via `fetch_hi`, tolerating a per-topic failure: one
-/// failed partition drops that topic's sample entirely rather than
-/// reporting a partial/misleading total (`complete` is all-or-nothing).
-///
-/// Internal topics are sampled deliberately, unlike `admin::list_topics`'s
-/// own `__`-prefixed skip: that skip only suppresses a *count* there, but
-/// `sampler.rate_points` is the sole source for `GET /throughput` — skipping
-/// the fetch here would silently and permanently empty an internal topic's
-/// Throughput/Sparkline panel with no explanation. Chart correctness beats
-/// the tick tax. The tax itself (every internal topic's watermark fetch runs
-/// on every sampler tick, even for topics no one has open) is a real cost worth
-/// revisiting with a better shape — e.g. lazy/on-demand sampling keyed off
-/// which topic's detail page is actually open — tracked in
-/// `docs/superpowers/plans/2026-08-15-sliding-window-followups.md`, not
-/// attempted here.
-fn topic_totals<'a>(
-    topics: impl IntoIterator<Item = (&'a str, &'a [i32])>,
-    mut fetch_hi: impl FnMut(&str, i32) -> Result<i64, ()>,
-) -> Vec<(String, i64)> {
-    let mut out = Vec::new();
-    for (name, partitions) in topics {
-        let mut total = 0i64;
-        let mut complete = true;
-        for &p in partitions {
-            match fetch_hi(name, p) {
-                Ok(hi) => total += hi,
-                Err(()) => { complete = false; break; }
-            }
-        }
-        if complete {
-            out.push((name.to_string(), total));
-        }
+/// One on-demand sample: the summed high watermark of every partition of
+/// `topic`. All-or-nothing — a single failed partition fails the sample
+/// rather than producing a total that silently omits data.
+pub fn sample_topic_blocking(handle: &ClusterHandle, topic: &str) -> Result<i64, ApiError> {
+    let md = handle.consumer()
+        .fetch_metadata(Some(topic), ADMIN_TIMEOUT)
+        .map_err(|e| error::from_kafka(&handle.name, "fetch metadata", &e))?;
+    let t = md.topics().iter()
+        .find(|t| t.name() == topic && !t.partitions().is_empty())
+        .ok_or_else(|| ApiError::topic_not_found(&handle.name, topic))?;
+    let mut total = 0i64;
+    for p in t.partitions() {
+        let (_, hi) = handle.consumer()
+            .fetch_watermarks(topic, p.id(), ADMIN_TIMEOUT)
+            .map_err(|e| error::from_kafka(&handle.name, "fetch watermarks", &e))?;
+        total += hi;
     }
-    out
-}
-
-fn sample_once(handle: &ClusterHandle, timeout: Duration) {
-    let now = crate::util::now_ms();
-    let md = match handle.consumer().fetch_metadata(None, timeout) {
-        Ok(md) => {
-            handle.reset_shared_failures();
-            md
-        }
-        Err(_) => {
-            // headless heal: without this, a wedged client starves the
-            // sampler forever until a browser opens /api/clusters
-            handle.note_shared_failure_and_maybe_recover();
-            return;
-        }
-    };
-    // Owned (name, partition_ids) pairs — `topic_totals` borrows from this,
-    // so the partition-id vectors need somewhere to live past the `map`
-    // that builds them; the actual skip/tolerate-failure policy is entirely
-    // in `topic_totals` itself.
-    let topics: Vec<(String, Vec<i32>)> = md.topics().iter()
-        .map(|t| (t.name().to_string(), t.partitions().iter().map(|p| p.id()).collect()))
-        .collect();
-    let topics_ref = topics.iter().map(|(name, ids)| (name.as_str(), ids.as_slice()));
-    let totals = topic_totals(topics_ref, |name, partition| {
-        handle.consumer().fetch_watermarks(name, partition, timeout).map(|(_, hi)| hi).map_err(|_| ())
-    });
-    for (name, total) in totals {
-        handle.sampler.record(&name, TopicSample { ts_ms: now, total_msgs: total });
-    }
+    Ok(total)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::cell::RefCell;
 
-    /// An internal (`__`-prefixed) topic must be sampled exactly like any
-    /// other topic. `admin::list_topics` skips them for its inventory
-    /// *count* — safe there, since nothing downstream renders a chart off
-    /// it — but `sampler.rate_points` is the sole source for
-    /// `GET /throughput`, which `ConsumersTab` renders as a live
-    /// Throughput/Sparkline panel for whatever topic the user opened,
-    /// internal or not. Skipping the fetch here would leave that chart
-    /// permanently, silently empty for internal topics — blank with no
-    /// explanation for why. Proven by pointer-free means: the fetch closure
-    /// IS invoked for the internal topic's every partition (the call
-    /// counter covers both topics' partitions), not merely that its
-    /// result isn't discarded.
+    /// Owner design 2026-08-19: sampling is demand-driven, so a topic's
+    /// samples can be minutes apart. A rate carries the window it was
+    /// measured over, and a window wider than the sampling interval is NOT
+    /// continuous — the chart must not draw a line across time nobody
+    /// measured.
     #[test]
-    fn internal_topics_are_sampled_like_any_other_topic() {
-        let calls = RefCell::new(0);
-        let topics = [("__consumer_offsets", &[0, 1, 2, 3][..]), ("orders", &[0][..])];
-        let totals = topic_totals(topics, |_name, _partition| {
-            *calls.borrow_mut() += 1;
-            Ok(10)
-        });
-        assert_eq!(totals, vec![("__consumer_offsets".to_string(), 40), ("orders".to_string(), 10)]);
-        assert_eq!(*calls.borrow(), 5, "every partition of every topic, internal included, must be fetched");
+    fn rate_is_delta_msgs_over_delta_seconds_and_carries_its_window() {
+        let s = SamplerStore::new();
+        s.record("t", 1_000, 0);
+        s.record("t", 11_000, 50);
+        let p = &s.rate_points("t", 10_000)[0];
+        assert!((p.msgs_per_sec - 5.0).abs() < f64::EPSILON);
+        assert_eq!(p.ts_ms, 11_000);
+        assert_eq!(p.window_ms, 10_000);
+        assert!(p.continuous, "consecutive samples one interval apart are continuous");
     }
 
     #[test]
-    fn a_topic_with_a_failed_partition_yields_no_sample() {
-        let totals = topic_totals([("orders", &[0, 1][..])], |_name, partition| {
-            if partition == 1 { Err(()) } else { Ok(5) }
-        });
-        assert!(totals.is_empty(), "an incomplete topic must not report a partial/misleading total");
+    fn a_gap_wider_than_the_interval_yields_a_rate_that_is_not_continuous() {
+        let s = SamplerStore::new();
+        s.record("t", 0, 0);
+        // viewer left and came back three minutes later
+        s.record("t", 180_000, 360);
+        let p = &s.rate_points("t", 10_000)[0];
+        assert!((p.msgs_per_sec - 2.0).abs() < f64::EPSILON, "average over the gap is real data");
+        assert_eq!(p.window_ms, 180_000);
+        assert!(!p.continuous, "the chart must break the line across an unmeasured stretch");
+    }
+
+    /// A baseline older than the horizon cannot describe "now": the old
+    /// samples are dropped and the new one starts fresh instead of
+    /// reporting an average over an hour as a current rate.
+    #[test]
+    fn a_sample_past_the_horizon_starts_a_fresh_baseline() {
+        let s = SamplerStore::new();
+        s.record("t", 0, 0);
+        s.record("t", HORIZON_MS + 1, 1_000_000);
+        assert!(s.rate_points("t", 10_000).is_empty(), "no rate across a discarded baseline");
+        assert_eq!(s.as_of("t"), Some(HORIZON_MS + 1));
+    }
+
+    /// Pruning is relative to the newest sample: everything strictly older
+    /// than the horizon goes, everything inside it stays.
+    #[test]
+    fn samples_older_than_the_horizon_are_pruned() {
+        let s = SamplerStore::new();
+        s.record("t", 0, 0);                    // dropped below: 906s old
+        s.record("t", 10_000, 10);              // kept: 896s old, inside 900s
+        s.record("t", HORIZON_MS - 5_000, 100);
+        s.record("t", HORIZON_MS + 6_000, 200);
+        let points = s.rate_points("t", 10_000);
+        assert_eq!(points.len(), 2, "three in-horizon samples make two rate points");
+        assert_eq!(points[0].ts_ms, HORIZON_MS - 5_000, "the sample past the horizon is gone");
+    }
+
+    /// Owner ruling 2026-08-19: a shrinking total means the topic was
+    /// recreated, trimmed by retention, or its offsets reset — a
+    /// discontinuity, not a rate of zero. Reporting 0 msg/s would be a
+    /// confident lie; the baseline breaks instead.
+    #[test]
+    fn a_shrinking_total_breaks_the_baseline_instead_of_reporting_zero() {
+        let s = SamplerStore::new();
+        s.record("t", 0, 100);
+        s.record("t", 10_000, 40);
+        assert!(s.rate_points("t", 10_000).is_empty(), "no rate is honest; 0 msg/s is not");
+        assert_eq!(s.as_of("t"), Some(10_000));
     }
 
     #[test]
-    fn multiple_real_topics_are_all_sampled() {
-        let totals = topic_totals(
-            [("a", &[0][..]), ("b", &[0, 1][..])],
-            |_name, _partition| Ok(7),
-        );
-        assert_eq!(totals, vec![("a".to_string(), 7), ("b".to_string(), 14)]);
-    }
-
-    #[test]
-    fn rate_is_delta_msgs_over_delta_seconds() {
-        let s = SamplerStore::new(10);
-        s.record("t", TopicSample { ts_ms: 1_000, total_msgs: 0 });
-        s.record("t", TopicSample { ts_ms: 11_000, total_msgs: 50 });
-        s.record("t", TopicSample { ts_ms: 21_000, total_msgs: 50 });
-        let points = s.rate_points("t");
-        assert_eq!(points.len(), 2);
-        assert!((points[0].msgs_per_sec - 5.0).abs() < f64::EPSILON);
-        assert_eq!(points[0].ts_ms, 11_000);
-        assert!((points[1].msgs_per_sec - 0.0).abs() < f64::EPSILON);
-    }
-
-    #[test]
-    fn window_evicts_oldest() {
-        let s = SamplerStore::new(3);
-        for i in 0..5 {
-            s.record("t", TopicSample { ts_ms: i * 1000, total_msgs: i * 10 });
-        }
-        assert_eq!(s.rate_points("t").len(), 2); // 3 samples kept → 2 rate points
-        assert_eq!(s.as_of("t"), Some(4000));
-    }
-
-    #[test]
-    fn shrinking_offsets_clamp_to_zero() {
-        // retention/truncation can shrink totals; a negative rate must never be shown
-        let s = SamplerStore::new(10);
-        s.record("t", TopicSample { ts_ms: 0, total_msgs: 100 });
-        s.record("t", TopicSample { ts_ms: 10_000, total_msgs: 40 });
-        assert_eq!(s.rate_points("t")[0].msgs_per_sec, 0.0);
+    fn age_reports_how_stale_the_newest_sample_is_and_drives_sampling() {
+        let s = SamplerStore::new();
+        assert_eq!(s.age("t", 5_000), None, "never sampled");
+        s.record("t", 1_000, 10);
+        assert_eq!(s.age("t", 5_000), Some(4_000));
     }
 
     #[test]
     fn unknown_topic_yields_empty() {
-        let s = SamplerStore::new(10);
-        assert!(s.rate_points("nope").is_empty());
+        let s = SamplerStore::new();
+        assert!(s.rate_points("nope", 10_000).is_empty());
         assert_eq!(s.as_of("nope"), None);
-    }
-
-    #[test]
-    fn failed_sample_feeds_the_recovery_counter() {
-        use crate::config::ClusterConfig;
-        use std::time::Duration;
-
-        let cfg = ClusterConfig { name: "s".into(), bootstrap: "127.0.0.1:1".into(), sasl: None, schema_registry: None };
-        let handle = ClusterHandle::connect(cfg).expect("lazy create");
-        // short timeout keeps this fast; production passes ADMIN_TIMEOUT
-        sample_once(&handle, Duration::from_millis(300));
-        assert_eq!(handle.health_failures.load(std::sync::atomic::Ordering::SeqCst), 1);
-        // second failed sample reaches the threshold and attempts a probe
-        // (fails against the dead endpoint — honest, bounded by HEALTH_TIMEOUT)
-        sample_once(&handle, Duration::from_millis(300));
-        assert_eq!(handle.health_failures.load(std::sync::atomic::Ordering::SeqCst), 2);
-        assert!(!handle.probe_in_flight.load(std::sync::atomic::Ordering::SeqCst));
     }
 }

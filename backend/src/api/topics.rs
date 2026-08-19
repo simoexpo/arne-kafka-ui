@@ -1,5 +1,6 @@
-use crate::cluster::admin;
+use crate::cluster::{admin, sampler};
 use crate::error::ApiError;
+use crate::util::now_ms;
 use crate::state::AppState;
 use axum::extract::{Path, State};
 use axum::Json;
@@ -21,12 +22,33 @@ pub async fn detail(
     Ok(Json(admin::topic_detail(handle, topic).await?))
 }
 
+/// This request IS the sampling trigger (owner design 2026-08-19): nothing
+/// samples in the background, so an unwatched cluster costs nothing. At most
+/// one sample per interval, however many tabs poll.
 pub async fn throughput(
     State(state): State<AppState>,
     Path((cluster, topic)): Path<(String, String)>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let handle = state.registry.get(&cluster)?;
-    let samples = handle.sampler.rate_points(&topic);
+    let interval_ms = (state.limits.sampler_interval_secs as i64) * 1000;
+    let due = handle.sampler.age(&topic, now_ms()).is_none_or(|age| age >= interval_ms);
+    if due {
+        let sample_handle = handle.clone();
+        let sample_topic = topic.clone();
+        let sampled = tokio::task::spawn_blocking(move || {
+            sampler::sample_topic_blocking(&sample_handle, &sample_topic)
+        })
+        .await
+        .map_err(ApiError::task_join)?;
+        match sampled {
+            Ok(total) => handle.sampler.record(&topic, now_ms(), total),
+            // Stale-but-visible: with history to show, a failed refresh must
+            // not blank the panel. With nothing to show, say why.
+            Err(e) if handle.sampler.as_of(&topic).is_none() => return Err(e),
+            Err(_) => {}
+        }
+    }
+    let samples = handle.sampler.rate_points(&topic, interval_ms);
     let as_of = handle.sampler.as_of(&topic);
     Ok(Json(json!({ "topic": topic, "samples": samples, "as_of": as_of })))
 }

@@ -4,7 +4,7 @@ import { getThroughput, getTopicConsumers } from '../api/client'
 import { Panel } from '../components/Panel'
 import { StalenessChip } from '../components/StalenessChip'
 import { Sparkline } from '../components/Sparkline'
-import { formatCount } from '../lib/format'
+import { formatAgo, formatCount } from '../lib/format'
 import type { TopicGroupLag } from '../api/types'
 
 const NO_COMMIT_TITLE = "this group holds an assignment but hasn't committed an offset yet, so its position is unknown"
@@ -39,7 +39,7 @@ export function ConsumersTab({ cluster, topic }: { cluster: string; topic: strin
         <div className="flex items-end gap-4">
           <div>
             <Sparkline
-              points={samples.map((s) => ({ x: s.ts_ms, y: s.msgs_per_sec }))}
+              points={samples.map((s) => ({ x: s.ts_ms, y: s.msgs_per_sec, gapBefore: !s.continuous }))}
               domain={latest ? { min: cutoff as number, max: latest.ts_ms } : undefined}
             />
             <p className="mt-1 text-xs text-zinc-500">last {windowMinutes}m</p>
@@ -48,6 +48,11 @@ export function ConsumersTab({ cluster, topic }: { cluster: string; topic: strin
             {current
               ? <span className="text-xl font-semibold">{current.msgs_per_sec.toFixed(1)} msg/s</span>
               : <span className="text-zinc-500">—</span>}
+            {current && !current.continuous && (
+              <p data-testid="rate-window" className="text-xs text-zinc-500">
+                averaged over {formatAgo(Date.now() - current.window_ms, Date.now())}
+              </p>
+            )}
           </div>
         </div>
       </Panel>

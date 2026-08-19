@@ -45,7 +45,16 @@ export interface TopicDetail {
   as_of: number
 }
 
-export interface RatePoint { ts_ms: number; msgs_per_sec: number; bytes_per_sec: number | null }
+export interface RatePoint {
+  ts_ms: number
+  msgs_per_sec: number
+  // How long this rate was measured over, and whether that stretch was
+  // actually observed: sampling only happens while someone watches the topic,
+  // so the first point after a return visit spans the time you were away.
+  window_ms: number
+  continuous: boolean
+  bytes_per_sec: number | null
+}
 export interface Throughput { topic: string; samples: RatePoint[]; as_of: number | null }
 
 export interface PartitionLag {

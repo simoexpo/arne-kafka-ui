@@ -103,7 +103,7 @@ impl ClusterHandle {
         Ok(Self {
             name: config.name.clone(),
             config,
-            sampler: Arc::new(sampler::SamplerStore::new(360)),
+            sampler: Arc::new(sampler::SamplerStore::new()),
             group_lag_cache: group_lag_cache::GroupLagCache::new(),
             schema_registry,
             consumer: RwLock::new(Arc::new(consumer)),

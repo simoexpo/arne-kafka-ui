@@ -15,6 +15,39 @@ describe('Sparkline', () => {
     expect(screen.getByRole('img', { name: /sparkline/i }).getAttribute('class')).toMatch(/bg-zinc-100/)
   })
 
+  // Owner design 2026-08-19: sampling only happens while someone watches, so
+  // a return visit leaves a hole. The line must break there instead of
+  // drawing a rate across time nobody measured.
+  it('breaks the line at a gap instead of interpolating across it', () => {
+    render(
+      <Sparkline
+        points={[
+          { x: 1000, y: 1 },
+          { x: 2000, y: 2 },
+          { x: 200_000, y: 3, gapBefore: true },
+          { x: 201_000, y: 4 },
+        ]}
+      />,
+    )
+    const lines = document.querySelectorAll('polyline')
+    expect(lines).toHaveLength(2)
+    expect(lines[0].getAttribute('points')?.trim().split(' ')).toHaveLength(2)
+    expect(lines[1].getAttribute('points')?.trim().split(' ')).toHaveLength(2)
+  })
+
+  // A one-sample stretch draws no stroke at all, which used to mean an empty
+  // chart for the first sample of a visit — each lone point gets a dot.
+  it('marks a lone point with a dot so a single sample is visible', () => {
+    const { container } = render(<Sparkline points={[{ x: 1000, y: 1 }, { x: 200_000, y: 3, gapBefore: true }]} />)
+    expect(container.querySelectorAll('circle')).toHaveLength(2)
+  })
+
+  it('a continuous stretch is drawn as a line, with no dots', () => {
+    const { container } = render(<Sparkline points={[{ x: 1000, y: 1 }, { x: 2000, y: 2 }]} />)
+    expect(container.querySelectorAll('polyline')).toHaveLength(1)
+    expect(container.querySelectorAll('circle')).toHaveLength(0)
+  })
+
   it('renders placeholder text without points', () => {
     render(<Sparkline points={[]} />)
     expect(screen.getByText('no samples yet')).toBeInTheDocument()

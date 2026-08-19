@@ -146,11 +146,18 @@ pub fn cluster_cfg(name: &str, bootstrap: &str) -> ClusterConfig {
 }
 
 pub fn state_for(bootstrap: &str, extra: Vec<ClusterConfig>) -> AppState {
+    state_with_limits(bootstrap, extra, Limits::default())
+}
+
+/// Throughput sampling is demand-driven and rate-limited by
+/// `sampler_interval_secs`; a 0 interval makes every request sample, so a
+/// test can take two samples back to back instead of waiting out a window.
+pub fn state_with_limits(bootstrap: &str, extra: Vec<ClusterConfig>, limits: Limits) -> AppState {
     let mut clusters = vec![cluster_cfg("test", bootstrap)];
     clusters.extend(extra);
     AppState {
         registry: Arc::new(ClusterRegistry::from_config(clusters).unwrap()),
-        limits: Arc::new(Limits::default()),
+        limits: Arc::new(limits),
     }
 }
 

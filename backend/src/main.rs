@@ -1,10 +1,8 @@
 use arne::cluster::registry::ClusterRegistry;
-use arne::cluster::sampler::spawn_sampler;
 use arne::config::Config;
 use arne::state::AppState;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -21,12 +19,10 @@ async fn main() -> anyhow::Result<()> {
         .into();
     let config = Config::load(&path)?; // fail fast, precise message
 
+    // Nothing samples in the background any more (owner design 2026-08-19):
+    // `GET /throughput` samples the topic it was asked about, so an idle
+    // cluster is never touched. See cluster::sampler.
     let registry = Arc::new(ClusterRegistry::from_config(config.clusters.clone())?);
-    for handle in registry.all() {
-        let name = handle.name.clone();
-        spawn_sampler(handle, Duration::from_secs(config.limits.sampler_interval_secs));
-        tracing::info!(cluster = %name, "sampler started");
-    }
     let state = AppState { registry, limits: Arc::new(config.limits.clone()) };
 
     let listener = tokio::net::TcpListener::bind(("0.0.0.0", config.server.port)).await?;

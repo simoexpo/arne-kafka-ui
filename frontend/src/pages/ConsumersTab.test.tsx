@@ -15,8 +15,8 @@ describe('ConsumersTab', () => {
     vi.mocked(client.getThroughput).mockResolvedValue({
       topic: 'orders',
       samples: [
-        { ts_ms: 1000, msgs_per_sec: 2.0, bytes_per_sec: null },
-        { ts_ms: 2000, msgs_per_sec: 5.5, bytes_per_sec: null },
+        { ts_ms: 1000, msgs_per_sec: 2.0, window_ms: 10_000, continuous: true, bytes_per_sec: null },
+        { ts_ms: 2000, msgs_per_sec: 5.5, window_ms: 10_000, continuous: true, bytes_per_sec: null },
       ],
       as_of: 2000,
     })
@@ -42,7 +42,7 @@ describe('ConsumersTab', () => {
   it('each panel carries its own freshness chip in its header', async () => {
     vi.mocked(client.getThroughput).mockResolvedValue({
       topic: 'orders',
-      samples: [{ ts_ms: Date.now(), msgs_per_sec: 1, bytes_per_sec: null }],
+      samples: [{ ts_ms: Date.now(), msgs_per_sec: 1, window_ms: 10_000, continuous: true, bytes_per_sec: null }],
       as_of: Date.now(),
     })
     vi.mocked(client.getTopicConsumers).mockResolvedValue({
@@ -55,6 +55,32 @@ describe('ConsumersTab', () => {
     const consumers = headers.find((h) => h.textContent?.includes('Consumer groups'))!
     expect(throughput).toHaveTextContent(/just now/i)
     expect(consumers).toHaveTextContent(/just now/i)
+  })
+
+  // The counter must say what window it measured: a rate taken across a
+  // return visit's gap is an average over that gap, not a current rate.
+  it('labels the rate with its window when the sample spans a gap', async () => {
+    vi.mocked(client.getThroughput).mockResolvedValue({
+      topic: 'orders',
+      samples: [{ ts_ms: Date.now(), msgs_per_sec: 0.4, window_ms: 180_000, continuous: false, bytes_per_sec: null }],
+      as_of: Date.now(),
+    })
+    vi.mocked(client.getTopicConsumers).mockResolvedValue({ topic: 'orders', groups: [], unchecked: [], as_of: Date.now() })
+    renderWithQuery(<ConsumersTab cluster="prod" topic="orders" />)
+    expect(await screen.findByText('0.4 msg/s')).toBeInTheDocument()
+    expect(screen.getByTestId('rate-window')).toHaveTextContent(/3m/)
+  })
+
+  it('a rate measured over one ordinary interval needs no window caveat', async () => {
+    vi.mocked(client.getThroughput).mockResolvedValue({
+      topic: 'orders',
+      samples: [{ ts_ms: Date.now(), msgs_per_sec: 5.5, window_ms: 10_000, continuous: true, bytes_per_sec: null }],
+      as_of: Date.now(),
+    })
+    vi.mocked(client.getTopicConsumers).mockResolvedValue({ topic: 'orders', groups: [], unchecked: [], as_of: Date.now() })
+    renderWithQuery(<ConsumersTab cluster="prod" topic="orders" />)
+    expect(await screen.findByText('5.5 msg/s')).toBeInTheDocument()
+    expect(screen.queryByTestId('rate-window')).not.toBeInTheDocument()
   })
 
   it('shows empty state when no group consumes the topic', async () => {
@@ -123,7 +149,7 @@ describe('ConsumersTab', () => {
   it('caption states the sparkline span so the chart never lies about its window', async () => {
     vi.mocked(client.getThroughput).mockResolvedValue({
       topic: 'orders',
-      samples: [{ ts_ms: 1000, msgs_per_sec: 2.0, bytes_per_sec: null }],
+      samples: [{ ts_ms: 1000, msgs_per_sec: 2.0, window_ms: 10_000, continuous: true, bytes_per_sec: null }],
       as_of: 1000,
     })
     vi.mocked(client.getTopicConsumers).mockResolvedValue({ topic: 'orders', groups: [], unchecked: [], as_of: 1000 })
@@ -136,9 +162,9 @@ describe('ConsumersTab', () => {
     vi.mocked(client.getThroughput).mockResolvedValue({
       topic: 'orders',
       samples: [
-        { ts_ms: 0, msgs_per_sec: 999, bytes_per_sec: null }, // 20 min before newest -> excluded
-        { ts_ms: newest - 10 * 60_000, msgs_per_sec: 3.0, bytes_per_sec: null }, // 10 min before -> included
-        { ts_ms: newest, msgs_per_sec: 5.5, bytes_per_sec: null },
+        { ts_ms: 0, msgs_per_sec: 999, window_ms: 10_000, continuous: true, bytes_per_sec: null }, // 20 min before newest -> excluded
+        { ts_ms: newest - 10 * 60_000, msgs_per_sec: 3.0, window_ms: 10_000, continuous: true, bytes_per_sec: null }, // 10 min before -> included
+        { ts_ms: newest, msgs_per_sec: 5.5, window_ms: 10_000, continuous: true, bytes_per_sec: null },
       ],
       as_of: newest,
     })

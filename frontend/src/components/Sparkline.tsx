@@ -2,7 +2,9 @@ export function Sparkline({
   points,
   domain,
 }: {
-  points: { x: number; y: number }[]
+  // `gapBefore` marks a point whose stretch back to its predecessor was never
+  // measured — the line breaks there rather than drawing a rate we didn't see.
+  points: { x: number; y: number; gapBefore?: boolean }[]
   domain?: { min: number; max: number }
 }) {
   if (points.length === 0) {
@@ -18,20 +20,41 @@ export function Sparkline({
   const yMax = Math.max(...ys, 1e-9)
   const sx = (x: number) => (xMax === xMin ? w / 2 : pad + ((x - xMin) / (xMax - xMin)) * (w - 2 * pad))
   const sy = (y: number) => h - pad - (y / yMax) * (h - 2 * pad)
-  const pts = points.map((p) => `${sx(p.x).toFixed(1)},${sy(p.y).toFixed(1)}`).join(' ')
+  // Segments break at points whose stretch back to the previous sample was
+  // never measured — sampling only runs while someone watches the topic, so a
+  // return visit leaves a real hole that must not be drawn as a rate.
+  const segments: { x: number; y: number }[][] = []
+  for (const p of points) {
+    if (segments.length === 0 || p.gapBefore) segments.push([])
+    segments[segments.length - 1].push(p)
+  }
   return (
-    <svg role="img" aria-label="throughput sparkline" viewBox={`0 0 ${w} ${h}`} // The plot area gets the palette's hover surface so the chart reads as
-      // its own region on the panel, not a line floating on the card.
-      className="h-12 w-60 rounded bg-zinc-100 dark:bg-zinc-800">
-      <polyline
-        points={pts}
-        fill="none"
-        stroke="currentColor"
-        strokeWidth="2"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-        className="text-blue-600 dark:text-blue-400"
-      />
+    // The plot area carries the palette's hover surface so the chart reads as
+    // its own region on the panel, not a line floating on the card.
+    <svg
+      role="img"
+      aria-label="throughput sparkline"
+      viewBox={`0 0 ${w} ${h}`}
+      className="h-12 w-60 rounded bg-zinc-100 dark:bg-zinc-800"
+    >
+      {segments.map((seg, i) => (
+        <g key={i}>
+          <polyline
+            points={seg.map((p) => `${sx(p.x).toFixed(1)},${sy(p.y).toFixed(1)}`).join(' ')}
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            className="text-blue-600 dark:text-blue-400"
+          />
+          {/* A segment of one draws no stroke — the first sample of a visit
+              would be an empty chart — so mark it with a dot. */}
+          {seg.length === 1 && (
+            <circle cx={sx(seg[0].x)} cy={sy(seg[0].y)} r="2" className="fill-blue-600 dark:fill-blue-400" />
+          )}
+        </g>
+      ))}
     </svg>
   )
 }

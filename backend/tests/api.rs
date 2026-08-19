@@ -3,6 +3,7 @@ mod support;
 use axum::http::StatusCode;
 use arne::api::app;
 use arne::cluster::{ClusterHandle, HealthStatus};
+use arne::config::Limits;
 use std::sync::Arc;
 use support::*;
 use tower::ServiceExt;
@@ -342,32 +343,56 @@ async fn unknown_group_is_404() {
     assert_eq!(body["code"], "group_not_found");
 }
 
+/// Owner design 2026-08-19: the request itself is the sampling trigger —
+/// nothing samples in the background, so an unwatched cluster costs nothing.
+/// Two polls spanning a produce must therefore yield a positive rate, and the
+/// rate must carry the window it was measured over.
 #[tokio::test]
-async fn throughput_endpoint_reports_positive_rate_after_producing() {
-    use arne::cluster::sampler::spawn_sampler;
-    use std::time::Duration;
-
+async fn throughput_samples_on_request_and_reports_a_positive_rate() {
     let bootstrap = start_kafka().await;
     create_topic(&bootstrap, "tp-topic", 1).await;
-    let state = state_for(&bootstrap, vec![]);
-    let handle = state.registry.get("test").unwrap();
-    let _task = spawn_sampler(handle, Duration::from_millis(500));
+    let state = state_with_limits(&bootstrap, vec![], Limits { sampler_interval_secs: 0, ..Limits::default() });
+    let url = "/api/clusters/test/topics/tp-topic/throughput";
+
+    // first poll: baseline only — a rate needs two samples
+    let (status, body) = get_json(app(state.clone()), url).await;
+    assert_eq!(status, 200);
+    assert!(body["samples"].as_array().unwrap().is_empty(), "one sample cannot make a rate: {body}");
+    assert!(body["as_of"].as_i64().unwrap() > 0, "the baseline is stamped: {body}");
 
     produce(&bootstrap, "tp-topic", 20).await;
-    // wait for at least two samples spanning the produce
-    let mut found = false;
-    for _ in 0..30 {
-        tokio::time::sleep(Duration::from_millis(500)).await;
-        let (status, body) = get_json(app(state.clone()), "/api/clusters/test/topics/tp-topic/throughput").await;
-        assert_eq!(status, 200);
-        let samples = body["samples"].as_array().unwrap();
-        if samples.iter().any(|p| p["msgs_per_sec"].as_f64().unwrap() > 0.0) {
-            assert!(body["as_of"].as_i64().unwrap() > 0);
-            found = true;
-            break;
-        }
-    }
-    assert!(found, "expected a positive throughput sample within 15s");
+
+    let (status, body) = get_json(app(state.clone()), url).await;
+    assert_eq!(status, 200);
+    let samples = body["samples"].as_array().unwrap();
+    assert!(!samples.is_empty(), "the second poll must sample again and produce a rate: {body}");
+    let p = samples.last().unwrap();
+    assert!(p["msgs_per_sec"].as_f64().unwrap() > 0.0, "20 messages arrived between polls: {body}");
+    assert!(p["window_ms"].as_i64().unwrap() > 0, "a rate states the window it covers: {body}");
+    assert_eq!(p["continuous"], true, "back-to-back polls are a continuous stretch: {body}");
+}
+
+/// A topic nobody has ever opened has no samples at all — proof that
+/// nothing sampled it in the background.
+#[tokio::test]
+async fn an_unwatched_topic_is_never_sampled() {
+    let bootstrap = start_kafka().await;
+    create_topic(&bootstrap, "unwatched-topic", 1).await;
+    produce(&bootstrap, "unwatched-topic", 5).await;
+    let state = state_for(&bootstrap, vec![]);
+    // give any (now deleted) background sweep every chance to run
+    tokio::time::sleep(std::time::Duration::from_millis(1_200)).await;
+    let handle = state.registry.get("test").unwrap();
+    assert_eq!(handle.sampler.as_of("unwatched-topic"), None, "no request, no sample");
+}
+
+#[tokio::test]
+async fn throughput_of_a_missing_topic_is_an_honest_404() {
+    let bootstrap = start_kafka().await;
+    let state = state_for(&bootstrap, vec![]);
+    let (status, body) = get_json(app(state), "/api/clusters/test/topics/no-such-topic-here/throughput").await;
+    assert_eq!(status, 404, "body: {body}");
+    assert_eq!(body["code"], "topic_not_found");
 }
 
 #[tokio::test]
