@@ -20,6 +20,8 @@ pub fn app(state: AppState) -> Router {
         .route("/api/clusters/{cluster}/topics/{topic}/tail", get(messages::tail_sse))
         .route("/api/clusters/{cluster}/topics/{topic}/timeline", get(messages::timeline_sse))
         .route("/api/clusters/{cluster}/groups", get(groups::list))
+        // distinct path, not /groups/lag: a group could legitimately be named "lag"
+        .route("/api/clusters/{cluster}/group-lag", get(groups::lag))
         .route("/api/clusters/{cluster}/groups/{group}", get(groups::detail))
         .route("/api/clusters/{cluster}/schema-registry", get(subjects::registry_settings))
         .route("/api/clusters/{cluster}/schema-ids/{id}", get(subjects::subject_of_id))

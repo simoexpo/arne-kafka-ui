@@ -168,7 +168,22 @@ pub struct GroupSummary {
     pub state: String,
     pub protocol_type: String,
     pub member_count: usize,
-    pub total_lag: i64,
+}
+
+/// One group's cluster-wide lag, asked for by name. `total_lag` is `null`
+/// when the group has committed nothing anywhere (so it has no position to
+/// be behind) or when its lookup failed — `error` then says why.
+#[derive(Debug, Serialize, Clone)]
+pub struct GroupLagEntry {
+    pub group_id: String,
+    pub total_lag: Option<i64>,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub struct GroupLagBatch {
+    pub groups: Vec<GroupLagEntry>,
+    pub as_of: i64,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -416,31 +431,94 @@ pub async fn list_groups(handle: Arc<ClusterHandle>) -> Result<GroupList, ApiErr
     .map_err(ApiError::task_join)?
 }
 
+/// ONE group-list call, nothing per group (owner design 2026-08-19). This used
+/// to inspect every group's committed offsets — one request each, plus a fresh
+/// client each — which made simply opening the consumers page cost O(groups).
+/// Lag now comes from `groups_lag`, for the rows a viewer can actually see.
 fn list_groups_blocking(handle: &ClusterHandle) -> Result<GroupList, ApiError> {
-    {
-        let gl = handle.consumer()
-            .fetch_group_list(None, ADMIN_TIMEOUT)
-            .map_err(|e| error::from_kafka(&handle.name, "list groups", &e))?;
-        let tpl = group_lag_topic_partitions(handle, None)?;
+    let gl = handle.consumer()
+        .fetch_group_list(None, ADMIN_TIMEOUT)
+        .map_err(|e| error::from_kafka(&handle.name, "list groups", &e))?;
+    let mut groups: Vec<GroupSummary> = gl.groups().iter()
+        .filter(|g| is_consumer_group_protocol(g.protocol_type()))
+        .map(|g| GroupSummary {
+            group_id: g.name().to_string(),
+            state: g.state().to_string(),
+            protocol_type: g.protocol_type().to_string(),
+            member_count: g.members().len(),
+        })
+        .collect();
+    groups.sort_by(|a, b| a.group_id.cmp(&b.group_id));
+    Ok(GroupList { groups, as_of: now_ms() })
+}
+
+/// Cluster-wide lag for the named groups only — what a paginated consumers
+/// list asks for, one page at a time. Shares the per-group cache and
+/// single-flight with the topic tab, so several tabs showing overlapping
+/// pages still inspect each group once per tier.
+pub async fn groups_lag(handle: Arc<ClusterHandle>, groups: Vec<String>) -> Result<GroupLagBatch, ApiError> {
+    tokio::task::spawn_blocking(move || {
+        use super::group_lag_cache::{CachedEntry, LIVE_TTL_MS};
+        let now = now_ms();
+        // Built on first use only: a page whose groups are all cached costs
+        // nothing at all.
+        let mut tpl: Option<Vec<(String, i32)>> = None;
         let mut watermark_cache = WatermarkCache::new();
-        let mut groups = Vec::new();
-        for g in gl.groups() {
-            if !is_consumer_group_protocol(g.protocol_type()) {
-                continue;
-            }
-            let lag = group_lag_blocking(handle, "*", g.name(), &tpl, &mut watermark_cache)?;
-            groups.push(GroupSummary {
-                group_id: g.name().to_string(),
-                state: g.state().to_string(),
-                protocol_type: g.protocol_type().to_string(),
-                member_count: g.members().len(),
-                total_lag: lag.iter().map(|p| p.lag).sum(),
+        let mut out = Vec::with_capacity(groups.len());
+        for group in groups {
+            let fresh = handle
+                .group_lag_cache
+                .freshness(CLUSTER_WIDE, &group)
+                .filter(|f| now - f.sampled_at < LIVE_TTL_MS)
+                .and_then(|_| handle.group_lag_cache.get(CLUSTER_WIDE, &group));
+            let entry = match fresh {
+                Some(e) => Ok(e),
+                None => match handle
+                    .lag_flight
+                    .begin_or_wait((CLUSTER_WIDE.to_string(), group.clone()), single_flight::MAX_WAIT)
+                {
+                    // Someone else is reading this group right now.
+                    None => match handle.group_lag_cache.get(CLUSTER_WIDE, &group) {
+                        Some(e) => Ok(e),
+                        None => Err("still being read by another request".to_string()),
+                    },
+                    Some(_flight) => {
+                        let tpl = match tpl {
+                            Some(ref t) => t,
+                            None => tpl.insert(group_lag_topic_partitions(&handle, None)?),
+                        };
+                        match group_lag_blocking(&handle, CLUSTER_WIDE, &group, tpl, &mut watermark_cache) {
+                            Ok(partitions) => {
+                                let entry = CachedEntry { partitions, sampled_at: now_ms() };
+                                handle.group_lag_cache.insert(CLUSTER_WIDE, &group, entry.clone());
+                                Ok(entry)
+                            }
+                            Err(e) => Err(lag_error_reason(&e)),
+                        }
+                    }
+                },
+            };
+            out.push(match entry {
+                // No committed offsets anywhere means no position to be
+                // behind — undetermined, never a confident 0.
+                Ok(e) if e.partitions.is_empty() => GroupLagEntry { group_id: group, total_lag: None, error: None },
+                Ok(e) => GroupLagEntry {
+                    group_id: group,
+                    total_lag: Some(e.partitions.iter().map(|p| p.lag).sum()),
+                    error: None,
+                },
+                Err(reason) => GroupLagEntry { group_id: group, total_lag: None, error: Some(reason) },
             });
         }
-        groups.sort_by(|a, b| a.group_id.cmp(&b.group_id));
-        Ok(GroupList { groups, as_of: now_ms() })
-    }
+        Ok(GroupLagBatch { groups: out, as_of: now })
+    })
+    .await
+    .map_err(ApiError::task_join)?
 }
+
+/// Cache scope for lag that spans every topic a group reads, as the consumers
+/// list shows it — as opposed to one topic's tab.
+const CLUSTER_WIDE: &str = "*";
 
 pub async fn group_detail(handle: Arc<ClusterHandle>, group: String) -> Result<GroupDetail, ApiError> {
     tokio::task::spawn_blocking(move || {

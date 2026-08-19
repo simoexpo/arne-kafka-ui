@@ -88,8 +88,12 @@ export interface GroupSummary {
   state: string
   protocol_type: string
   member_count: number
-  total_lag: number
 }
+// Lag is asked for by name, for the rows on screen — see getGroupLag.
+// `total_lag` is null when the group has committed nothing anywhere (no
+// position to be behind) or when the lookup failed (`error` says why).
+export interface GroupLagEntry { group_id: string; total_lag: number | null; error: string | null }
+export interface GroupLagBatch { groups: GroupLagEntry[]; as_of: number }
 export interface GroupList { groups: GroupSummary[]; as_of: number }
 
 export interface SubjectList { subjects: string[]; as_of: number }

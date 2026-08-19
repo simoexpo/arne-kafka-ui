@@ -56,7 +56,7 @@ describe('CommandPalette', () => {
       as_of: Date.now(),
     })
     vi.mocked(client.getGroups).mockResolvedValue({
-      groups: [{ group_id: 'billing', state: 'Stable', protocol_type: 'consumer', member_count: 1, total_lag: 0 }],
+      groups: [{ group_id: 'billing', state: 'Stable', protocol_type: 'consumer', member_count: 1 }],
       as_of: Date.now(),
     })
   })

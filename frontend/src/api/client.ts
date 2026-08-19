@@ -1,6 +1,6 @@
 import type {
   ClustersResponse, GroupDetail, GroupList, Overview, CompatibilityLevel, CompatibilityResult, RegistrySettings, SchemaIdSubject, SubjectDetail, SubjectList, SubjectStrategyInfo,
-  Throughput, TopicConsumers, TopicDetail, TopicList,
+  Throughput, TopicConsumers, TopicDetail, TopicList, GroupLagBatch,
 } from './types'
 
 export class ApiError extends Error {
@@ -68,6 +68,10 @@ export const getTopicDetail = (c: string, t: string, signal?: AbortSignal) => fe
 export const getTopicConsumers = (c: string, t: string, signal?: AbortSignal) => fetchJson<TopicConsumers>(`/api/clusters/${enc(c)}/topics/${enc(t)}/consumers`, signal)
 export const getThroughput = (c: string, t: string, signal?: AbortSignal) => fetchJson<Throughput>(`/api/clusters/${enc(c)}/topics/${enc(t)}/throughput`, signal)
 export const getGroups = (c: string, signal?: AbortSignal) => fetchJson<GroupList>(`/api/clusters/${enc(c)}/groups`, signal)
+// Only the visible page's groups: lag costs one broker request per group, so
+// off-screen rows are never computed (owner design 2026-08-19).
+export const getGroupLag = (c: string, groups: string[], signal?: AbortSignal) =>
+  fetchJson<GroupLagBatch>(`/api/clusters/${enc(c)}/group-lag?groups=${groups.map(enc).join(',')}`, signal)
 export const getGroupDetail = (c: string, g: string, signal?: AbortSignal) => fetchJson<GroupDetail>(`/api/clusters/${enc(c)}/groups/${enc(g)}`, signal)
 export const getSubjects = (c: string, signal?: AbortSignal) => fetchJson<SubjectList>(`/api/clusters/${enc(c)}/subjects`, signal)
 export const getRegistrySettings = (c: string, signal?: AbortSignal) => fetchJson<RegistrySettings>(`/api/clusters/${enc(c)}/schema-registry`, signal)

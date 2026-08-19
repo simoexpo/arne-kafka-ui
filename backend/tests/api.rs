@@ -150,8 +150,13 @@ async fn groups_list_and_detail_report_lag() {
 
     let (status, body) = get_json(app(state.clone()), "/api/clusters/test/groups").await;
     assert_eq!(status, 200);
-    let g = body["groups"].as_array().unwrap().iter()
+    body["groups"].as_array().unwrap().iter()
         .find(|g| g["group_id"] == "lag-group").expect("group listed");
+    // lag comes from the scoped endpoint now, for the rows a viewer can see
+    let (status, body) = get_json(app(state.clone()), "/api/clusters/test/group-lag?groups=lag-group").await;
+    assert_eq!(status, 200);
+    let g = body["groups"].as_array().unwrap().iter()
+        .find(|g| g["group_id"] == "lag-group").expect("lag reported");
     assert_eq!(g["total_lag"], 6); // 10 produced - 4 committed
 
     let (status, body) = get_json(app(state), "/api/clusters/test/groups/lag-group").await;
@@ -538,6 +543,67 @@ async fn concurrent_list_requests_share_one_snapshot() {
         }
         assert_eq!(stamps.len(), 1, "{url}: eight callers, one shared snapshot (got {stamps:?})");
     }
+}
+
+/// Owner design 2026-08-19: the consumers list stops paying one offset
+/// request per group. `/groups` is now identity only — a single group-list
+/// call, no lag — and lag is asked for by name, for the rows on screen.
+#[tokio::test]
+async fn groups_list_is_identity_only_and_lag_is_requested_per_group() {
+    use arne::cluster::admin::group_offset_fetch_count;
+
+    let bootstrap = start_kafka().await;
+    create_topic(&bootstrap, "gl-a", 1).await;
+    create_topic(&bootstrap, "gl-b", 1).await;
+    produce(&bootstrap, "gl-a", 5).await;
+    produce(&bootstrap, "gl-b", 5).await;
+    consume_and_commit(&bootstrap, "gl-a", "gl-group-a", 2).await;
+    consume_and_commit(&bootstrap, "gl-b", "gl-group-b", 5).await;
+    let state = state_for(&bootstrap, vec![]);
+
+    let before_a = group_offset_fetch_count("*", "gl-group-a");
+    let before_b = group_offset_fetch_count("*", "gl-group-b");
+    let (status, body) = get_json(app(state.clone()), "/api/clusters/test/groups").await;
+    assert_eq!(status, 200);
+    let listed = body["groups"].as_array().unwrap();
+    let a = listed.iter().find(|g| g["group_id"] == "gl-group-a").expect("listed");
+    assert_eq!(a["state"], "Empty");
+    assert_eq!(a["member_count"], 0);
+    assert!(a.get("total_lag").is_none(), "the list carries no lag any more: {body}");
+    assert_eq!(
+        group_offset_fetch_count("*", "gl-group-a"), before_a,
+        "listing groups must not inspect any group's offsets"
+    );
+    assert_eq!(group_offset_fetch_count("*", "gl-group-b"), before_b);
+
+    // lag for exactly the groups asked for
+    let (status, body) = get_json(
+        app(state.clone()),
+        "/api/clusters/test/group-lag?groups=gl-group-b",
+    ).await;
+    assert_eq!(status, 200, "body: {body}");
+    let entries = body["groups"].as_array().unwrap();
+    assert_eq!(entries.len(), 1, "only the requested group: {body}");
+    assert_eq!(entries[0]["group_id"], "gl-group-b");
+    assert_eq!(entries[0]["total_lag"], 0, "it committed everything: {body}");
+    assert!(body["as_of"].as_i64().unwrap() > 0);
+    assert!(
+        group_offset_fetch_count("*", "gl-group-a") == before_a,
+        "a group nobody asked about is never inspected"
+    );
+
+    // an unknown group is answerable, not an error
+    let (status, body) = get_json(
+        app(state.clone()),
+        "/api/clusters/test/group-lag?groups=gl-group-a,does-not-exist",
+    ).await;
+    assert_eq!(status, 200, "body: {body}");
+    let entries = body["groups"].as_array().unwrap();
+    assert_eq!(entries.len(), 2);
+    let ghost = entries.iter().find(|g| g["group_id"] == "does-not-exist").unwrap();
+    assert!(ghost["total_lag"].is_null(), "no commits, no lag: {body}");
+    let a = entries.iter().find(|g| g["group_id"] == "gl-group-a").unwrap();
+    assert_eq!(a["total_lag"], 3, "committed 2 of 5: {body}");
 }
 
 #[tokio::test]
