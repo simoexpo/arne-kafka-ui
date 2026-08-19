@@ -55,8 +55,24 @@ export interface PartitionLag {
   end_offset: number
   lag: number
 }
-export interface TopicGroupLag { group_id: string; state: string; total_lag: number; partitions: PartitionLag[] }
-export interface TopicConsumers { topic: string; groups: TopicGroupLag[]; as_of: number }
+export interface TopicGroupLag {
+  group_id: string
+  state: string
+  // null when this group's position on the topic isn't determinable: it holds
+  // an assignment but hasn't committed yet, or `error` says the lookup failed.
+  total_lag: number | null
+  partitions: PartitionLag[]
+  error: string | null
+}
+// Groups whose offset lookup failed while it was unknown whether they consume
+// this topic at all — disclosed rather than listed or silently dropped.
+export interface UncheckedGroup { group_id: string; error: string }
+export interface TopicConsumers {
+  topic: string
+  groups: TopicGroupLag[]
+  unchecked: UncheckedGroup[]
+  as_of: number
+}
 
 export interface GroupSummary {
   group_id: string

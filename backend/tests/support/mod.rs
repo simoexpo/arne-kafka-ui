@@ -225,6 +225,16 @@ impl Drop for LiveConsumer {
 }
 
 pub fn spawn_live_consumer(bootstrap: &str, topic: &str, group: &str) -> LiveConsumer {
+    spawn_live_consumer_inner(bootstrap, topic, group, true)
+}
+
+/// Joined and assigned, but never commits — the "actively consuming, position
+/// unknown until it commits" case.
+pub fn spawn_live_consumer_without_commits(bootstrap: &str, topic: &str, group: &str) -> LiveConsumer {
+    spawn_live_consumer_inner(bootstrap, topic, group, false)
+}
+
+fn spawn_live_consumer_inner(bootstrap: &str, topic: &str, group: &str, commit: bool) -> LiveConsumer {
     let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let stop_flag = stop.clone();
     let (label, bootstrap, topic, group) =
@@ -237,7 +247,7 @@ pub fn spawn_live_consumer(bootstrap: &str, topic: &str, group: &str) -> LiveCon
         let mut cc = client(&bootstrap);
         cc.set("group.id", &group)
             .set("auto.offset.reset", "earliest")
-            .set("enable.auto.commit", "true")
+            .set("enable.auto.commit", if commit { "true" } else { "false" })
             .set("auto.commit.interval.ms", "500");
         let consumer: BaseConsumer = match cc.create() {
             Ok(c) => c,

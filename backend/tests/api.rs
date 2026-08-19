@@ -288,6 +288,41 @@ async fn topic_consumers_lists_stopped_groups_that_still_hold_offsets() {
     assert_eq!(group_metadata_fetch_count(Some("ttl-topic")), 1);
 }
 
+/// Owner ruling 2026-08-19: a group that holds an assignment for the topic is
+/// listed even before it commits — it IS consuming; where it reads is decided
+/// by auto.offset.reset or a seek, so its lag is undetermined, never 0.
+#[tokio::test]
+async fn topic_consumers_lists_an_assigned_group_that_has_not_committed() {
+    let bootstrap = start_kafka().await;
+    create_topic(&bootstrap, "nc-topic", 1).await;
+    produce(&bootstrap, "nc-topic", 4).await;
+    let _live = spawn_live_consumer_without_commits(&bootstrap, "nc-topic", "nc-group");
+    let state = state_for(&bootstrap, vec![]);
+
+    // Readiness via this group's own detail endpoint: uncached, and it touches
+    // only partitions THIS group committed on (none), so it cannot disturb
+    // another test's per-topic call counters the way /groups would.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    loop {
+        let (_, body) = get_json(app(state.clone()), "/api/clusters/test/groups/nc-group").await;
+        let joined = body["state"] == "Stable"
+            && body["members"].as_array().is_some_and(|m| m.len() == 1);
+        if joined { break; }
+        assert!(std::time::Instant::now() < deadline, "nc-group never joined: {body}");
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+
+    let (status, body) = get_json(app(state.clone()), "/api/clusters/test/topics/nc-topic/consumers").await;
+    assert_eq!(status, 200);
+    let g = body["groups"].as_array().unwrap().iter()
+        .find(|g| g["group_id"] == "nc-group")
+        .unwrap_or_else(|| panic!("an assigned group must be listed before it commits: {body}"))
+        .clone();
+    assert!(g["total_lag"].is_null(), "lag is undetermined, not 0: {g}");
+    assert!(g["error"].is_null(), "nothing failed — the group simply has no committed offset");
+    assert_eq!(g["partitions"].as_array().unwrap().len(), 0);
+}
+
 #[tokio::test]
 async fn subjects_without_a_configured_registry_answer_an_honest_envelope() {
     let bootstrap = start_kafka().await;

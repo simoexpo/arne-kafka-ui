@@ -7,6 +7,8 @@ import { Sparkline } from '../components/Sparkline'
 import { formatCount } from '../lib/format'
 import type { TopicGroupLag } from '../api/types'
 
+const NO_COMMIT_TITLE = "this group holds an assignment but hasn't committed an offset yet, so its position is unknown"
+
 export function ConsumersTab({ cluster, topic }: { cluster: string; topic: string }) {
   const throughput = useQuery({
     queryKey: ['throughput', cluster, topic],
@@ -54,6 +56,14 @@ export function ConsumersTab({ cluster, topic }: { cluster: string; topic: strin
             <GroupRow key={g.group_id} group={g} />
           ))}
         </div>
+        {consumers.data && consumers.data.unchecked.length > 0 && (
+          <p data-testid="unchecked-groups" className="mt-2 text-xs text-amber-700 dark:text-amber-500">
+            {consumers.data.unchecked.length}{' '}
+            {consumers.data.unchecked.length === 1 ? "group couldn't" : "groups couldn't"} be checked, so
+            they may or may not read this topic:{' '}
+            {consumers.data.unchecked.map((u) => `${u.group_id} (${u.error})`).join(', ')}
+          </p>
+        )}
       </Panel>
     </div>
   )
@@ -71,7 +81,20 @@ function GroupRow({ group }: { group: TopicGroupLag }) {
         <span className="font-mono font-medium">{group.group_id}</span>
         <span className="text-xs text-zinc-500">{group.state}</span>
         <span className="ml-auto">
-          lag <span className={group.total_lag > 0 ? 'font-semibold' : 'text-zinc-400'}>{formatCount(group.total_lag)}</span>
+          lag{' '}
+          {group.total_lag === null ? (
+            <span
+              data-testid="group-lag"
+              className="cursor-help text-zinc-400"
+              title={group.error ? `Kafka couldn't read this group's offsets — ${group.error}` : NO_COMMIT_TITLE}
+            >
+              —
+            </span>
+          ) : (
+            <span data-testid="group-lag" className={group.total_lag > 0 ? 'font-semibold' : 'text-zinc-400'}>
+              {formatCount(group.total_lag)}
+            </span>
+          )}
         </span>
       </summary>
       {open && (
