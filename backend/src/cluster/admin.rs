@@ -1,4 +1,4 @@
-use super::{ffi, ClusterHandle, ADMIN_TIMEOUT};
+use super::{ffi, single_flight, ClusterHandle, ADMIN_TIMEOUT};
 use crate::error::{self, ApiError};
 use crate::util::now_ms;
 use rdkafka::admin::{AdminOptions, ResourceSpecifier};
@@ -573,24 +573,42 @@ pub async fn topic_consumers(handle: Arc<ClusterHandle>, topic: String) -> Resul
             let entry = match cached {
                 Some(e) => Ok(e),
                 None => {
-                    let tpl = match tpl {
-                        // The topic's partition list is the whole request's
-                        // input, so failing to build it IS a panel-level
-                        // error — unlike one group's offsets below.
-                        Some(ref t) => t,
-                        None => tpl.insert(group_lag_topic_partitions(&handle, Some(&topic))?),
-                    };
-                    match group_lag_blocking(&handle, &topic, g.name(), tpl, &mut watermark_cache) {
-                        Ok(partitions) => {
-                            // stamped on completion, not at request start: a long
-                            // sweep must not record its last entries as already stale
-                            let entry = CachedEntry { partitions, sampled_at: now_ms() };
-                            handle.group_lag_cache.insert(&topic, g.name(), entry.clone());
-                            Ok(entry)
+                    // Another poll may already be reading this group: wait for
+                    // it rather than issuing the same request again.
+                    let flight = handle.lag_flight.begin_or_wait(
+                        (topic.clone(), g.name().to_string()),
+                        single_flight::MAX_WAIT,
+                    );
+                    match flight {
+                        None => match handle.group_lag_cache.get(&topic, g.name()) {
+                            Some(e) => Ok(e),
+                            // Its refresh outlasted our wait. Say so rather
+                            // than duplicating the work or dropping the row;
+                            // the next poll picks up its result.
+                            None => Err("still being read by another request".to_string()),
+                        },
+                        Some(_flight) => {
+                            let tpl = match tpl {
+                                // The topic's partition list is the whole
+                                // request's input, so failing to build it IS a
+                                // panel-level error — unlike one group's
+                                // offsets below.
+                                Some(ref t) => t,
+                                None => tpl.insert(group_lag_topic_partitions(&handle, Some(&topic))?),
+                            };
+                            match group_lag_blocking(&handle, &topic, g.name(), tpl, &mut watermark_cache) {
+                                Ok(partitions) => {
+                                    // stamped on completion, not at request start: a long
+                                    // sweep must not record its last entries as already stale
+                                    let entry = CachedEntry { partitions, sampled_at: now_ms() };
+                                    handle.group_lag_cache.insert(&topic, g.name(), entry.clone());
+                                    Ok(entry)
+                                }
+                                // failures are never cached: the next poll retries
+                                // instead of serving a remembered gap
+                                Err(e) => Err(lag_error_reason(&e)),
+                            }
                         }
-                        // failures are never cached: the next poll retries
-                        // instead of serving a remembered gap
-                        Err(e) => Err(lag_error_reason(&e)),
                     }
                 }
             };

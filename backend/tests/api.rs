@@ -479,6 +479,42 @@ async fn ffi_committed_offsets_read_a_groups_position_without_a_throwaway_consum
     assert!(untouched.expect("unknown group is answerable").is_empty());
 }
 
+/// Owner design 2026-08-19: k tabs polling the same topic must not multiply
+/// the broker cost. Concurrent requests for one group's lag ride the refresh
+/// already in flight — the counter proves only one inspection happened.
+#[tokio::test]
+async fn concurrent_polls_of_one_topic_inspect_each_group_once() {
+    use arne::cluster::admin::group_offset_fetch_count;
+
+    let bootstrap = start_kafka().await;
+    create_topic(&bootstrap, "sf-topic", 1).await;
+    produce(&bootstrap, "sf-topic", 6).await;
+    consume_and_commit(&bootstrap, "sf-topic", "sf-group", 3).await;
+    let state = state_for(&bootstrap, vec![]);
+    let url = "/api/clusters/test/topics/sf-topic/consumers";
+
+    let before = group_offset_fetch_count("sf-topic", "sf-group");
+    // eight simultaneous pollers, as eight open tabs would be
+    let mut set = tokio::task::JoinSet::new();
+    for _ in 0..8 {
+        let state = state.clone();
+        set.spawn(async move { get_json(app(state), url).await });
+    }
+    let mut served = 0;
+    while let Some(res) = set.join_next().await {
+        let (status, body) = res.unwrap();
+        assert_eq!(status, 200);
+        assert!(
+            body["groups"].as_array().unwrap().iter().any(|g| g["group_id"] == "sf-group"),
+            "every caller is served the group, whoever did the work: {body}"
+        );
+        served += 1;
+    }
+    assert_eq!(served, 8);
+    let inspections = group_offset_fetch_count("sf-topic", "sf-group") - before;
+    assert_eq!(inspections, 1, "one inspection served all eight pollers, not eight");
+}
+
 #[tokio::test]
 async fn overview_reports_brokers_and_counts() {
     let bootstrap = start_kafka().await;

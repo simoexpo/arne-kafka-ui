@@ -1,4 +1,4 @@
-use crate::cluster::{admin, sampler};
+use crate::cluster::{admin, sampler, single_flight};
 use crate::error::ApiError;
 use crate::util::now_ms;
 use crate::state::AppState;
@@ -35,17 +35,24 @@ pub async fn throughput(
     if due {
         let sample_handle = handle.clone();
         let sample_topic = topic.clone();
+        // Concurrent pollers of the same topic wait for the sample already in
+        // flight rather than taking one of their own.
         let sampled = tokio::task::spawn_blocking(move || {
-            sampler::sample_topic_blocking(&sample_handle, &sample_topic)
+            let _flight = sample_handle
+                .sampler_flight
+                .begin_or_wait(sample_topic.clone(), single_flight::MAX_WAIT)?;
+            Some(sampler::sample_topic_blocking(&sample_handle, &sample_topic))
         })
         .await
         .map_err(ApiError::task_join)?;
         match sampled {
-            Ok(total) => handle.sampler.record(&topic, now_ms(), total),
+            Some(Ok(total)) => handle.sampler.record(&topic, now_ms(), total),
             // Stale-but-visible: with history to show, a failed refresh must
             // not blank the panel. With nothing to show, say why.
-            Err(e) if handle.sampler.as_of(&topic).is_none() => return Err(e),
-            Err(_) => {}
+            Some(Err(e)) if handle.sampler.as_of(&topic).is_none() => return Err(e),
+            Some(Err(_)) => {}
+            // Someone else's sample was in flight; serve what it left us.
+            None => {}
         }
     }
     let samples = handle.sampler.rate_points(&topic, interval_ms);

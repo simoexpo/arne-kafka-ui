@@ -4,6 +4,7 @@ pub mod ffi;
 pub mod group_lag_cache;
 pub mod registry;
 pub mod sampler;
+pub mod single_flight;
 
 use crate::config::{ClusterConfig, SaslMechanism};
 use crate::message::schema_registry::SchemaRegistry;
@@ -64,7 +65,12 @@ pub struct ClusterHandle {
     pub name: String,
     pub config: ClusterConfig,
     pub sampler: Arc<sampler::SamplerStore>,
+    /// One throughput sample per topic at a time, and one lag refresh per
+    /// (topic, group) at a time: concurrent pollers wait for the in-flight
+    /// refresh instead of duplicating it (owner design 2026-08-19).
+    pub sampler_flight: single_flight::SingleFlight<String>,
     pub group_lag_cache: group_lag_cache::GroupLagCache,
+    pub lag_flight: single_flight::SingleFlight<(String, String)>,
     pub schema_registry: Option<Arc<SchemaRegistry>>,
     consumer: RwLock<Arc<BaseConsumer>>,
     admin: RwLock<Arc<AdminClient<DefaultClientContext>>>,
@@ -99,7 +105,9 @@ impl ClusterHandle {
             name: config.name.clone(),
             config,
             sampler: Arc::new(sampler::SamplerStore::new()),
+            sampler_flight: single_flight::SingleFlight::new(),
             group_lag_cache: group_lag_cache::GroupLagCache::new(),
+            lag_flight: single_flight::SingleFlight::new(),
             schema_registry,
             consumer: RwLock::new(Arc::new(consumer)),
             admin: RwLock::new(Arc::new(admin)),
