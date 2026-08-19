@@ -11,6 +11,6 @@ export function useTabParam<T extends string>(tabs: readonly T[], fallback: T): 
   const tab = tabs.find((t) => t.toLowerCase() === raw) ?? fallback
   // Other search params (a subject's `version`) are carried through untouched.
   const setTab = (next: T) =>
-    navigate({ search: (prev: Record<string, unknown>) => ({ ...prev, tab: next.toLowerCase() }) })
+    navigate({ to: '.', search: (prev) => ({ ...prev, tab: next.toLowerCase() }) })
   return [tab, setTab]
 }
