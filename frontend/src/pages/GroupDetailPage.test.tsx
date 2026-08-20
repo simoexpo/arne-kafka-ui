@@ -75,8 +75,10 @@ describe('GroupDetailView', () => {
     const first = (await screen.findByTestId('stat-topics')).parentElement!
     const second = screen.getByTestId('stat-assignment strategy').parentElement!
     expect(first).not.toBe(second)
-    expect(first.className).toContain('grid-cols-3')
-    expect(second.className).toContain('grid-cols-3')
+    // the same template on both, whatever the ratio is
+    expect(first.className).toMatch(/grid-cols-\[[^\]]+\]/)
+    expect(second.className.match(/grid-cols-\[[^\]]+\]/)?.[0])
+      .toBe(first.className.match(/grid-cols-\[[^\]]+\]/)?.[0])
     // what it consumes on top, how it behaves below
     expect(first.lastElementChild).toBe(screen.getByTestId('stat-total lag'))
     expect(second.lastElementChild).toBe(screen.getByTestId('stat-protocol'))

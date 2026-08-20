@@ -47,13 +47,14 @@ export function GroupDetailView({ cluster, group }: { cluster: string; group: st
           {detail.data && (
             <>
               {/* One column template for both rows, so a figure always sits
-                  under the one above it. */}
-              <dl className="grid grid-cols-3 gap-3 text-sm">
+                  under the one above it. The first column is wider because an
+                  assignor class is a long word where the others are short. */}
+              <dl className="grid grid-cols-[1.6fr_1fr_1fr] gap-3 text-sm">
                 <Stat label="topics" value={String(topics)} />
                 <Stat label="partitions" value={String(partitionCount)} />
                 <TotalLagStat rows={detail.data.partitions} unreadable={detail.data.unreadable_partitions} />
               </dl>
-              <dl className="mt-4 grid grid-cols-3 gap-3 text-sm">
+              <dl className="mt-4 grid grid-cols-[1.6fr_1fr_1fr] gap-3 text-sm">
                 <Stat label="assignment strategy" value={assignorClass(detail.data.assignment_strategy)} />
                 <Stat label="status" value={detail.data.state} />
                 <Stat label="protocol" value={detail.data.group_type || '—'} />
