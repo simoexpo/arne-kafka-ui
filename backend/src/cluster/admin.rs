@@ -521,39 +521,82 @@ pub async fn topic_names(handle: Arc<ClusterHandle>) -> Result<Vec<String>, ApiE
 /// Just under the consumers page's 10s poll.
 pub const GROUPS_TTL_MS: i64 = 8_000;
 
-pub async fn list_groups(handle: Arc<ClusterHandle>) -> Result<GroupList, ApiError> {
-    tokio::task::spawn_blocking(move || {
-        snapshot::cached_or_refresh(
-            &handle.groups_snapshot,
-            &handle.snapshot_flight,
-            "groups",
-            GROUPS_TTL_MS,
-            || list_groups_blocking(&handle),
-        )
-    })
-    .await
-    .map_err(ApiError::task_join)?
+/// One group as the coordinator describes it, including each live member's
+/// assigned topics. The assignments are why this is cached rather than
+/// re-fetched per view: a topic's tab needs them to tell a current consumer
+/// from one that moved away, and they arrive in the same call the consumers
+/// list already makes (owner ruling 2026-08-20).
+#[derive(Clone)]
+pub struct GroupMembership {
+    pub group_id: String,
+    pub state: String,
+    pub protocol_type: String,
+    pub member_count: usize,
+    /// One entry per live member: `Some(topics)` when its assignment decoded,
+    /// `None` when it did not — which callers must treat as "could be anything".
+    pub member_topics: Vec<Option<Vec<String>>>,
 }
 
-/// ONE group-list call, nothing per group (owner design 2026-08-19). This used
-/// to inspect every group's committed offsets — one request each, plus a fresh
-/// client each — which made simply opening the consumers page cost O(groups).
-/// Lag now comes from `groups_lag`, for the rows a viewer can actually see.
-fn list_groups_blocking(handle: &ClusterHandle) -> Result<GroupList, ApiError> {
+/// Every consumer group on the cluster, described once and shared by every
+/// view that needs to know who exists.
+#[derive(Clone)]
+pub struct GroupRoster {
+    pub groups: Vec<GroupMembership>,
+    pub as_of: i64,
+}
+
+/// The roster, read-through: one group-list call per window, shared by the
+/// consumers list and every topic's tab.
+///
+/// Public as a test hook — sharing must be asserted with an explicit window,
+/// not by racing requests against a production TTL.
+#[doc(hidden)]
+pub fn group_roster_cached(handle: &ClusterHandle, ttl_ms: i64) -> Result<GroupRoster, ApiError> {
+    snapshot::cached_or_refresh(
+        &handle.groups_snapshot,
+        &handle.snapshot_flight,
+        "groups",
+        ttl_ms,
+        || fetch_group_roster(handle),
+    )
+}
+
+fn fetch_group_roster(handle: &ClusterHandle) -> Result<GroupRoster, ApiError> {
     let gl = handle.consumer()
         .fetch_group_list(None, ADMIN_TIMEOUT)
         .map_err(|e| error::from_kafka(&handle.name, "list groups", &e))?;
-    let mut groups: Vec<GroupSummary> = gl.groups().iter()
+    let mut groups: Vec<GroupMembership> = gl.groups().iter()
         .filter(|g| is_consumer_group_protocol(g.protocol_type()))
-        .map(|g| GroupSummary {
+        .map(|g| GroupMembership {
             group_id: g.name().to_string(),
             state: g.state().to_string(),
             protocol_type: g.protocol_type().to_string(),
             member_count: g.members().len(),
+            member_topics: g.members().iter()
+                .map(|m| m.assignment().and_then(super::assignment::assigned_topics))
+                .collect(),
         })
         .collect();
     groups.sort_by(|a, b| a.group_id.cmp(&b.group_id));
-    Ok(GroupList { groups, as_of: now_ms() })
+    Ok(GroupRoster { groups, as_of: now_ms() })
+}
+
+pub async fn list_groups(handle: Arc<ClusterHandle>) -> Result<GroupList, ApiError> {
+    tokio::task::spawn_blocking(move || {
+        let roster = group_roster_cached(&handle, GROUPS_TTL_MS)?;
+        Ok(GroupList {
+            groups: roster.groups.iter().map(|g| GroupSummary {
+                group_id: g.group_id.clone(),
+                state: g.state.clone(),
+                protocol_type: g.protocol_type.clone(),
+                member_count: g.member_count,
+            }).collect(),
+            // The roster's own sample time, not this request's.
+            as_of: roster.as_of,
+        })
+    })
+    .await
+    .map_err(ApiError::task_join)?
 }
 
 /// Cluster-wide lag for the named groups only — what a paginated consumers
@@ -769,20 +812,16 @@ pub async fn topic_consumers(handle: Arc<ClusterHandle>, topic: String) -> Resul
     tokio::task::spawn_blocking(move || {
         use super::group_lag_cache::{classify, Classification};
         let now = now_ms();
-        let gl = handle.consumer()
-            .fetch_group_list(None, ADMIN_TIMEOUT)
-            .map_err(|e| error::from_kafka(&handle.name, "list groups", &e))?;
+        // The SAME roster the consumers list reads: who exists, and what each
+        // live member is assigned to. One group-list call per window now serves
+        // every tab and every topic (owner ruling 2026-08-20) — the cost being
+        // that classification is as old as the roster.
+        let roster = group_roster_cached(&handle, GROUPS_TTL_MS)?;
         let mut groups = Vec::new();
         let mut unchecked = Vec::new();
         let mut oldest_served: Option<i64> = None;
-        for g in gl.groups() {
-            if !is_consumer_group_protocol(g.protocol_type()) {
-                continue;
-            }
-            let member_topics: Vec<Option<Vec<String>>> = g.members().iter()
-                .map(|m| m.assignment().and_then(super::assignment::assigned_topics))
-                .collect();
-            let class = classify(&member_topics, &topic);
+        for g in &roster.groups {
+            let class = classify(&g.member_topics, &topic);
             if class == Classification::MovedAway {
                 continue;
             }
@@ -793,10 +832,10 @@ pub async fn topic_consumers(handle: Arc<ClusterHandle>, topic: String) -> Resul
             // the topic appears at all.
             let shows_rows_here = handle
                 .group_lag
-                .with(&g.name().to_string(), |snapshot| snapshot.covers(&topic))
+                .with(&g.group_id, |snapshot| snapshot.covers(&topic))
                 .unwrap_or(false);
             let ttl = commits_ttl(&class, shows_rows_here);
-            let outcome = group_lag_cached(&handle, g.name(), ttl, now);
+            let outcome = group_lag_cached(&handle, &g.group_id, ttl, now);
             let pair_at = outcome.as_ref().ok().map(|e| e.sampled_at);
             // Trouble on another topic is none of this tab's business; only a
             // gap in THIS topic's partitions makes its total unstateable.
@@ -808,7 +847,7 @@ pub async fn topic_consumers(handle: Arc<ClusterHandle>, topic: String) -> Resul
             let narrowed = outcome
                 .map(|e| e.value.narrowed(Some(&topic)))
                 .map_err(|e| lag_error_reason(&e));
-            match inspection_of(g.name(), g.state(), &class, narrowed) {
+            match inspection_of(&g.group_id, &g.state, &class, narrowed) {
                 Inspection::Listed(mut row) => {
                     if missing_here > 0 {
                         // The rows we do have stay visible; the total does not
@@ -829,7 +868,9 @@ pub async fn topic_consumers(handle: Arc<ClusterHandle>, topic: String) -> Resul
         }
         groups.sort_by(|a, b| a.group_id.cmp(&b.group_id));
         unchecked.sort_by(|a, b| a.group_id.cmp(&b.group_id));
-        Ok(TopicConsumers { topic, groups, unchecked, as_of: oldest_served.unwrap_or(now) })
+        // With nothing rendered, the honest stamp is when we learned who
+        // exists — not the moment of the request.
+        Ok(TopicConsumers { topic, groups, unchecked, as_of: oldest_served.unwrap_or(roster.as_of) })
     })
     .await
     .map_err(ApiError::task_join)?

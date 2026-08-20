@@ -101,7 +101,7 @@ pub struct ClusterHandle {
     /// count stops multiplying broker calls (owner design 2026-08-19).
     pub topics_snapshot: snapshot::SnapshotCache<admin::TopicList>,
     pub overview_snapshot: snapshot::SnapshotCache<admin::Overview>,
-    pub groups_snapshot: snapshot::SnapshotCache<admin::GroupList>,
+    pub groups_snapshot: snapshot::SnapshotCache<admin::GroupRoster>,
     pub health_snapshot: snapshot::SnapshotCache<ClusterHealth>,
     pub snapshot_flight: single_flight::SingleFlight<&'static str>,
     /// Per-entity answers: one topic's partitions+config, one group's detail.
