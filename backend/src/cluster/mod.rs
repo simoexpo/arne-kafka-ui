@@ -85,20 +85,18 @@ pub struct ClusterHandle {
     /// (topic, group) at a time: concurrent pollers wait for the in-flight
     /// refresh instead of duplicating it (owner design 2026-08-19).
     pub sampler_flight: single_flight::SingleFlight<String>,
-    /// Lag for ONE topic's partitions, as that topic's tab shows it. Carries
-    /// the two-tier policy, because "this group has no offsets on this topic"
-    /// is a fact worth remembering for a while.
-    pub group_lag_cache: group_lag_cache::GroupLagCache,
-    pub lag_flight: single_flight::SingleFlight<(String, String)>,
-    /// Lag across every topic a group reads, as the consumers list shows it.
-    /// A separate cache, not a scope inside the one above: different question,
-    /// different key, different freshness policy (owner ruling 2026-08-20).
-    pub cluster_lag_cache: keyed_cache::KeyedCache<String, Vec<admin::PartitionLag>>,
+    /// What each group has COMMITTED, everywhere — ONE entry per group,
+    /// serving every view. Lag is not stored: it is computed from these
+    /// commits against `watermarks` at read time, so the consumers list, a
+    /// topic's tab and a group's page share one fetch (owner ruling
+    /// 2026-08-20). Freshness is the reader's policy — see
+    /// `group_lag_cache::commits_ttl`.
+    pub group_commits: keyed_cache::KeyedCache<String, Vec<group_lag_cache::CommittedOffset>>,
+    pub commits_flight: single_flight::SingleFlight<String>,
     /// Every partition's high watermark, shared by the four call sites that
     /// need one (partitions tab, messages window, throughput sampling, lag).
     /// Each reader brings its own freshness policy — see `admin::Watermarks`.
     pub watermarks: keyed_cache::KeyedCache<(String, i32), i64>,
-    pub cluster_lag_flight: single_flight::SingleFlight<String>,
     /// Whole-response snapshots shared by every tab for a few seconds, so tab
     /// count stops multiplying broker calls (owner design 2026-08-19).
     pub topics_snapshot: snapshot::SnapshotCache<admin::TopicList>,
@@ -147,11 +145,9 @@ impl ClusterHandle {
             config,
             sampler: Arc::new(sampler::SamplerStore::new()),
             sampler_flight: single_flight::SingleFlight::new(),
-            group_lag_cache: group_lag_cache::GroupLagCache::new(),
-            lag_flight: single_flight::SingleFlight::new(),
-            cluster_lag_cache: keyed_cache::KeyedCache::new(group_lag_cache::EVICT_AGE_MS),
+            group_commits: keyed_cache::KeyedCache::new(group_lag_cache::EVICT_AGE_MS),
+            commits_flight: single_flight::SingleFlight::new(),
             watermarks: keyed_cache::KeyedCache::new(WATERMARK_HORIZON_MS),
-            cluster_lag_flight: single_flight::SingleFlight::new(),
             topics_snapshot: snapshot::SnapshotCache::new(),
             overview_snapshot: snapshot::SnapshotCache::new(),
             groups_snapshot: snapshot::SnapshotCache::new(),

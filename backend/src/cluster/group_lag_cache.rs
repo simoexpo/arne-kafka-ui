@@ -12,7 +12,7 @@
 //! member-less new committer (documented, at most `IDLE_TTL_MS` late).
 
 use super::admin::PartitionLag;
-use super::keyed_cache::KeyedCache;
+
 
 /// Deliberately BELOW the consumers tab's 10s poll interval: an entry
 /// refreshed on one poll must be due again on the next, or a poll would
@@ -70,103 +70,76 @@ pub fn classify(member_topics: &[Option<Vec<String>>], topic: &str) -> Classific
     }
 }
 
-/// Lag rows for one `(scope, group)`, where scope is a topic name or `"*"`
-/// for the cluster-wide view the consumers list shows.
-pub type LagKey = (String, String);
-
-#[derive(Clone)]
-pub struct CachedEntry {
-    pub partitions: Vec<PartitionLag>,
-    pub sampled_at: i64,
+/// What one group has committed, as the cluster reports it: every partition
+/// it holds an offset on, across every topic. ONE entry per group serves every
+/// view — the consumers list sums it whole, a topic's tab filters it to that
+/// topic — because lag is no longer stored, it is computed from these commits
+/// against the shared watermark cache at read time (owner ruling 2026-08-20).
+#[derive(Clone, Debug, PartialEq)]
+pub struct CommittedOffset {
+    pub topic: String,
+    pub partition: i32,
+    pub offset: i64,
 }
 
-/// The two facts a due-check needs, read without cloning the rows.
-#[derive(Clone, Copy)]
-pub struct Freshness {
-    pub sampled_at: i64,
-    pub has_rows: bool,
-}
-
-/// An entry is due when absent, or older than its tier. Rows the viewer can
-/// see (a current consumer, or an inspected group holding offsets on the
-/// topic) live on the fast tier; inspected groups without offsets on the
-/// topic live on the slow one.
-pub fn needs_refresh(class: &Classification, entry: Option<Freshness>, now_ms: i64) -> bool {
-    let Some(e) = entry else { return true };
-    let ttl = match class {
+/// How old a group's commits may be for the purpose at hand. The 8s/60s split
+/// is the same policy as before, but it now applies to a SHARED entry at read
+/// time rather than being baked into separate per-topic entries: a group that
+/// shows nothing on the topic you're looking at is worth re-reading only once
+/// a minute, even though a group that shows rows is worth 8 seconds.
+pub fn commits_ttl(class: &Classification, shows_rows_here: bool) -> i64 {
+    match class {
         Classification::AssignedToTopic => LIVE_TTL_MS,
-        Classification::MustInspect => {
-            if e.has_rows { LIVE_TTL_MS } else { IDLE_TTL_MS }
-        }
-        // callers skip MovedAway groups before asking; this arm only
-        // keeps the match total
-        Classification::MovedAway => return false,
-    };
-    now_ms - e.sampled_at >= ttl
-}
-
-/// Lag storage: a `KeyedCache` with the tier policy above layered on top.
-/// The generic cache holds "one expiring value per key"; which TTL applies to
-/// which row is domain policy and stays here.
-pub struct GroupLagCache {
-    inner: KeyedCache<LagKey, Vec<PartitionLag>>,
-}
-
-impl Default for GroupLagCache {
-    fn default() -> Self {
-        Self::new()
+        Classification::MustInspect if shows_rows_here => LIVE_TTL_MS,
+        Classification::MustInspect => IDLE_TTL_MS,
+        // callers skip MovedAway groups before asking; this arm only keeps
+        // the match total
+        Classification::MovedAway => IDLE_TTL_MS,
     }
 }
 
-impl GroupLagCache {
-    pub fn new() -> Self {
-        Self { inner: KeyedCache::new(EVICT_AGE_MS) }
-    }
-
-    pub fn freshness(&self, scope: &str, group: &str) -> Option<Freshness> {
-        self.inner.get(&key(scope, group)).map(|e| Freshness {
-            sampled_at: e.sampled_at,
-            has_rows: !e.value.is_empty(),
-        })
-    }
-
-    pub fn get(&self, scope: &str, group: &str) -> Option<CachedEntry> {
-        self.inner
-            .get(&key(scope, group))
-            .map(|e| CachedEntry { partitions: e.value, sampled_at: e.sampled_at })
-    }
-
-    pub fn insert(&self, scope: &str, group: &str, entry: CachedEntry) {
-        self.inner.insert(key(scope, group), entry.partitions, entry.sampled_at);
-    }
-
-    /// Drop `scope`'s entries whose group is gone from the caller's group
-    /// list. `as_of` is that caller's snapshot time: an entry sampled at or
-    /// after it belongs to a request with a newer view of the cluster, so it
-    /// survives — otherwise two concurrent polls would delete each other's
-    /// fresh work and re-fetch it.
-    pub fn evict(&self, scope: &str, keep_groups: &dyn Fn(&str) -> bool, as_of: i64) {
-        self.inner.retain(as_of, |(s, g), sampled_at| {
-            s != scope || sampled_at >= as_of || keep_groups(g)
+/// Lag for the partitions in `commits`, optionally narrowed to one topic.
+///
+/// `head` is the shared watermark cache's answer for a partition, and `None`
+/// there means "we could not read it" — a partition whose watermark fetch
+/// failed. That is an error rather than a skipped row: silently omitting a
+/// partition would under-report the group's lag, which is worse than saying
+/// we don't know.
+pub fn lag_rows(
+    commits: &[CommittedOffset],
+    only_topic: Option<&str>,
+    head: impl Fn(&str, i32) -> Option<i64>,
+) -> Result<Vec<PartitionLag>, String> {
+    let mut out = Vec::new();
+    for c in commits.iter().filter(|c| only_topic.is_none_or(|t| c.topic == t)) {
+        let Some(end_offset) = head(&c.topic, c.partition) else {
+            return Err(format!("no offset reported for {}/{}", c.topic, c.partition));
+        };
+        out.push(PartitionLag {
+            topic: c.topic.clone(),
+            partition: c.partition,
+            committed_offset: c.offset,
+            end_offset,
+            lag: (end_offset - c.offset).max(0),
         });
     }
+    out.sort_by(|a, b| (a.topic.as_str(), a.partition).cmp(&(b.topic.as_str(), b.partition)));
+    Ok(out)
 }
 
-fn key(scope: &str, group: &str) -> LagKey {
-    (scope.to_string(), group.to_string())
+/// The partitions `commits` covers, narrowed to one topic when asked — what a
+/// caller hands to the watermark cache before computing lag.
+pub fn partitions_of(commits: &[CommittedOffset], only_topic: Option<&str>) -> Vec<(String, i32)> {
+    commits
+        .iter()
+        .filter(|c| only_topic.is_none_or(|t| c.topic == t))
+        .map(|c| (c.topic.clone(), c.partition))
+        .collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn lag_row() -> PartitionLag {
-        PartitionLag { topic: "t".into(), partition: 0, committed_offset: 1, end_offset: 2, lag: 1 }
-    }
-
-    fn fresh(sampled_at: i64, has_rows: bool) -> Option<Freshness> {
-        Some(Freshness { sampled_at, has_rows })
-    }
 
     #[test]
     fn empty_group_must_be_inspected() {
@@ -203,7 +176,7 @@ mod tests {
     /// nothing right now" — a rebalance revocation, or a member idle because
     /// the topic has fewer partitions than the group has members. Reading it
     /// as "moved away" would drop an actively-consuming group out of the tab
-    /// mid-rebalance and evict its cached lag.
+    /// mid-rebalance.
     #[test]
     fn a_member_assigned_nothing_forces_inspection() {
         assert_eq!(classify(&[Some(vec![])], "t"), Classification::MustInspect);
@@ -211,81 +184,74 @@ mod tests {
             classify(&[Some(vec![]), Some(vec!["other".into()])], "t"),
             Classification::MustInspect
         );
-        // ...but a sibling actually holding the topic still wins outright
         assert_eq!(
             classify(&[Some(vec![]), Some(vec!["t".into()])], "t"),
             Classification::AssignedToTopic
         );
     }
 
+    /// The tier policy, now applied to ONE shared entry at read time: a group
+    /// showing rows on the topic you're looking at is worth 8s; one showing
+    /// nothing there is worth a minute, even though the same entry may be
+    /// serving another view at 8s.
     #[test]
-    fn missing_entry_always_refreshes() {
-        assert!(needs_refresh(&Classification::AssignedToTopic, None, 0));
-        assert!(needs_refresh(&Classification::MustInspect, None, 0));
+    fn a_group_showing_nothing_here_is_worth_re_reading_only_once_a_minute() {
+        assert_eq!(commits_ttl(&Classification::AssignedToTopic, false), LIVE_TTL_MS);
+        assert_eq!(commits_ttl(&Classification::AssignedToTopic, true), LIVE_TTL_MS);
+        assert_eq!(commits_ttl(&Classification::MustInspect, true), LIVE_TTL_MS);
+        assert_eq!(commits_ttl(&Classification::MustInspect, false), IDLE_TTL_MS);
+        const { assert!(IDLE_TTL_MS > LIVE_TTL_MS) };
+    }
+
+    fn commits() -> Vec<CommittedOffset> {
+        vec![
+            CommittedOffset { topic: "orders".into(), partition: 0, offset: 10 },
+            CommittedOffset { topic: "orders".into(), partition: 1, offset: 5 },
+            CommittedOffset { topic: "users".into(), partition: 0, offset: 7 },
+        ]
     }
 
     #[test]
-    fn assigned_groups_refresh_on_the_fast_tier() {
-        assert!(!needs_refresh(&Classification::AssignedToTopic, fresh(0, false), LIVE_TTL_MS - 1));
-        assert!(needs_refresh(&Classification::AssignedToTopic, fresh(0, false), LIVE_TTL_MS));
+    fn lag_is_the_head_minus_the_commit_across_every_topic() {
+        let rows = lag_rows(&commits(), None, |_t, p| Some(20 + i64::from(p))).unwrap();
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows.iter().map(|r| r.lag).sum::<i64>(), (20 - 10) + (21 - 5) + (20 - 7));
     }
 
-    /// The fast tier must expire strictly before the page's 10s poll, so
-    /// every poll of a visible row actually refreshes it instead of serving
-    /// an almost-due entry and doubling the effective cadence.
+    /// The whole point of one shared entry: a topic's tab reads the same
+    /// commits and simply narrows them to its own partitions.
     #[test]
-    fn fast_tier_expires_before_the_pages_poll_interval() {
-        const { assert!(LIVE_TTL_MS < 10_000) };
-        assert!(needs_refresh(&Classification::AssignedToTopic, fresh(0, true), 10_000));
-        assert!(needs_refresh(&Classification::MustInspect, fresh(0, true), 10_000));
-    }
-
-    #[test]
-    fn inspected_groups_with_rows_are_fast_without_rows_slow() {
-        assert!(needs_refresh(&Classification::MustInspect, fresh(0, true), LIVE_TTL_MS));
-
-        assert!(!needs_refresh(&Classification::MustInspect, fresh(0, false), IDLE_TTL_MS - 1));
-        assert!(needs_refresh(&Classification::MustInspect, fresh(0, false), IDLE_TTL_MS));
+    fn narrowing_to_one_topic_yields_only_that_topics_rows() {
+        let rows = lag_rows(&commits(), Some("users"), |_t, _p| Some(9)).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].topic, "users");
+        assert_eq!(rows[0].lag, 2);
+        assert_eq!(partitions_of(&commits(), Some("users")), vec![("users".to_string(), 0)]);
+        assert_eq!(partitions_of(&commits(), None).len(), 3);
     }
 
     #[test]
-    fn cache_round_trips_and_evicts_vanished_groups_and_ancient_entries() {
-        let cache = GroupLagCache::new();
-        cache.insert("t", "g1", CachedEntry { partitions: vec![lag_row()], sampled_at: 100 });
-        cache.insert("t", "g2", CachedEntry { partitions: vec![], sampled_at: 100 });
-        cache.insert("other", "g3", CachedEntry { partitions: vec![], sampled_at: 100 });
-        assert_eq!(cache.get("t", "g1").unwrap().sampled_at, 100);
-        assert!(cache.get("t", "missing").is_none());
-        assert!(cache.freshness("t", "g1").unwrap().has_rows);
-        assert!(!cache.freshness("t", "g2").unwrap().has_rows);
-
-        // g2 vanished from the group list; g3 belongs to another topic and
-        // must survive a "t" eviction pass
-        cache.evict("t", &|g| g == "g1", 200);
-        assert!(cache.get("t", "g1").is_some());
-        assert!(cache.get("t", "g2").is_none());
-        assert!(cache.get("other", "g3").is_some());
-
-        // any entry older than the global horizon dies, topic irrelevant
-        cache.evict("t", &|_| true, 100 + EVICT_AGE_MS);
-        assert!(cache.get("t", "g1").is_none());
-        assert!(cache.get("other", "g3").is_none());
+    fn a_commit_beyond_the_head_reads_as_zero_not_negative() {
+        // retention or a reset can leave a commit ahead of what we read
+        let rows = lag_rows(&commits(), Some("users"), |_t, _p| Some(3)).unwrap();
+        assert_eq!(rows[0].lag, 0);
     }
 
-    /// Two polls of the same topic overlap: the one holding the OLDER
-    /// group-list snapshot must not delete an entry a newer request just
-    /// wrote for a group its own snapshot never saw.
+    /// A partition whose watermark could not be read makes the group's lag
+    /// UNKNOWN. Omitting the row would silently under-report the total, which
+    /// is a confident wrong answer.
     #[test]
-    fn eviction_keeps_entries_newer_than_the_callers_snapshot() {
-        let cache = GroupLagCache::new();
-        cache.insert("t", "newcomer", CachedEntry { partitions: vec![lag_row()], sampled_at: 500 });
-        cache.evict("t", &|g| g == "known", 400);
-        assert!(
-            cache.get("t", "newcomer").is_some(),
-            "an entry sampled after the caller's snapshot belongs to a newer view"
-        );
-        // ...but once the caller's own snapshot is the newer one, it rules
-        cache.evict("t", &|g| g == "known", 600);
-        assert!(cache.get("t", "newcomer").is_none());
+    fn an_unreadable_head_fails_the_group_rather_than_dropping_a_partition() {
+        let err = lag_rows(&commits(), None, |_t, p| if p == 1 { None } else { Some(50) }).unwrap_err();
+        assert!(err.contains("orders/1"), "the failing partition is named: {err}");
+    }
+
+    #[test]
+    fn rows_come_back_in_a_stable_order() {
+        let rows = lag_rows(&commits(), None, |_t, _p| Some(99)).unwrap();
+        let keys: Vec<(String, i32)> = rows.iter().map(|r| (r.topic.clone(), r.partition)).collect();
+        let mut sorted = keys.clone();
+        sorted.sort();
+        assert_eq!(keys, sorted);
     }
 }
