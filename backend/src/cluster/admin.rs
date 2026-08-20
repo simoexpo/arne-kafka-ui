@@ -256,6 +256,10 @@ pub struct MemberAssignment {
 pub struct GroupDetail {
     pub group_id: String,
     pub state: String,
+    /// `CLASSIC` or `CONSUMER` (KIP-848): which rebalance protocol this group
+    /// speaks. Worth stating, because what a group can report about itself
+    /// depends on it.
+    pub group_type: String,
     /// The assignor the members negotiated (`range`, `cooperative-sticky`, …).
     /// Empty when the group holds no members to negotiate one.
     pub assignment_strategy: String,
@@ -700,12 +704,10 @@ pub async fn group_detail(handle: Arc<ClusterHandle>, group: String) -> Result<A
 
 async fn group_detail_uncached(handle: Arc<ClusterHandle>, group: String) -> Result<GroupDetail, ApiError> {
     tokio::task::spawn_blocking(move || {
-        let gl = handle.consumer()
-            .fetch_group_list(Some(&group), ADMIN_TIMEOUT)
-            .map_err(|e| error::from_kafka(&handle.name, "describe group", &e))?;
-        let info = gl.groups().iter().find(|g| g.name() == group);
-        // a group entry with state "Dead" counts as absent
-        let info = info.filter(|i| i.state() != "Dead");
+        // The coordinator, not every broker: see `describe_consumer_group_blocking`.
+        let described = super::ffi::describe_consumer_group_blocking(&handle, &group, ADMIN_TIMEOUT)?;
+        // A group the coordinator calls Dead is gone; its offsets may linger.
+        let described = described.filter(|d| d.state != "Dead");
         // The same shared entry the consumers list uses, so opening a group's
         // page after seeing it in the list costs nothing. Errors keep their own
         // ApiError, so a broker timeout still reports as a timeout.
@@ -713,25 +715,22 @@ async fn group_detail_uncached(handle: Arc<ClusterHandle>, group: String) -> Res
         // The snapshot is shared, so this view copies just the rows it renders.
         let (partitions, pair_at) = (entry.value.rows.clone(), entry.sampled_at);
         let unreadable_partitions = entry.value.unknown.len();
-        // A group with no broker-side entry AND no committed offsets does not exist.
-        let info = match (info, partitions.is_empty()) {
-            (Some(i), _) => Some(i),
+        // A group with no coordinator entry AND no committed offsets does not exist.
+        let described = match (described, partitions.is_empty()) {
+            (Some(d), _) => Some(d),
             (None, false) => None, // empty/expired group that still has offsets
             (None, true) => return Err(ApiError::group_not_found(&handle.name, &group)),
         };
         Ok(GroupDetail {
             group_id: group.clone(),
-            state: info.map(|i| i.state().to_string()).unwrap_or_else(|| "Empty".into()),
-            assignment_strategy: info.map(|i| i.protocol().to_string()).unwrap_or_default(),
-            members: info.map(|i| i.members().iter().map(|m| MemberInfo {
-                member_id: m.id().to_string(),
-                client_id: m.client_id().to_string(),
-                client_host: m.client_host().to_string(),
-                assigned: m.assignment()
-                    .and_then(super::assignment::assigned_partitions)
-                    .map(|topics| topics.into_iter()
-                        .map(|(topic, partitions)| MemberAssignment { topic, partitions })
-                        .collect()),
+            state: described.as_ref().map(|d| d.state.clone()).unwrap_or_else(|| "Empty".into()),
+            group_type: described.as_ref().map(|d| d.group_type.clone()).unwrap_or_default(),
+            assignment_strategy: described.as_ref().map(|d| d.assignor.clone()).unwrap_or_default(),
+            members: described.map(|d| d.members.into_iter().map(|m| MemberInfo {
+                member_id: m.member_id,
+                client_id: m.client_id,
+                client_host: m.host,
+                assigned: m.assigned.map(group_by_topic),
             }).collect()).unwrap_or_default(),
             partitions,
             unreadable_partitions,
@@ -741,6 +740,23 @@ async fn group_detail_uncached(handle: Arc<ClusterHandle>, group: String) -> Res
     })
     .await
     .map_err(ApiError::task_join)?
+}
+
+/// The coordinator lists a member's partitions flat; the wire groups them by
+/// topic, which is how the page reads them.
+fn group_by_topic(assigned: Vec<(String, i32)>) -> Vec<MemberAssignment> {
+    let mut out: Vec<MemberAssignment> = Vec::new();
+    for (topic, partition) in assigned {
+        match out.iter_mut().find(|a| a.topic == topic) {
+            Some(entry) => entry.partitions.push(partition),
+            None => out.push(MemberAssignment { topic, partitions: vec![partition] }),
+        }
+    }
+    for a in &mut out {
+        a.partitions.sort_unstable();
+    }
+    out.sort_by(|a, b| a.topic.cmp(&b.topic));
+    out
 }
 
 #[derive(Debug, Serialize)]

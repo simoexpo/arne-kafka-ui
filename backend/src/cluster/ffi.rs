@@ -365,3 +365,116 @@ impl Drop for OwnedTpl {
         unsafe { rd::rd_kafka_topic_partition_list_destroy(self.0) };
     }
 }
+
+/// One member of a described group, as the coordinator sees it.
+#[derive(Debug)]
+pub struct MemberDescription {
+    pub member_id: String,
+    pub client_id: String,
+    pub host: String,
+    /// The partitions this member currently owns, stated by the coordinator —
+    /// right for the classic and the KIP-848 protocol alike, unlike the
+    /// assignment blob the new protocol leaves empty. `None` when the
+    /// coordinator reported no assignment at all: unknown, not zero.
+    pub assigned: Option<Vec<(String, i32)>>,
+}
+
+#[derive(Debug)]
+pub struct GroupDescription {
+    pub group_id: String,
+    pub state: String,
+    /// `CLASSIC` or `CONSUMER` (KIP-848) — what protocol this group speaks.
+    pub group_type: String,
+    pub assignor: String,
+    pub members: Vec<MemberDescription>,
+}
+
+/// Describes ONE group through the coordinator. Replaces `fetch_group_list`
+/// for a single group, which asks EVERY broker for its whole group list first
+/// (`rdkafka.c`: one ListGroups per broker) and then describes the match — so
+/// it costs one request per broker in the cluster for one group's detail.
+/// This is one coordinator request instead, and it is the only path that
+/// reports KIP-848 groups truthfully: the legacy DescribeGroups calls them
+/// `Dead` with no members even while they are Stable and consuming.
+///
+/// `Ok(None)` means the coordinator does not know this group.
+pub fn describe_consumer_group_blocking(
+    handle: &ClusterHandle,
+    group: &str,
+    timeout: Duration,
+) -> Result<Option<GroupDescription>, ApiError> {
+    let admin = handle.admin();
+    let call = AdminCall::new(
+        &admin,
+        rd::rd_kafka_admin_op_t::RD_KAFKA_ADMIN_OP_DESCRIBECONSUMERGROUPS,
+        timeout,
+        &handle.name,
+    )?;
+    let group_id = CString::new(group)
+        .map_err(|_| ApiError::kafka(&handle.name, format!("group id contains a NUL byte: {group:?}")))?;
+    // SAFETY: one group name, alive for the whole call; every pointer read out
+    // of the result is copied before the event drops.
+    unsafe {
+        let mut names = [group_id.as_ptr()];
+        rd::rd_kafka_DescribeConsumerGroups(call.rk, names.as_mut_ptr(), 1, call.options, call.queue);
+        let event = call.wait(timeout, &handle.name, "describe group")?;
+        let result = rd::rd_kafka_event_DescribeConsumerGroups_result(event.0);
+        if result.is_null() {
+            return Err(ApiError::kafka(&handle.name, "describe group: unexpected result type"));
+        }
+        let mut count = 0usize;
+        let groups = rd::rd_kafka_DescribeConsumerGroups_result_groups(result, &mut count);
+        if count == 0 {
+            return Ok(None);
+        }
+        let desc = *groups;
+        let err = rd::rd_kafka_ConsumerGroupDescription_error(desc);
+        if !err.is_null() {
+            let code = rd::rd_kafka_error_code(err);
+            if code as i32 != rd::rd_kafka_resp_err_t::RD_KAFKA_RESP_ERR_NO_ERROR as i32 {
+                // "no such group" is an answer, not a failure: the caller may
+                // still have committed offsets to show for it.
+                if code == rd::rd_kafka_resp_err_t::RD_KAFKA_RESP_ERR_GROUP_ID_NOT_FOUND {
+                    return Ok(None);
+                }
+                let detail = cstr_to_string(rd::rd_kafka_error_string(err));
+                return Err(ApiError::kafka(&handle.name, format!("describe group: {detail}")));
+            }
+        }
+        let member_count = rd::rd_kafka_ConsumerGroupDescription_member_count(desc);
+        let mut members = Vec::with_capacity(member_count);
+        for i in 0..member_count {
+            let m = rd::rd_kafka_ConsumerGroupDescription_member(desc, i);
+            let assignment = rd::rd_kafka_MemberDescription_assignment(m);
+            let assigned = (!assignment.is_null()).then(|| {
+                let mut owned = Vec::new();
+                let tpl = rd::rd_kafka_MemberAssignment_partitions(assignment);
+                if !tpl.is_null() {
+                    let tpl = &*tpl;
+                    for j in 0..tpl.cnt as usize {
+                        let tp = &*tpl.elems.add(j);
+                        owned.push((cstr_to_string(tp.topic), tp.partition));
+                    }
+                }
+                owned
+            });
+            members.push(MemberDescription {
+                member_id: cstr_to_string(rd::rd_kafka_MemberDescription_consumer_id(m)),
+                client_id: cstr_to_string(rd::rd_kafka_MemberDescription_client_id(m)),
+                host: cstr_to_string(rd::rd_kafka_MemberDescription_host(m)),
+                assigned,
+            });
+        }
+        Ok(Some(GroupDescription {
+            group_id: cstr_to_string(rd::rd_kafka_ConsumerGroupDescription_group_id(desc)),
+            state: cstr_to_string(rd::rd_kafka_consumer_group_state_name(
+                rd::rd_kafka_ConsumerGroupDescription_state(desc),
+            )),
+            group_type: cstr_to_string(rd::rd_kafka_consumer_group_type_name(
+                rd::rd_kafka_ConsumerGroupDescription_type(desc),
+            )),
+            assignor: cstr_to_string(rd::rd_kafka_ConsumerGroupDescription_partition_assignor(desc)),
+            members,
+        }))
+    }
+}

@@ -23,6 +23,7 @@ describe('GroupDetailView', () => {
     ],
     unreadable_partitions: 0,
     assignment_strategy: 'range',
+    group_type: 'Classic',
     as_of: Date.now(),
     ...over,
   })
@@ -47,6 +48,17 @@ describe('GroupDetailView', () => {
 
   // Owner ruling 2026-08-20: named by its assignor class, alongside the other
   // three figures as a plain fourth stat — same style, same row.
+  // Which rebalance protocol a group speaks decides what it can report about
+  // itself, so the page states it rather than leaving the reader to infer.
+  it('states the rebalance protocol beside the group state', async () => {
+    vi.mocked(client.getGroupDetail).mockResolvedValue(detail({ group_type: 'Consumer' }))
+    renderWithQuery(<GroupDetailView cluster="prod" group="billing" />)
+    await screen.findByText('billing-app')
+    const header = screen.getAllByTestId('panel-header').find((h) => h.textContent?.includes('Members'))!
+    expect(header).toHaveTextContent('Consumer')
+    expect(header).toHaveTextContent('Stable')
+  })
+
   it('names the assignment strategy by its class', async () => {
     vi.mocked(client.getGroupDetail).mockResolvedValue(detail({ assignment_strategy: 'cooperative-sticky' }))
     renderWithQuery(<GroupDetailView cluster="prod" group="billing" />)

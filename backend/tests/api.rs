@@ -254,8 +254,18 @@ async fn topic_consumers_skips_live_groups_that_moved_to_another_topic() {
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     }
 
-    // Each live member reports the partitions it actually owns, decoded from
-    // the assignment blob the describe response already carries.
+    // The coordinator names the group's protocol, so the page can say why a
+    // group shows what it shows instead of guessing.
+    let (_, body) = get_json(app(state.clone()), "/api/clusters/test/groups/mv-group").await;
+    assert_eq!(body["group_type"], "Classic", "a legacy consumer speaks the classic protocol: {body}");
+    assert_eq!(body["state"], "Stable", "the live member keeps the group stable: {body}");
+    let hosts: Vec<_> = body["members"].as_array().unwrap().iter()
+        .map(|m| m["client_host"].as_str().unwrap_or("").to_string())
+        .collect();
+    assert!(hosts.iter().all(|h| !h.is_empty()), "every member reports a host: {body}");
+
+    // Each live member reports the partitions it actually owns, straight from
+    // the coordinator — right for the classic and the KIP-848 protocol alike.
     let (_, body) = get_json(app(state.clone()), "/api/clusters/test/groups/mv-group").await;
     let members = body["members"].as_array().expect("members on the wire");
     let owned: Vec<_> = members.iter()

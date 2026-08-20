@@ -1,9 +1,8 @@
-//! Decoder for the classic ConsumerProtocol `MemberAssignment` blob that
-//! `DescribeGroups` returns per live member: the topics and partitions the
-//! coordinator assigned to that member. The blob is already in the describe
-//! response every group view makes, so reading the partition arrays out of it
-//! costs no broker call — `assigned_topics` is just the names of the same
-//! decode.
+//! Decoder for the classic ConsumerProtocol `MemberAssignment` blob that the
+//! group list returns per live member. Only the topic NAMES are read: they
+//! decide which groups a topic's tab must inspect. Per-partition ownership
+//! comes from the coordinator instead (`ffi::describe_consumer_group_blocking`),
+//! which is right for the KIP-848 protocol too — this blob is empty there.
 //!
 //! Wire layout (big-endian, stable since Kafka 0.9):
 //!   int16 version
@@ -19,10 +18,6 @@
 //! hidden row).
 
 pub fn assigned_topics(buf: &[u8]) -> Option<Vec<String>> {
-    Some(assigned_partitions(buf)?.into_iter().map(|(topic, _)| topic).collect())
-}
-
-pub fn assigned_partitions(buf: &[u8]) -> Option<Vec<(String, Vec<i32>)>> {
     let mut r = Reader { buf, pos: 0 };
     let version = r.i16()?;
     if version < 0 {
@@ -43,14 +38,10 @@ pub fn assigned_partitions(buf: &[u8]) -> Option<Vec<(String, Vec<i32>)>> {
         if partition_count < 0 {
             return None;
         }
-        // The whole array is read up front so a corrupt count fails the decode
-        // rather than overflowing a length (which would wrap on 32-bit).
-        let raw = r.bytes((partition_count as usize).checked_mul(4)?)?;
-        let partitions = raw
-            .chunks_exact(4)
-            .map(|c| i32::from_be_bytes(c.try_into().expect("chunks_exact(4) yields 4 bytes")))
-            .collect();
-        topics.push((name.to_string(), partitions));
+        // checked: a corrupt count must fail the decode, never overflow the
+        // skip length (which would wrap on a 32-bit target)
+        r.bytes((partition_count as usize).checked_mul(4)?)?;
+        topics.push(name.to_string());
     }
     Some(topics)
 }
@@ -109,37 +100,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn decodes_the_partitions_each_topic_was_assigned() {
-        let b = blob(1, &[("demo-orders", &[2]), ("demo-users", &[0, 1])], &[]);
-        assert_eq!(
-            assigned_partitions(&b),
-            Some(vec![
-                ("demo-orders".to_string(), vec![2]),
-                ("demo-users".to_string(), vec![0, 1]),
-            ])
-        );
-    }
 
-    /// A member that holds the topic but no partition of it — the standby case
-    /// in a group with more members than partitions.
-    #[test]
-    fn a_topic_with_no_partitions_decodes_to_an_empty_list() {
-        let b = blob(0, &[("t", &[])], &[]);
-        assert_eq!(assigned_partitions(&b), Some(vec![("t".to_string(), vec![])]));
-    }
 
-    #[test]
-    fn partitions_reject_the_same_structural_violations_as_topics() {
-        assert_eq!(assigned_partitions(&[]), None, "empty buffer");
-        let mut b = Vec::new();
-        b.extend(0i16.to_be_bytes());
-        b.extend(1i32.to_be_bytes());
-        b.extend(1i16.to_be_bytes());
-        b.extend(b"t");
-        b.extend(i32::MAX.to_be_bytes());
-        assert_eq!(assigned_partitions(&b), None, "absurd partition count");
-    }
 
     #[test]
     fn trailing_userdata_is_ignored() {

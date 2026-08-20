@@ -70,6 +70,7 @@ export function GroupDetailView({ cluster, group }: { cluster: string; group: st
             detail.data && (
               <span className="text-xs text-zinc-500">
                 {detail.data.members.length} member{detail.data.members.length === 1 ? '' : 's'} · {detail.data.state}
+                {detail.data.group_type && ` · ${detail.data.group_type}`}
               </span>
             )
           }

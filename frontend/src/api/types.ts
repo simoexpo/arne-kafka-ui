@@ -139,6 +139,8 @@ export interface GroupDetail {
   state: string
   // The assignor the members negotiated; empty when there are no members.
   assignment_strategy: string
+  // `Classic` or `Consumer` (KIP-848) — which rebalance protocol it speaks.
+  group_type: string
   members: MemberInfo[]
   partitions: PartitionLag[]
   // Partitions this group commits on whose head could not be read: absent from
