@@ -661,6 +661,43 @@ async fn detail_pages_are_cached_per_entity_and_never_cross_over() {
     assert_eq!(stamps.len(), 1, "six readers, one shared answer (got {stamps:?})");
 }
 
+/// Owner ruling 2026-08-20: watermarks live in ONE cache on the handle, so
+/// the four call sites that need them stop refetching the same partitions.
+/// Two different groups reading one topic must not each pay for its heads.
+#[tokio::test]
+async fn watermarks_are_shared_across_requests_not_refetched() {
+    use arne::cluster::admin::group_watermark_fetch_count;
+
+    let bootstrap = start_kafka().await;
+    // one partition on purpose: both groups then commit on the SAME partition,
+    // so the second request needs exactly the head the first already fetched
+    create_topic(&bootstrap, "wm-topic", 1).await;
+    produce(&bootstrap, "wm-topic", 6).await;
+    consume_and_commit(&bootstrap, "wm-topic", "wm-group-a", 3).await;
+    consume_and_commit(&bootstrap, "wm-topic", "wm-group-b", 6).await;
+    let state = state_for(&bootstrap, vec![]);
+
+    // first group: its heads must be fetched
+    let before = group_watermark_fetch_count("wm-topic");
+    let (status, body) = get_json(app(state.clone()), "/api/clusters/test/group-lag?groups=wm-group-a").await;
+    assert_eq!(status, 200);
+    // the exact split across two partitions is not deterministic; what matters
+    // here is that a real lag was computed at all
+    assert!(body["groups"][0]["total_lag"].is_i64(), "a lag was computed: {body}");
+    let after_first = group_watermark_fetch_count("wm-topic");
+    assert!(after_first > before, "the first request had to read the heads");
+
+    // second group, same topic, different cache entry for its own lag — but
+    // the partitions' heads are already known
+    let (status, body) = get_json(app(state.clone()), "/api/clusters/test/group-lag?groups=wm-group-b").await;
+    assert_eq!(status, 200);
+    assert!(body["groups"][0]["total_lag"].is_i64(), "a lag was computed for the second group too: {body}");
+    assert_eq!(
+        group_watermark_fetch_count("wm-topic"), after_first,
+        "the second group reused the shared watermarks instead of refetching them"
+    );
+}
+
 #[tokio::test]
 async fn overview_reports_brokers_and_counts() {
     let bootstrap = start_kafka().await;

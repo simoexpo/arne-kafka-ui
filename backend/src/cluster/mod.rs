@@ -22,6 +22,10 @@ use std::time::Duration;
 
 pub const ADMIN_TIMEOUT: Duration = Duration::from_secs(10);
 pub const HEALTH_TIMEOUT: Duration = Duration::from_secs(2);
+/// A watermark this old is useless to every caller, so it is not worth
+/// remembering: the head has moved on.
+pub const WATERMARK_HORIZON_MS: i64 = 60_000;
+
 /// A detail page nobody has opened for this long is forgotten.
 pub const DETAIL_HORIZON_MS: i64 = 600_000;
 /// Just under the detail pages' 10s poll.
@@ -90,6 +94,10 @@ pub struct ClusterHandle {
     /// A separate cache, not a scope inside the one above: different question,
     /// different key, different freshness policy (owner ruling 2026-08-20).
     pub cluster_lag_cache: keyed_cache::KeyedCache<String, Vec<admin::PartitionLag>>,
+    /// Every partition's high watermark, shared by the four call sites that
+    /// need one (partitions tab, messages window, throughput sampling, lag).
+    /// Each reader brings its own freshness policy — see `admin::Watermarks`.
+    pub watermarks: keyed_cache::KeyedCache<(String, i32), i64>,
     pub cluster_lag_flight: single_flight::SingleFlight<String>,
     /// Whole-response snapshots shared by every tab for a few seconds, so tab
     /// count stops multiplying broker calls (owner design 2026-08-19).
@@ -142,6 +150,7 @@ impl ClusterHandle {
             group_lag_cache: group_lag_cache::GroupLagCache::new(),
             lag_flight: single_flight::SingleFlight::new(),
             cluster_lag_cache: keyed_cache::KeyedCache::new(group_lag_cache::EVICT_AGE_MS),
+            watermarks: keyed_cache::KeyedCache::new(WATERMARK_HORIZON_MS),
             cluster_lag_flight: single_flight::SingleFlight::new(),
             topics_snapshot: snapshot::SnapshotCache::new(),
             overview_snapshot: snapshot::SnapshotCache::new(),

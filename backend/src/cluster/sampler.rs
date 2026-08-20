@@ -113,15 +113,22 @@ pub fn sample_topic_blocking(handle: &ClusterHandle, topic: &str) -> Result<i64,
         .find(|t| t.name() == topic && !t.partitions().is_empty())
         .ok_or_else(|| ApiError::topic_not_found(&handle.name, topic))?;
     let wanted: Vec<(String, i32)> = t.partitions().iter().map(|p| (topic.to_string(), p.id())).collect();
-    // One batched ListOffsets for the whole topic. All-or-nothing: a partition
-    // whose entry failed would make the total silently omit its messages, so
-    // the sample is abandoned rather than reported wrong.
-    let ends = super::ffi::list_offsets_blocking(handle, &wanted, super::ffi::OffsetSpec::Latest, ADMIN_TIMEOUT)?;
-    if ends.len() != wanted.len() || ends.iter().any(|p| p.error.is_some()) {
-        let reason = ends.iter().find_map(|p| p.error.clone()).unwrap_or_else(|| "incomplete offsets".into());
-        return Err(ApiError::kafka(&handle.name, format!("sample throughput: {reason}")));
+    // A rate is a delta between two point-in-time sums, so this caller needs
+    // a FRESH read — a cached watermark would flatten the delta or stretch it
+    // over the wrong window. It still fills the shared cache for readers that
+    // can accept an age.
+    let mut heads = super::admin::Watermarks::always_fresh(handle);
+    heads.ensure(&wanted)?;
+    // All-or-nothing: a partition missing from the answer would make the total
+    // silently omit its messages, so the sample is abandoned, not reported wrong.
+    let mut total = 0i64;
+    for (t, p) in &wanted {
+        match heads.get(t, *p) {
+            Some(hi) => total += hi,
+            None => return Err(ApiError::kafka(&handle.name, "sample throughput: incomplete offsets")),
+        }
     }
-    Ok(ends.iter().map(|p| p.offset).sum())
+    Ok(total)
 }
 
 #[cfg(test)]

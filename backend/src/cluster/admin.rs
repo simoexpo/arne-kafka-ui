@@ -167,7 +167,15 @@ async fn topic_detail_uncached(handle: Arc<ClusterHandle>, topic: String) -> Res
         // cost 1000 round trips on every 10s poll of this tab.
         let wanted: Vec<(String, i32)> = t.partitions().iter().map(|p| (part_topic.clone(), p.id())).collect();
         let starts = ffi::offsets_by_partition(&part_handle, &wanted, ffi::OffsetSpec::Earliest, ADMIN_TIMEOUT)?;
-        let ends = ffi::offsets_by_partition(&part_handle, &wanted, ffi::OffsetSpec::Latest, ADMIN_TIMEOUT)?;
+        // High watermarks come from the shared cache at this page's own
+        // cadence; low watermarks move only with retention, so they are not
+        // worth caching separately.
+        let mut heads = Watermarks::new(&part_handle, super::DETAIL_TTL_MS);
+        heads.ensure(&wanted)?;
+        let ends: std::collections::HashMap<i32, i64> = wanted
+            .iter()
+            .filter_map(|(t, p)| heads.get(t, *p).map(|hi| (*p, hi)))
+            .collect();
         let partitions = t.partitions().iter().map(|p| PartitionInfo {
             id: p.id(), leader: p.leader(),
             replicas: p.replicas().to_vec(), isr: p.isr().to_vec(),
@@ -323,44 +331,74 @@ fn group_lag_topic_partitions(handle: &ClusterHandle, topic_filter: Option<&str>
     Ok(out)
 }
 
-/// Per-request high watermarks, keyed by `(topic, partition)` and filled in
-/// BATCHES: whatever a group needs and we don't already know is fetched with
-/// one ListOffsets call (librdkafka fans it out per leader broker), so a
-/// request costs a round trip or two rather than one per committed partition.
-/// Shared across every group in one `/groups` or `/topics/{t}/consumers`
-/// request, so a partition several groups read is fetched once.
-#[derive(Default)]
-pub struct WatermarkCache {
-    known: HashMap<(String, i32), i64>,
+/// A view over the cluster's shared watermark cache, scoped to one request.
+///
+/// High watermarks are the fastest-moving thing we read, and four call sites
+/// need them — the partitions tab, the messages window, throughput sampling
+/// and lag — so they live in ONE cache on the handle (owner ruling
+/// 2026-08-20) rather than being refetched per request. Each caller brings
+/// its own freshness policy: `ttl_ms` is how old a value may be for THIS
+/// purpose. Whatever isn't fresh enough is fetched in a single batched
+/// ListOffsets, and every fetch populates the shared cache for everyone else.
+///
+/// `oldest_used` is the honest stamp: lag computed against a cached watermark
+/// is only as current as that watermark, so a caller reports the OLDER of its
+/// two sides rather than the flattering one.
+pub struct Watermarks<'a> {
+    handle: &'a ClusterHandle,
+    ttl_ms: i64,
+    oldest_used: Option<i64>,
 }
 
-impl WatermarkCache {
-    pub fn new() -> Self {
-        Self::default()
+impl<'a> Watermarks<'a> {
+    pub fn new(handle: &'a ClusterHandle, ttl_ms: i64) -> Self {
+        Self { handle, ttl_ms, oldest_used: None }
     }
 
-    fn ensure(&mut self, handle: &ClusterHandle, wanted: &[(String, i32)]) -> Result<(), ApiError> {
-        let missing: Vec<(String, i32)> = wanted
-            .iter()
-            .filter(|key| !self.known.contains_key(*key))
-            .cloned()
-            .collect();
+    /// A caller that must see the current head (a bounded scan deciding
+    /// whether a partition is exhausted, a rate sample measuring a delta)
+    /// cannot accept ANY age: a stale watermark would change its behaviour,
+    /// not just its display.
+    pub fn always_fresh(handle: &'a ClusterHandle) -> Self {
+        Self::new(handle, 0)
+    }
+
+    pub fn ensure(&mut self, wanted: &[(String, i32)]) -> Result<(), ApiError> {
+        let now = now_ms();
+        let mut missing = Vec::new();
+        for key in wanted {
+            match self.handle.watermarks.sampled_at(key) {
+                Some(at) if self.ttl_ms > 0 && now - at < self.ttl_ms => {
+                    self.oldest_used = Some(self.oldest_used.map_or(at, |o: i64| o.min(at)));
+                }
+                _ => missing.push(key.clone()),
+            }
+        }
         if missing.is_empty() {
             return Ok(());
         }
         for topic in missing.iter().map(|(t, _)| t.as_str()).collect::<std::collections::BTreeSet<_>>() {
             record_group_watermark_fetch(topic);
         }
-        for p in ffi::list_offsets_blocking(handle, &missing, ffi::OffsetSpec::Latest, ADMIN_TIMEOUT)? {
+        let fetched_at = now_ms();
+        for p in ffi::list_offsets_blocking(self.handle, &missing, ffi::OffsetSpec::Latest, ADMIN_TIMEOUT)? {
             if p.error.is_none() {
-                self.known.insert((p.topic, p.partition), p.offset);
+                self.handle.watermarks.insert((p.topic, p.partition), p.offset, fetched_at);
             }
         }
+        self.oldest_used = Some(self.oldest_used.map_or(fetched_at, |o: i64| o.min(fetched_at)));
         Ok(())
     }
 
-    fn get(&self, topic: &str, partition: i32) -> Option<i64> {
-        self.known.get(&(topic.to_string(), partition)).copied()
+    pub fn get(&self, topic: &str, partition: i32) -> Option<i64> {
+        self.handle.watermarks.get(&(topic.to_string(), partition)).map(|e| e.value)
+    }
+
+    /// When the oldest watermark this request relied on was sampled — what a
+    /// caller should report as its own `as_of` when that is older than its
+    /// other inputs.
+    pub fn oldest_used(&self) -> Option<i64> {
+        self.oldest_used
     }
 }
 
@@ -381,7 +419,7 @@ pub fn group_lag_blocking(
     scope: &str,
     group: &str,
     partitions: Option<&[(String, i32)]>,
-    watermark_cache: &mut WatermarkCache,
+    watermark_cache: &mut Watermarks<'_>,
 ) -> Result<Vec<PartitionLag>, ApiError> {
     record_group_offset_fetch(scope, group);
     // NotCoordinator/CoordinatorNotAvailable/CoordinatorLoadInProgress are
@@ -403,7 +441,7 @@ pub fn group_lag_blocking(
     // One batched watermark fetch for everything this group committed on that
     // the request doesn't already know.
     let needed: Vec<(String, i32)> = committed.keys().cloned().collect();
-    watermark_cache.ensure(handle, &needed)?;
+    watermark_cache.ensure(&needed)?;
     let mut out = Vec::new();
     for ((topic, partition), c) in committed {
         let hi = watermark_cache.get(&topic, partition).ok_or_else(|| {
@@ -496,7 +534,7 @@ pub async fn groups_lag(handle: Arc<ClusterHandle>, groups: Vec<String>) -> Resu
     tokio::task::spawn_blocking(move || {
         use super::group_lag_cache::LIVE_TTL_MS;
         let now = now_ms();
-        let mut watermark_cache = WatermarkCache::new();
+        let mut watermark_cache = Watermarks::new(&handle, LAG_WATERMARK_TTL_MS);
         let mut out = Vec::with_capacity(groups.len());
         for group in groups {
             let cached = handle.cluster_lag_cache.fresh(&group, LIVE_TTL_MS, now);
@@ -542,6 +580,13 @@ pub async fn groups_lag(handle: Arc<ClusterHandle>, groups: Vec<String>) -> Resu
     .map_err(ApiError::task_join)?
 }
 
+/// How old a watermark may be when it is being paired with a freshly fetched
+/// committed offset to make a lag number. Kept short deliberately: lag is a
+/// SUBTRACTION between two samples, so a stale watermark does not make the
+/// answer old, it makes it wrong — a number that was never true at any
+/// instant. The pair's reported age is the older of the two sides.
+pub const LAG_WATERMARK_TTL_MS: i64 = 2_000;
+
 /// Label for the cluster-wide scope in the test call counter. The two lag
 /// caches are separate structures now, so this is no longer a cache key.
 const CLUSTER_WIDE: &str = "*";
@@ -579,7 +624,7 @@ async fn group_detail_uncached(handle: Arc<ClusterHandle>, group: String) -> Res
         let info = gl.groups().iter().find(|g| g.name() == group);
         // a group entry with state "Dead" counts as absent
         let info = info.filter(|i| i.state() != "Dead");
-        let mut watermark_cache = WatermarkCache::new();
+        let mut watermark_cache = Watermarks::new(&handle, LAG_WATERMARK_TTL_MS);
         // Everything this group committed, in one request: no cluster-wide
         // partition enumeration (spike 2026-08-20).
         let partitions = group_lag_blocking(&handle, CLUSTER_WIDE, &group, None, &mut watermark_cache)?;
@@ -706,7 +751,7 @@ pub async fn topic_consumers(handle: Arc<ClusterHandle>, topic: String) -> Resul
         // Built on first use only: a poll that finds every group's lag fresh
         // must cost nothing beyond the group list above.
         let mut tpl: Option<Vec<(String, i32)>> = None;
-        let mut watermark_cache = WatermarkCache::new();
+        let mut watermark_cache = Watermarks::new(&handle, LAG_WATERMARK_TTL_MS);
         let mut groups = Vec::new();
         let mut unchecked = Vec::new();
         let mut keep = std::collections::HashSet::new();

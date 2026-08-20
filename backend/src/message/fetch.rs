@@ -86,7 +86,16 @@ pub fn watermarks_blocking(handle: &ClusterHandle, topic: &str) -> Result<Vec<(i
     // partition (the messages tab pays this on every window fetch).
     let wanted: Vec<(String, i32)> = t.partitions().iter().map(|p| (topic.to_string(), p.id())).collect();
     let lo = ffi::offsets_by_partition(handle, &wanted, ffi::OffsetSpec::Earliest, ADMIN_TIMEOUT)?;
-    let hi = ffi::offsets_by_partition(handle, &wanted, ffi::OffsetSpec::Latest, ADMIN_TIMEOUT)?;
+    // A scan decides whether a partition is exhausted by comparing against the
+    // head, so this caller cannot accept a cached one — a stale value would
+    // change what it does, not merely what it shows. It still populates the
+    // shared cache for readers that can.
+    let mut heads = crate::cluster::admin::Watermarks::always_fresh(handle);
+    heads.ensure(&wanted)?;
+    let hi: std::collections::HashMap<i32, i64> = wanted
+        .iter()
+        .filter_map(|(t, p)| heads.get(t, *p).map(|v| (*p, v)))
+        .collect();
     let mut wm = Vec::new();
     for p in t.partitions() {
         // A partition whose own entry failed is skipped rather than reported
