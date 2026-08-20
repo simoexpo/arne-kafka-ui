@@ -90,7 +90,11 @@ export interface GroupSummary {
   group_id: string
   state: string
   protocol_type: string
-  member_count: number
+  // `Classic`, `Consumer` (KIP-848), or `Unknown` on brokers too old to say.
+  group_type: string
+  // null when this view cannot count them: the classic describe is blind to
+  // a KIP-848 group's members.
+  member_count: number | null
 }
 // Lag is asked for by name, for the rows on screen — see getGroupLag.
 // `total_lag` is null when the group has committed nothing anywhere (no

@@ -15,8 +15,8 @@ describe('GroupsView', () => {
   it('lists groups with state and members, and links to detail via SPA navigation', async () => {
     vi.mocked(client.getGroups).mockResolvedValue({
       groups: [
-        { group_id: 'billing', state: 'Stable', protocol_type: 'consumer', member_count: 2 },
-        { group_id: 'audit', state: 'Empty', protocol_type: 'consumer', member_count: 0 },
+        { group_id: 'billing', state: 'Stable', protocol_type: 'consumer', member_count: 2, group_type: 'Classic' },
+        { group_id: 'audit', state: 'Empty', protocol_type: 'consumer', member_count: 0, group_type: 'Classic' },
       ],
       as_of: Date.now(),
     })
@@ -33,8 +33,8 @@ describe('GroupsView', () => {
   it('encodes group ids with spaces and slashes in the detail link href', async () => {
     vi.mocked(client.getGroups).mockResolvedValue({
       groups: [
-        { group_id: 'billing team', state: 'Stable', protocol_type: 'consumer', member_count: 1 },
-        { group_id: 'a/b', state: 'Stable', protocol_type: 'consumer', member_count: 1 },
+        { group_id: 'billing team', state: 'Stable', protocol_type: 'consumer', member_count: 1, group_type: 'Classic' },
+        { group_id: 'a/b', state: 'Stable', protocol_type: 'consumer', member_count: 1, group_type: 'Classic' },
       ],
       as_of: Date.now(),
     })
@@ -52,8 +52,8 @@ describe('GroupsView', () => {
   it('filter narrows the list instantly and the clear button restores it', async () => {
     vi.mocked(client.getGroups).mockResolvedValue({
       groups: [
-        { group_id: 'billing', state: 'Stable', protocol_type: 'consumer', member_count: 1 },
-        { group_id: 'analytics', state: 'Stable', protocol_type: 'consumer', member_count: 1 },
+        { group_id: 'billing', state: 'Stable', protocol_type: 'consumer', member_count: 1, group_type: 'Classic' },
+        { group_id: 'analytics', state: 'Stable', protocol_type: 'consumer', member_count: 1, group_type: 'Classic' },
       ],
       as_of: Date.now(),
     })
@@ -69,8 +69,8 @@ describe('GroupsView', () => {
   it('the panel title counts what the filter left visible', async () => {
     vi.mocked(client.getGroups).mockResolvedValue({
       groups: [
-        { group_id: 'billing', state: 'Stable', protocol_type: 'consumer', member_count: 1 },
-        { group_id: 'analytics', state: 'Stable', protocol_type: 'consumer', member_count: 1 },
+        { group_id: 'billing', state: 'Stable', protocol_type: 'consumer', member_count: 1, group_type: 'Classic' },
+        { group_id: 'analytics', state: 'Stable', protocol_type: 'consumer', member_count: 1, group_type: 'Classic' },
       ],
       as_of: Date.now(),
     })
@@ -87,6 +87,7 @@ describe('GroupsView', () => {
       group_id: `g-${String(i).padStart(2, '0')}`,
       state: 'Stable',
       protocol_type: 'consumer',
+      group_type: 'Classic',
       member_count: 1,
     }))
     vi.mocked(client.getGroups).mockResolvedValue({ groups: many, as_of: Date.now() })
@@ -108,6 +109,7 @@ describe('GroupsView', () => {
       group_id: `g-${String(i).padStart(2, '0')}`,
       state: 'Stable',
       protocol_type: 'consumer',
+      group_type: 'Classic',
       member_count: 1,
     }))
     vi.mocked(client.getGroups).mockResolvedValue({ groups: many, as_of: Date.now() })
@@ -125,7 +127,7 @@ describe('GroupsView', () => {
 
   it('a row whose lag is undetermined shows a dash, not a zero', async () => {
     vi.mocked(client.getGroups).mockResolvedValue({
-      groups: [{ group_id: 'fresh', state: 'Stable', protocol_type: 'consumer', member_count: 1 }],
+      groups: [{ group_id: 'fresh', state: 'Stable', protocol_type: 'consumer', member_count: 1, group_type: 'Classic' }],
       as_of: Date.now(),
     })
     vi.mocked(client.getGroupLag).mockResolvedValue({
@@ -139,7 +141,7 @@ describe('GroupsView', () => {
 
   it('states a group with an unreadable partition as a lower bound, with the reason', async () => {
     vi.mocked(client.getGroups).mockResolvedValue({
-      groups: [{ group_id: 'partial', state: 'Stable', protocol_type: 'consumer', member_count: 1 }],
+      groups: [{ group_id: 'partial', state: 'Stable', protocol_type: 'consumer', member_count: 1, group_type: 'Classic' }],
       as_of: Date.now(),
     })
     vi.mocked(client.getGroupLag).mockResolvedValue({
@@ -153,11 +155,48 @@ describe('GroupsView', () => {
     expect(cell).toHaveAttribute('title', expect.stringContaining('2'))
   })
 
+  // Owner ruling 2026-08-20: the list must agree with the coordinator. A
+  // KIP-848 group's members cannot be counted from the calls this page makes,
+  // so it says so rather than printing the classic describe's phantom zero.
+  it('names the protocol and withholds an uncountable member count', async () => {
+    vi.mocked(client.getGroups).mockResolvedValue({
+      groups: [
+        { group_id: 'next', state: 'Stable', protocol_type: '', group_type: 'Consumer', member_count: null },
+        { group_id: 'old', state: 'Stable', protocol_type: 'consumer', group_type: 'Classic', member_count: 2 },
+      ],
+      as_of: Date.now(),
+    })
+    vi.mocked(client.getGroupLag).mockResolvedValue({ groups: [], as_of: Date.now() })
+    await renderWithRouter(<GroupsView cluster="prod" />)
+    await screen.findByText('next')
+    const rows = screen.getAllByTestId('group-row')
+    expect(rows[0]).toHaveTextContent('Consumer')
+    const members = rows[0].querySelector('[data-testid="group-members"]')!
+    expect(members).toHaveTextContent('—')
+    expect(members).toHaveAttribute('title', expect.stringContaining('KIP-848'))
+    expect(rows[1]).toHaveTextContent('Classic')
+    expect(rows[1].querySelector('[data-testid="group-members"]')).toHaveTextContent('2')
+  })
+
+  // A broker too old to report the protocol must not be labelled either way.
+  it('falls back to the raw protocol type when the broker cannot name it', async () => {
+    vi.mocked(client.getGroups).mockResolvedValue({
+      groups: [{ group_id: 'old-broker', state: 'Stable', protocol_type: 'consumer', group_type: 'Unknown', member_count: 1 }],
+      as_of: Date.now(),
+    })
+    vi.mocked(client.getGroupLag).mockResolvedValue({ groups: [], as_of: Date.now() })
+    await renderWithRouter(<GroupsView cluster="prod" />)
+    await screen.findByText('old-broker')
+    const row = screen.getAllByTestId('group-row')[0]
+    expect(row).toHaveTextContent('consumer')
+    expect(row).not.toHaveTextContent('Unknown')
+  })
+
   it('copies the group id without navigating when the row copy button is clicked', async () => {
     const writeText = vi.fn().mockResolvedValue(undefined)
     Object.assign(navigator, { clipboard: { writeText } })
     vi.mocked(client.getGroups).mockResolvedValue({
-      groups: [{ group_id: 'billing', state: 'Stable', protocol_type: 'consumer', member_count: 2 }],
+      groups: [{ group_id: 'billing', state: 'Stable', protocol_type: 'consumer', member_count: 2, group_type: 'Classic' }],
       as_of: Date.now(),
     })
     const { router } = await renderWithRouter(<GroupsView cluster="prod" />, { initialPath: '/c/prod/consumers' })

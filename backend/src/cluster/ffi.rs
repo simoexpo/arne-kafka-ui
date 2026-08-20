@@ -478,3 +478,69 @@ pub fn describe_consumer_group_blocking(
         }))
     }
 }
+
+/// One group as the modern listing reports it: no members, but a state and a
+/// protocol type that are correct for both the classic and the KIP-848
+/// protocol — which the legacy list's DescribeGroups half is not.
+#[derive(Debug, Clone)]
+pub struct GroupListing {
+    pub group_id: String,
+    pub state: String,
+    pub group_type: String,
+}
+
+/// Every consumer group, from ListGroups at the highest version the brokers
+/// support (state came in v4, group type in v5). librdkafka's legacy
+/// `list_groups` helper pins v0 — names only — and then has to ask the classic
+/// DescribeGroups for state, which reports every KIP-848 group as `Dead`.
+///
+/// One admin call, but a request per broker underneath: a group is known only
+/// to its own coordinator, so the listing is a fan-out that librdkafka merges.
+/// Bounded by broker count, never by group count.
+pub fn list_consumer_groups_blocking(
+    handle: &ClusterHandle,
+    timeout: Duration,
+) -> Result<Vec<GroupListing>, ApiError> {
+    let admin = handle.admin();
+    let call = AdminCall::new(
+        &admin,
+        rd::rd_kafka_admin_op_t::RD_KAFKA_ADMIN_OP_LISTCONSUMERGROUPS,
+        timeout,
+        &handle.name,
+    )?;
+    // SAFETY: issuing onto our own queue; every string is copied out of the
+    // result before the event drops.
+    unsafe {
+        rd::rd_kafka_ListConsumerGroups(call.rk, call.options, call.queue);
+        let event = call.wait(timeout, &handle.name, "list groups")?;
+        let result = rd::rd_kafka_event_ListConsumerGroups_result(event.0);
+        if result.is_null() {
+            return Err(ApiError::kafka(&handle.name, "list groups: unexpected result type"));
+        }
+        // A fan-out can succeed on some brokers and fail on others. A partial
+        // group list would silently hide groups, so any broker's failure fails
+        // the call — the caller shows the error rather than a short list.
+        let mut error_count = 0usize;
+        let errors = rd::rd_kafka_ListConsumerGroups_result_errors(result, &mut error_count);
+        if error_count > 0 {
+            let detail = cstr_to_string(rd::rd_kafka_error_string(*errors));
+            return Err(ApiError::kafka(&handle.name, format!("list groups: {detail}")));
+        }
+        let mut count = 0usize;
+        let listings = rd::rd_kafka_ListConsumerGroups_result_valid(result, &mut count);
+        let mut out = Vec::with_capacity(count);
+        for i in 0..count {
+            let listing = *listings.add(i);
+            out.push(GroupListing {
+                group_id: cstr_to_string(rd::rd_kafka_ConsumerGroupListing_group_id(listing)),
+                state: cstr_to_string(rd::rd_kafka_consumer_group_state_name(
+                    rd::rd_kafka_ConsumerGroupListing_state(listing),
+                )),
+                group_type: cstr_to_string(rd::rd_kafka_consumer_group_type_name(
+                    rd::rd_kafka_ConsumerGroupListing_type(listing),
+                )),
+            });
+        }
+        Ok(out)
+    }
+}

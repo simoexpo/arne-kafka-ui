@@ -166,6 +166,16 @@ async fn group_detail_tells_the_truth_about_a_new_protocol_group() {
     };
 
     assert_eq!(body["group_type"], "Consumer", "the group speaks the KIP-848 protocol: {body}");
+
+    // The LIST must agree with the detail page. The legacy describe reports
+    // these groups as Dead with no members, so the list reads its state from
+    // the modern listing instead of asserting something it cannot know.
+    let (_, list) = get_json(app(state.clone()), "/api/clusters/test/groups").await;
+    let listed = list["groups"].as_array().unwrap().iter()
+        .find(|g| g["group_id"] == "next-group")
+        .unwrap_or_else(|| panic!("the group is listed: {list}"));
+    assert_eq!(listed["state"], "Stable", "the list agrees with the coordinator: {listed}");
+    assert_eq!(listed["group_type"], "Consumer", "and names the protocol: {listed}");
     let member = &body["members"][0];
     assert!(!member["client_id"].as_str().unwrap_or("").is_empty(), "member has a client id: {body}");
     // The blob is empty on this protocol: only the coordinator knows this.
@@ -868,7 +878,9 @@ async fn the_roster_is_read_once_and_shared_by_every_view() {
             let listed = a.groups.iter().any(|g| g.group_id == "rr-group");
             // the assignments are the whole reason the tab can read this
             let has_assignments = a.groups.iter().any(|g| !g.member_topics.is_empty())
-                || a.groups.iter().all(|g| g.member_count == 0);
+                // Some(0): counted and empty. `None` would mean "uncountable",
+                // which is not the same as "nobody has joined yet".
+                || a.groups.iter().all(|g| g.member_count == Some(0));
             ([a.as_of, b.as_of, c.as_of], listed, has_assignments)
         }
     })

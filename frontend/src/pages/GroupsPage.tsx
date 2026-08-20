@@ -77,7 +77,7 @@ export function GroupsView({ cluster }: { cluster: string }) {
           </thead>
           <tbody>
             {visible.map((g) => (
-              <tr key={g.group_id} className="border-t border-zinc-100 dark:border-zinc-800">
+              <tr key={g.group_id} data-testid="group-row" className="border-t border-zinc-100 dark:border-zinc-800">
                 <td className="py-1.5">
                   <Link
                     to="/c/$cluster/consumers/$group"
@@ -91,8 +91,8 @@ export function GroupsView({ cluster }: { cluster: string }) {
                   </span>
                 </td>
                 <td>{g.state}</td>
-                <td className="text-zinc-500">{g.protocol_type}</td>
-                <td>{g.member_count}</td>
+                <td className="text-zinc-500">{protocolLabel(g)}</td>
+                <MemberCount count={g.member_count} />
                 <td>
                   <TotalLag entry={lagOf(g.group_id)} pending={lag.isPending} />
                 </td>
@@ -123,6 +123,29 @@ export function GroupsView({ cluster }: { cluster: string }) {
         )}
       </Panel>
     </div>
+  )
+}
+
+/// The rebalance protocol the coordinator named, which is what an operator
+/// wants here — `Consumer` groups behave differently and report less through
+/// the classic APIs. A broker too old to name it leaves the raw protocol type
+/// standing rather than labelling the group wrongly.
+function protocolLabel(g: { group_type: string; protocol_type: string }): string {
+  return g.group_type && g.group_type !== 'Unknown' ? g.group_type : g.protocol_type
+}
+
+/// A count this page cannot take is stated as unknown, never as zero: the
+/// classic describe reports no members for a KIP-848 group however many it has.
+function MemberCount({ count }: { count: number | null }) {
+  if (count != null) return <td data-testid="group-members">{count}</td>
+  return (
+    <td
+      data-testid="group-members"
+      className="cursor-help text-zinc-400"
+      title="a KIP-848 group's members cannot be counted from this view — open the group to see them"
+    >
+      —
+    </td>
   )
 }
 

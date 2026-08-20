@@ -209,7 +209,13 @@ pub struct GroupSummary {
     pub group_id: String,
     pub state: String,
     pub protocol_type: String,
-    pub member_count: usize,
+    /// `Classic`, `Consumer` (KIP-848), or `Unknown` on brokers whose
+    /// ListGroups is too old to say.
+    pub group_type: String,
+    /// `null` when the group's membership is unknowable from the calls this
+    /// view makes: the classic describe cannot see a KIP-848 group's members,
+    /// and counting them costs a request per group.
+    pub member_count: Option<usize>,
 }
 
 /// One group's cluster-wide lag, asked for by name. `total_lag` is `null`
@@ -561,7 +567,11 @@ pub struct GroupMembership {
     pub group_id: String,
     pub state: String,
     pub protocol_type: String,
-    pub member_count: usize,
+    /// From the modern listing: `Classic`, `Consumer`, or `Unknown`.
+    pub group_type: String,
+    /// `None` for a group the classic describe cannot see into — a KIP-848
+    /// group, whose members it reports as zero.
+    pub member_count: Option<usize>,
     /// One entry per live member: `Some(topics)` when its assignment decoded,
     /// `None` when it did not — which callers must treat as "could be anything".
     pub member_topics: Vec<Option<Vec<String>>>,
@@ -592,24 +602,53 @@ pub fn group_roster_cached(handle: &ClusterHandle, ttl_ms: i64) -> Result<Arc<Gr
 }
 
 fn fetch_group_roster(handle: &ClusterHandle) -> Result<GroupRoster, ApiError> {
+    // Two views of the same set, each with what the other cannot give:
+    //  - the modern listing knows every group's real state and protocol, for
+    //    the classic and the KIP-848 protocol alike (one fan-out, no describe);
+    //  - the legacy list carries members and their assignments, batched per
+    //    broker, but its DescribeGroups half is blind to KIP-848 groups and
+    //    calls them `Dead` with nobody in them.
+    let listings = super::ffi::list_consumer_groups_blocking(handle, ADMIN_TIMEOUT)?;
+    let listed: std::collections::HashMap<&str, &super::ffi::GroupListing> =
+        listings.iter().map(|l| (l.group_id.as_str(), l)).collect();
     let gl = handle.consumer()
         .fetch_group_list(None, ADMIN_TIMEOUT)
         .map_err(|e| error::from_kafka(&handle.name, "list groups", &e))?;
     let mut groups: Vec<GroupMembership> = gl.groups().iter()
         .filter(|g| is_consumer_group_protocol(g.protocol_type()))
-        .map(|g| GroupMembership {
-            group_id: g.name().to_string(),
-            state: g.state().to_string(),
-            protocol_type: g.protocol_type().to_string(),
-            member_count: g.members().len(),
-            member_topics: g.members().iter()
-                .map(|m| m.assignment().and_then(super::assignment::assigned_topics))
-                .collect(),
+        .map(|g| {
+            let listing = listed.get(g.name());
+            let group_type = listing.map(|l| l.group_type.clone()).unwrap_or_default();
+            // Only the classic protocol puts members in the describe response.
+            // Anything else — including a broker too old to name the protocol —
+            // has no trustworthy count here, so it states none.
+            let describes_members = group_type == CLASSIC_PROTOCOL;
+            GroupMembership {
+                group_id: g.name().to_string(),
+                // The listing's state is right for both protocols; the legacy
+                // one is only a fallback for brokers that predate v4 listings.
+                state: listing
+                    .map(|l| l.state.clone())
+                    .filter(|s| s != UNKNOWN_STATE)
+                    .unwrap_or_else(|| g.state().to_string()),
+                protocol_type: g.protocol_type().to_string(),
+                group_type,
+                member_count: describes_members.then(|| g.members().len()),
+                member_topics: g.members().iter()
+                    .map(|m| m.assignment().and_then(super::assignment::assigned_topics))
+                    .collect(),
+            }
         })
         .collect();
     groups.sort_by(|a, b| a.group_id.cmp(&b.group_id));
     Ok(GroupRoster { groups, as_of: now_ms() })
 }
+
+/// librdkafka's name for the classic rebalance protocol, and for a state it
+/// could not map — the KIP-848 protocol has states (`Assigning`,
+/// `Reconciling`) that librdkafka's enum has no room for yet.
+const CLASSIC_PROTOCOL: &str = "Classic";
+const UNKNOWN_STATE: &str = "Unknown";
 
 pub async fn list_groups(handle: Arc<ClusterHandle>) -> Result<Arc<GroupList>, ApiError> {
     tokio::task::spawn_blocking(move || {
@@ -619,6 +658,7 @@ pub async fn list_groups(handle: Arc<ClusterHandle>) -> Result<Arc<GroupList>, A
                 group_id: g.group_id.clone(),
                 state: g.state.clone(),
                 protocol_type: g.protocol_type.clone(),
+                group_type: g.group_type.clone(),
                 member_count: g.member_count,
             }).collect(),
             // The roster's own sample time, not this request's.
