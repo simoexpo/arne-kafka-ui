@@ -73,13 +73,39 @@ pub fn classify(member_topics: &[Option<Vec<String>>], topic: &str) -> Classific
 /// What one group has committed, as the cluster reports it: every partition
 /// it holds an offset on, across every topic. ONE entry per group serves every
 /// view — the consumers list sums it whole, a topic's tab filters it to that
-/// topic — because lag is no longer stored, it is computed from these commits
-/// against the shared watermark cache at read time (owner ruling 2026-08-20).
+/// topic (owner ruling 2026-08-20).
 #[derive(Clone, Debug, PartialEq)]
 pub struct CommittedOffset {
     pub topic: String,
     pub partition: i32,
     pub offset: i64,
+}
+
+/// Lag is a SUBTRACTION between a committed offset and a head, so the two
+/// sides must be sampled together: pairing a cached commit with a newer head
+/// invents lag that was never true at any instant (a caught-up consumer on a
+/// 10k msg/s topic would appear 80k behind after 8 seconds). So the pair is
+/// what gets stored and what ages as one — a stored row is old, never wrong.
+#[derive(Clone)]
+pub struct LagSnapshot {
+    pub rows: Vec<PartitionLag>,
+}
+
+impl LagSnapshot {
+    /// Whether this group holds any offsets on `topic` — what decides which
+    /// freshness tier a topic's tab applies to the shared entry.
+    pub fn covers(&self, topic: &str) -> bool {
+        self.rows.iter().any(|r| r.topic == topic)
+    }
+
+    /// The rows for one topic, or all of them for a cluster-wide view.
+    pub fn narrowed(&self, only_topic: Option<&str>) -> Vec<PartitionLag> {
+        self.rows
+            .iter()
+            .filter(|r| only_topic.is_none_or(|t| r.topic == t))
+            .cloned()
+            .collect()
+    }
 }
 
 /// How old a group's commits may be for the purpose at hand. The 8s/60s split
@@ -92,9 +118,10 @@ pub fn commits_ttl(class: &Classification, shows_rows_here: bool) -> i64 {
         Classification::AssignedToTopic => LIVE_TTL_MS,
         Classification::MustInspect if shows_rows_here => LIVE_TTL_MS,
         Classification::MustInspect => IDLE_TTL_MS,
-        // callers skip MovedAway groups before asking; this arm only keeps
-        // the match total
-        Classification::MovedAway => IDLE_TTL_MS,
+        // Callers skip MovedAway groups before asking. If one ever slips
+        // through, it must NOT trigger a read: an OffsetFetch per moved-away
+        // group is the O(N) class this codebase took an incident on.
+        Classification::MovedAway => i64::MAX,
     }
 }
 

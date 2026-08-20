@@ -197,8 +197,6 @@ async fn topic_consumers_lists_groups_reading_the_topic() {
 /// fetch per group, this would see 2 of each instead of 1.
 #[tokio::test]
 async fn topic_consumers_shares_metadata_and_watermarks_across_groups() {
-    use arne::cluster::admin::group_watermark_fetch_count;
-
     let bootstrap = start_kafka().await;
     let topic = "fanin-topic";
     create_topic(&bootstrap, topic, 1).await;
@@ -213,13 +211,15 @@ async fn topic_consumers_shares_metadata_and_watermarks_across_groups() {
     assert!(groups.iter().any(|g| g["group_id"] == "fanin-group-a"));
     assert!(groups.iter().any(|g| g["group_id"] == "fanin-group-b"));
 
-    // Since lag is computed from a group's OWN committed partitions, this path
-    // needs no topic metadata at all any more, and the shared watermark cache
-    // means one batch serves every group in the request.
-    assert_eq!(
-        group_watermark_fetch_count("lag", topic), 1,
-        "one watermark batch for the whole request, not one per group"
-    );
+    // This path needs no topic metadata at all any more: a group's lag comes
+    // from the partitions IT committed on.
+    //
+    // Watermark fan-in is no longer a per-request guarantee: each group's lag
+    // is a commits/heads pair sampled together, so groups share heads only
+    // through the shared cache's 2s window. Usually that is still one batch per
+    // request, but it is timing-dependent by construction — the sharing itself
+    // is pinned deterministically in
+    // `watermarks_are_shared_across_requests_not_refetched`.
 }
 
 /// Owner ruling 2026-08-19: a live group whose members are all assigned to
@@ -731,7 +731,7 @@ async fn watermarks_are_shared_across_requests_not_refetched() {
 /// fetched independently.
 #[tokio::test]
 async fn one_commits_read_serves_the_list_the_topic_tab_and_the_group_page() {
-    use arne::cluster::admin::{group_commits_cached, group_offset_fetch_count};
+    use arne::cluster::admin::{group_lag_cached, group_offset_fetch_count};
 
     let bootstrap = start_kafka().await;
     create_topic(&bootstrap, "cv-topic", 1).await;
@@ -757,8 +757,8 @@ async fn one_commits_read_serves_the_list_the_topic_tab_and_the_group_page() {
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
                 .as_millis() as i64;
-            let entry = group_commits_cached(&handle, "cv-group", 60_000, now).expect("commits");
-            assert!(!entry.value.is_empty(), "the shared entry carries this group's commits");
+            let entry = group_lag_cached(&handle, "cv-group", 60_000, now).expect("lag rows");
+            assert!(!entry.value.rows.is_empty(), "the shared entry carries this group's rows");
             group_offset_fetch_count("*", "cv-group")
         }
     })
@@ -792,7 +792,10 @@ async fn overview_reports_brokers_and_counts() {
     // The table is a capped leaderboard, so on a shared broker these two
     // topics may not make the cut: assert the CONTRACT (ranked by partitions,
     // capped, internals excluded) and the ordering only when both appear.
-    assert!(top.len() <= 10, "capped at ten: {names:?}");
+    assert!(!top.is_empty() && top.len() <= 10, "a non-empty leaderboard, capped at ten: {names:?}");
+    // the topics this test created exist, whether or not they made the cut
+    let all = body["topic_count"].as_u64().unwrap();
+    assert!(all >= 2, "both created topics are counted: {all}");
     let counts: Vec<i64> = top.iter().map(|t| t["partitions"].as_i64().unwrap()).collect();
     assert!(counts.windows(2).all(|w| w[0] >= w[1]), "ranked by partitions: {counts:?}");
     assert!(names.iter().all(|n| !n.starts_with("__")), "internal topics excluded: {names:?}");

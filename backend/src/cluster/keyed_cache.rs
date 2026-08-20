@@ -41,6 +41,13 @@ impl<K: Eq + Hash + Clone, V: Clone> KeyedCache<K, V> {
         self.inner.read().unwrap_or_else(|e| e.into_inner()).get(key).map(|e| e.sampled_at)
     }
 
+    /// Asks a question OF the stored value without copying it. Cloning a
+    /// group's whole row set just to test a boolean is the kind of waste that
+    /// scales with cluster size.
+    pub fn with<R>(&self, key: &K, f: impl FnOnce(&V) -> R) -> Option<R> {
+        self.inner.read().unwrap_or_else(|e| e.into_inner()).get(key).map(|e| f(&e.value))
+    }
+
     pub fn get(&self, key: &K) -> Option<Stamped<V>> {
         self.inner.read().unwrap_or_else(|e| e.into_inner()).get(key).cloned()
     }
@@ -63,17 +70,6 @@ impl<K: Eq + Hash + Clone, V: Clone> KeyedCache<K, V> {
         for (key, value) in entries {
             map.insert(key, Stamped { value, sampled_at: now });
         }
-    }
-
-    /// Drop entries the caller no longer wants, plus anything past the
-    /// horizon. `keep` sees the key and when it was sampled, so a caller can
-    /// spare entries written after its own snapshot — two concurrent requests
-    /// must not delete each other's fresh work.
-    pub fn retain(&self, now: i64, keep: impl Fn(&K, i64) -> bool) {
-        self.inner
-            .write()
-            .unwrap_or_else(|e| e.into_inner())
-            .retain(|k, e| now - e.sampled_at < self.horizon_ms && keep(k, e.sampled_at));
     }
 
     #[cfg(test)]
@@ -126,17 +122,13 @@ mod tests {
         assert!(cache.get(&"old").is_none());
     }
 
+    /// Asking a question of the value must not copy it: cloning a group's
+    /// whole row set to test a boolean is waste that scales with the cluster.
     #[test]
-    fn retain_drops_what_the_caller_rejects_and_spares_newer_writes() {
-        let cache: KeyedCache<&str, i32> = KeyedCache::new(600_000);
-        cache.insert("keep", 1, 1_000);
-        cache.insert("gone", 2, 1_000);
-        cache.insert("newcomer", 3, 5_000);
-        // a caller whose own view was taken at t=2000 knows nothing of the
-        // newcomer, so it must not delete it
-        cache.retain(2_000, |k, sampled_at| *k == "keep" || sampled_at > 2_000);
-        assert!(cache.get(&"keep").is_some());
-        assert!(cache.get(&"gone").is_none());
-        assert!(cache.get(&"newcomer").is_some(), "written after the caller's snapshot");
+    fn with_answers_without_copying_the_value() {
+        let cache: KeyedCache<&str, Vec<i32>> = KeyedCache::new(600_000);
+        cache.insert("k", vec![1, 2, 3], 0);
+        assert_eq!(cache.with(&"k", |v| v.len()), Some(3));
+        assert_eq!(cache.with(&"missing", |v| v.len()), None);
     }
 }

@@ -1,4 +1,4 @@
-use super::group_lag_cache::{commits_ttl, lag_rows, partitions_of, CommittedOffset};
+use super::group_lag_cache::{commits_ttl, lag_rows, partitions_of, CommittedOffset, LagSnapshot};
 use super::keyed_cache::Stamped;
 use super::{ffi, single_flight, snapshot, ClusterHandle, ADMIN_TIMEOUT};
 use crate::error::{self, ApiError};
@@ -400,41 +400,41 @@ impl<'a> Watermarks<'a> {
 /// NULL-partitions mode). Never narrowed to a topic: one answer serves the
 /// consumers list, every topic's tab and the group's own page, each of which
 /// filters it for itself.
-/// A group's commits, read-through: served from the shared cache when younger
-/// than `ttl_ms`, otherwise fetched once (concurrent askers wait rather than
+/// A group's lag rows, read-through: served from the shared cache when younger
+/// than `ttl_ms`, otherwise sampled once (concurrent askers wait rather than
 /// duplicating) and stored for every other view.
 ///
-/// Public as a test hook: reuse must be asserted with an explicit window, not
-/// by racing two HTTP requests against a production TTL.
+/// The stored value is a PAIR — commits and the heads they were measured
+/// against, sampled together — so a cached row is old but never wrong. Public
+/// as a test hook: reuse must be asserted with an explicit window, not by
+/// racing two HTTP requests against a production TTL.
 #[doc(hidden)]
-pub fn group_commits_cached(
+pub fn group_lag_cached(
     handle: &ClusterHandle,
     group: &str,
     ttl_ms: i64,
     now: i64,
-) -> Result<Stamped<Vec<CommittedOffset>>, String> {
-    if let Some(entry) = handle.group_commits.get(&group.to_string()).filter(|e| now - e.sampled_at < ttl_ms) {
+) -> Result<Stamped<LagSnapshot>, ApiError> {
+    if let Some(entry) = handle.group_lag.get(&group.to_string()).filter(|e| now - e.sampled_at < ttl_ms) {
         return Ok(entry);
     }
     match handle.commits_flight.begin_or_wait(group.to_string(), single_flight::MAX_WAIT) {
         // Someone else is reading this group right now: take their answer
-        // rather than asking the broker the same question again.
-        None => handle
-            .group_commits
-            .get(&group.to_string())
-            .ok_or_else(|| "still being read by another request".to_string()),
-        Some(_flight) => {
-            let commits = fetch_group_commits(handle, group).map_err(|e| lag_error_reason(&e))?;
-            // Stamped on COMPLETION: the fetch can spend a second in
-            // coordinator retries, and an entry born older than its own TTL
-            // would never serve a hit — every poll would re-read every group.
-            let sampled_at = now_ms();
-            handle.group_commits.insert(group.to_string(), commits.clone(), sampled_at);
-            Ok(Stamped { value: commits, sampled_at })
-        }
+        // rather than asking the broker the same question again. If their read
+        // is still running, do it ourselves — liveness beats perfect
+        // deduplication on a path that only runs when something is slow.
+        None => match handle.group_lag.get(&group.to_string()) {
+            Some(entry) => Ok(entry),
+            None => sample_group_lag(handle, group),
+        },
+        Some(_flight) => sample_group_lag(handle, group),
     }
 }
 
+/// Every partition this group has committed on, in ONE request (librdkafka's
+/// NULL-partitions mode, verified by spike 2026-08-20). Never narrowed to a
+/// topic: one answer serves the consumers list, every topic's tab and the
+/// group's own page.
 fn fetch_group_commits(handle: &ClusterHandle, group: &str) -> Result<Vec<CommittedOffset>, ApiError> {
     record_group_offset_fetch(CLUSTER_WIDE, group);
     // NotCoordinator/CoordinatorNotAvailable/CoordinatorLoadInProgress are
@@ -457,23 +457,8 @@ fn fetch_group_commits(handle: &ClusterHandle, group: &str) -> Result<Vec<Commit
         .collect())
 }
 
-/// Lag for one group, narrowed to `only_topic` when a topic's own tab is
-/// asking. Returns the rows and the age of the OLDER of the two samples behind
-/// them — commits and watermarks are read separately now, so a lag number is
-/// only as current as its staler half.
-fn lag_for(
-    commits: &Stamped<Vec<CommittedOffset>>,
-    only_topic: Option<&str>,
-    watermarks: &mut Watermarks<'_>,
-) -> Result<(Vec<PartitionLag>, i64), String> {
-    let wanted = partitions_of(&commits.value, only_topic);
-    let watermarks_at = watermarks.ensure(&wanted).map_err(|e| lag_error_reason(&e))?;
-    let rows = lag_rows(&commits.value, only_topic, |t, p| watermarks.get(t, p))?;
-    Ok((rows, commits.sampled_at.min(watermarks_at)))
-}
-
 /// The coordinator moving or still loading its state reads as a failure but
-/// isn't one — the same three conditions the old client-based path retried.
+/// isn't one — the three conditions worth a brief retry.
 fn is_coordinator_hiccup(message: &str) -> bool {
     ["NOT_COORDINATOR", "COORDINATOR_NOT_AVAILABLE", "COORDINATOR_LOAD_IN_PROGRESS",
      "Not coordinator", "Coordinator not available", "Coordinator load in progress"]
@@ -481,18 +466,35 @@ fn is_coordinator_hiccup(message: &str) -> bool {
         .any(|needle| message.contains(needle))
 }
 
-/// Coordination-only groups (schema registry's "sr", Connect's "connect")
-/// never commit offsets, so the consumers page has nothing true to say
-/// about them — hidden entirely (owner ruling 2026-08-17). An empty
-/// protocol type is a consumer group with no active members: visible,
-/// that's the lagging-dead-consumer case the page exists for.
+/// Reads a group's commits and the heads for exactly those partitions, close
+/// together in time, and stores the pair.
+fn sample_group_lag(handle: &ClusterHandle, group: &str) -> Result<Stamped<LagSnapshot>, ApiError> {
+    let commits = fetch_group_commits(handle, group)?;
+    let wanted = partitions_of(&commits, None);
+    // Heads for this group only, read now: the pair must be simultaneous.
+    let mut heads = Watermarks::labelled(handle, LAG_WATERMARK_TTL_MS, "lag");
+    heads.ensure(&wanted)?;
+    let rows = lag_rows(&commits, None, |t, p| heads.get(t, p))
+        .map_err(|reason| ApiError::kafka(&handle.name, reason))?;
+    // Stamped on COMPLETION: the reads above can spend a second in coordinator
+    // retries, and an entry born older than its own TTL would never serve a
+    // hit — every poll would re-read every group.
+    let sampled_at = now_ms();
+    let snapshot = LagSnapshot { rows };
+    handle.group_lag.insert(group.to_string(), snapshot.clone(), sampled_at);
+    Ok(Stamped { value: snapshot, sampled_at })
+}
+
+/// A group whose protocol type is anything other than a consumer group's uses
+/// Kafka's membership machinery for coordination only (Schema Registry's "sr",
+/// Connect's "connect") and never commits offsets worth showing. An EMPTY
+/// protocol type stays visible: that's a consumer group with no active
+/// members, exactly the lagging-dead-consumer case the page exists to surface
+/// (owner ruling 2026-08-17).
 fn is_consumer_group_protocol(protocol_type: &str) -> bool {
     protocol_type == "consumer" || protocol_type.is_empty()
 }
 
-/// Topic names only — one metadata round trip, none of `list_topics`'s
-/// per-partition watermark fetches. For callers that need just the
-/// inventory of names (subject-usage inference).
 pub async fn topic_names(handle: Arc<ClusterHandle>) -> Result<Vec<String>, ApiError> {
     tokio::task::spawn_blocking(move || {
         let md = handle.consumer()
@@ -543,36 +545,36 @@ fn list_groups_blocking(handle: &ClusterHandle) -> Result<GroupList, ApiError> {
 }
 
 /// Cluster-wide lag for the named groups only — what a paginated consumers
-/// list asks for, one page at a time. Shares the per-group cache and
-/// single-flight with the topic tab, so several tabs showing overlapping
-/// pages still inspect each group once per tier.
+/// list asks for, one page at a time. Reads the shared per-group entry, so a
+/// group already sampled for its own page or a topic's tab costs nothing here.
 pub async fn groups_lag(handle: Arc<ClusterHandle>, groups: Vec<String>) -> Result<GroupLagBatch, ApiError> {
     tokio::task::spawn_blocking(move || {
         use super::group_lag_cache::LIVE_TTL_MS;
         let now = now_ms();
-        let mut watermarks = Watermarks::new(&handle, LAG_WATERMARK_TTL_MS);
         let mut out = Vec::with_capacity(groups.len());
         // The batch is only as fresh as the oldest entry it serves — a cached
         // row must not be presented under a "just now" stamp.
         let mut oldest_served: Option<i64> = None;
         for group in groups {
-            // Every row here is displayed, so the whole-cluster view always
-            // wants the fast tier.
-            let entry = group_commits_cached(&handle, &group, LIVE_TTL_MS, now)
-                .and_then(|commits| lag_for(&commits, None, &mut watermarks));
-            out.push(match entry {
-                Ok((rows, pair_at)) => {
-                    oldest_served = Some(oldest_served.map_or(pair_at, |o: i64| o.min(pair_at)));
-                    GroupLagEntry {
+            // Every row here is displayed, so this view always wants the fast tier.
+            match group_lag_cached(&handle, &group, LIVE_TTL_MS, now) {
+                Ok(entry) => {
+                    oldest_served = Some(oldest_served.map_or(entry.sampled_at, |o: i64| o.min(entry.sampled_at)));
+                    let rows = &entry.value.rows;
+                    out.push(GroupLagEntry {
                         group_id: group,
                         // No commits anywhere means no position to be behind —
                         // undetermined, never a confident 0.
-                        total_lag: if rows.is_empty() { None } else { Some(rows.iter().map(|p| p.lag).sum()) },
+                        total_lag: if rows.is_empty() { None } else { Some(rows.iter().map(|r| r.lag).sum()) },
                         error: None,
-                    }
+                    });
                 }
-                Err(reason) => GroupLagEntry { group_id: group, total_lag: None, error: Some(reason) },
-            });
+                Err(e) => out.push(GroupLagEntry {
+                    group_id: group,
+                    total_lag: None,
+                    error: Some(lag_error_reason(&e)),
+                }),
+            }
         }
         Ok(GroupLagBatch { groups: out, as_of: oldest_served.unwrap_or(now) })
     })
@@ -587,8 +589,8 @@ pub async fn groups_lag(handle: Arc<ClusterHandle>, groups: Vec<String>) -> Resu
 /// instant. The pair's reported age is the older of the two sides.
 pub const LAG_WATERMARK_TTL_MS: i64 = 2_000;
 
-/// Label for the cluster-wide scope in the test call counter. The two lag
-/// caches are separate structures now, so this is no longer a cache key.
+/// Label for the whole-cluster scope in the test call counter. A group's
+/// commits are read once for every view, so every read carries this label.
 const CLUSTER_WIDE: &str = "*";
 
 pub async fn group_detail(handle: Arc<ClusterHandle>, group: String) -> Result<GroupDetail, ApiError> {
@@ -624,17 +626,11 @@ async fn group_detail_uncached(handle: Arc<ClusterHandle>, group: String) -> Res
         let info = gl.groups().iter().find(|g| g.name() == group);
         // a group entry with state "Dead" counts as absent
         let info = info.filter(|i| i.state() != "Dead");
-        let mut watermarks = Watermarks::new(&handle, LAG_WATERMARK_TTL_MS);
-        // The same shared commits entry the consumers list uses, so opening a
-        // group's page after seeing it in the list costs nothing.
-        let (partitions, pair_at) = group_commits_cached(
-            &handle,
-            &group,
-            super::group_lag_cache::LIVE_TTL_MS,
-            now_ms(),
-        )
-        .and_then(|commits| lag_for(&commits, None, &mut watermarks))
-        .map_err(|reason| ApiError::kafka(&handle.name, reason))?;
+        // The same shared entry the consumers list uses, so opening a group's
+        // page after seeing it in the list costs nothing. Errors keep their own
+        // ApiError, so a broker timeout still reports as a timeout.
+        let entry = group_lag_cached(&handle, &group, super::group_lag_cache::LIVE_TTL_MS, now_ms())?;
+        let (partitions, pair_at) = (entry.value.rows, entry.sampled_at);
         // A group with no broker-side entry AND no committed offsets does not exist.
         let info = match (info, partitions.is_empty()) {
             (Some(i), _) => Some(i),
@@ -756,7 +752,6 @@ pub async fn topic_consumers(handle: Arc<ClusterHandle>, topic: String) -> Resul
         let gl = handle.consumer()
             .fetch_group_list(None, ADMIN_TIMEOUT)
             .map_err(|e| error::from_kafka(&handle.name, "list groups", &e))?;
-        let mut watermarks = Watermarks::new(&handle, LAG_WATERMARK_TTL_MS);
         let mut groups = Vec::new();
         let mut unchecked = Vec::new();
         let mut oldest_served: Option<i64> = None;
@@ -774,17 +769,23 @@ pub async fn topic_consumers(handle: Arc<ClusterHandle>, topic: String) -> Resul
             // The tier is a property of THIS read: a group that shows nothing
             // on this topic is worth re-reading once a minute, even though the
             // same shared entry may be serving another view at 8s.
+            // Probed without cloning the group's rows: this only asks whether
+            // the topic appears at all.
             let shows_rows_here = handle
-                .group_commits
-                .get(&g.name().to_string())
-                .is_some_and(|e| e.value.iter().any(|c| c.topic == topic));
+                .group_lag
+                .with(&g.name().to_string(), |snapshot| snapshot.covers(&topic))
+                .unwrap_or(false);
             let ttl = commits_ttl(&class, shows_rows_here);
-            let outcome = group_commits_cached(&handle, g.name(), ttl, now)
-                .and_then(|commits| lag_for(&commits, Some(&topic), &mut watermarks));
-            let pair_at = outcome.as_ref().ok().map(|(_, at)| *at);
-            match inspection_of(g.name(), g.state(), &class, outcome.map(|(rows, _)| rows)) {
+            let outcome = group_lag_cached(&handle, g.name(), ttl, now);
+            let pair_at = outcome.as_ref().ok().map(|e| e.sampled_at);
+            let narrowed = outcome
+                .map(|e| e.value.narrowed(Some(&topic)))
+                .map_err(|e| lag_error_reason(&e));
+            match inspection_of(g.name(), g.state(), &class, narrowed) {
                 Inspection::Listed(row) => {
-                    if let Some(at) = pair_at.filter(|_| !row.partitions.is_empty()) {
+                    // Every listed row rests on a real sample, including one
+                    // that says "assigned but nothing committed yet".
+                    if let Some(at) = pair_at {
                         oldest_served = Some(oldest_served.map_or(at, |o: i64| o.min(at)));
                     }
                     groups.push(row);

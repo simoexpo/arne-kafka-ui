@@ -85,13 +85,13 @@ pub struct ClusterHandle {
     /// (topic, group) at a time: concurrent pollers wait for the in-flight
     /// refresh instead of duplicating it (owner design 2026-08-19).
     pub sampler_flight: single_flight::SingleFlight<String>,
-    /// What each group has COMMITTED, everywhere — ONE entry per group,
-    /// serving every view. Lag is not stored: it is computed from these
-    /// commits against `watermarks` at read time, so the consumers list, a
-    /// topic's tab and a group's page share one fetch (owner ruling
-    /// 2026-08-20). Freshness is the reader's policy — see
+    /// One group's lag rows across every topic it reads — ONE entry per group,
+    /// serving every view: the consumers list sums it, a topic's tab filters
+    /// it, the group's page shows it whole (owner ruling 2026-08-20). The
+    /// stored value is a commits/heads PAIR sampled together, so a cached row
+    /// is old but never wrong. Freshness is the reader's policy — see
     /// `group_lag_cache::commits_ttl`.
-    pub group_commits: keyed_cache::KeyedCache<String, Vec<group_lag_cache::CommittedOffset>>,
+    pub group_lag: keyed_cache::KeyedCache<String, group_lag_cache::LagSnapshot>,
     pub commits_flight: single_flight::SingleFlight<String>,
     /// Every partition's high watermark, shared by the four call sites that
     /// need one (partitions tab, messages window, throughput sampling, lag).
@@ -145,7 +145,7 @@ impl ClusterHandle {
             config,
             sampler: Arc::new(sampler::SamplerStore::new()),
             sampler_flight: single_flight::SingleFlight::new(),
-            group_commits: keyed_cache::KeyedCache::new(group_lag_cache::EVICT_AGE_MS),
+            group_lag: keyed_cache::KeyedCache::new(group_lag_cache::EVICT_AGE_MS),
             commits_flight: single_flight::SingleFlight::new(),
             watermarks: keyed_cache::KeyedCache::new(WATERMARK_HORIZON_MS),
             topics_snapshot: snapshot::SnapshotCache::new(),
