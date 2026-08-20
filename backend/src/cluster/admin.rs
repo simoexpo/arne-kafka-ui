@@ -727,8 +727,12 @@ pub struct TopicGroupLag {
     /// holds an assignment but hasn't committed yet (where it reads is
     /// decided by `auto.offset.reset` or an explicit seek, not by us), or its
     /// offset lookup failed — `error` then carries the reason. Never 0 as a
-    /// stand-in for "we don't know" (owner ruling 2026-08-19).
+    /// stand-in for "we don't know" (owner ruling 2026-08-19). A lower bound,
+    /// not a total, when `unreadable_partitions` is non-zero.
     pub total_lag: Option<i64>,
+    /// Partitions of THIS topic the group commits on whose head could not be
+    /// read. Trouble on its other topics is not this tab's business.
+    pub unreadable_partitions: usize,
     pub partitions: Vec<PartitionLag>,
     /// Always present on the wire, `null` when there is nothing to report.
     pub error: Option<String>,
@@ -765,6 +769,7 @@ fn inspection_of(
     state: &str,
     class: &super::group_lag_cache::Classification,
     lag: Result<Vec<PartitionLag>, String>,
+    unreadable_here: usize,
 ) -> Inspection {
     use super::group_lag_cache::Classification;
     let row = |total_lag, partitions, error| {
@@ -772,6 +777,7 @@ fn inspection_of(
             group_id: group_id.to_string(),
             state: state.to_string(),
             total_lag,
+            unreadable_partitions: unreadable_here,
             partitions,
             error,
         })
@@ -781,10 +787,13 @@ fn inspection_of(
         (Classification::AssignedToTopic, Ok(partitions)) if partitions.is_empty() => {
             row(None, partitions, None)
         }
-        (_, Ok(partitions)) if partitions.is_empty() => Inspection::Skipped,
+        // No rows and nothing unread here means it holds no offsets on this
+        // topic at all — not a consumer of it. Unread partitions ARE offsets
+        // it holds, so that group stays listed with the count instead.
+        (_, Ok(partitions)) if partitions.is_empty() && unreadable_here == 0 => Inspection::Skipped,
         (_, Ok(partitions)) => {
-            let total = partitions.iter().map(|p| p.lag).sum();
-            row(Some(total), partitions, None)
+            let total = (!partitions.is_empty()).then(|| partitions.iter().map(|p| p.lag).sum());
+            row(total, partitions, None)
         }
         (Classification::AssignedToTopic, Err(e)) => row(None, Vec::new(), Some(e)),
         (Classification::MustInspect, Err(e)) => Inspection::Unchecked(UncheckedGroup {
@@ -841,22 +850,12 @@ pub async fn topic_consumers(handle: Arc<ClusterHandle>, topic: String) -> Resul
             let pair_at = outcome.as_ref().ok().map(|e| e.sampled_at);
             // Trouble on another topic is none of this tab's business; only a
             // gap in THIS topic's partitions makes its total unstateable.
-            let missing_here = outcome
-                .as_ref()
-                .ok()
-                .map(|e| e.value.unknown.iter().filter(|(t, _)| *t == topic).count())
-                .unwrap_or(0);
+            let missing_here = outcome.as_ref().ok().map_or(0, |e| e.value.unreadable_on(&topic));
             let narrowed = outcome
                 .map(|e| e.value.narrowed(Some(&topic)))
                 .map_err(|e| lag_error_reason(&e));
-            match inspection_of(&g.group_id, &g.state, &class, narrowed) {
-                Inspection::Listed(mut row) => {
-                    if missing_here > 0 {
-                        // The rows we do have stay visible; the total does not
-                        // pretend to be complete.
-                        row.total_lag = None;
-                        row.error = Some(format!("{missing_here} partition(s) could not be read"));
-                    }
+            match inspection_of(&g.group_id, &g.state, &class, narrowed, missing_here) {
+                Inspection::Listed(row) => {
                     // Every listed row rests on a real sample, including one
                     // that says "assigned but nothing committed yet".
                     if let Some(at) = pair_at {
@@ -982,7 +981,7 @@ mod tests {
     /// separately instead of being listed or silently dropped.
     #[test]
     fn assigned_group_without_commits_is_listed_with_undetermined_lag() {
-        let ins = inspection_of("g", "Stable", &Classification::AssignedToTopic, Ok(vec![]));
+        let ins = inspection_of("g", "Stable", &Classification::AssignedToTopic, Ok(vec![]), 0);
         let Inspection::Listed(row) = ins else { panic!("must be listed") };
         assert_eq!(row.total_lag, None);
         assert!(row.partitions.is_empty());
@@ -991,7 +990,7 @@ mod tests {
 
     #[test]
     fn assigned_group_with_commits_reports_summed_lag() {
-        let ins = inspection_of("g", "Stable", &Classification::AssignedToTopic, Ok(vec![lag(3), lag(4)]));
+        let ins = inspection_of("g", "Stable", &Classification::AssignedToTopic, Ok(vec![lag(3), lag(4)]), 0);
         let Inspection::Listed(row) = ins else { panic!("must be listed") };
         assert_eq!(row.total_lag, Some(7));
         assert_eq!(row.partitions.len(), 2);
@@ -1000,21 +999,43 @@ mod tests {
     #[test]
     fn inspected_group_without_offsets_here_is_not_a_consumer_of_this_topic() {
         assert!(matches!(
-            inspection_of("g", "Empty", &Classification::MustInspect, Ok(vec![])),
+            inspection_of("g", "Empty", &Classification::MustInspect, Ok(vec![]), 0),
             Inspection::Skipped
         ));
     }
 
     #[test]
     fn inspected_group_with_offsets_here_is_listed() {
-        let ins = inspection_of("g", "Empty", &Classification::MustInspect, Ok(vec![lag(5)]));
+        let ins = inspection_of("g", "Empty", &Classification::MustInspect, Ok(vec![lag(5)]), 0);
         let Inspection::Listed(row) = ins else { panic!("must be listed") };
         assert_eq!(row.total_lag, Some(5));
     }
 
+    // Owner ruling 2026-08-20: the same lower-bound rule as every other lag
+    // total — the rows we read prove a floor, and the count says the real
+    // number is higher.
+    #[test]
+    fn a_partial_topic_total_is_stated_as_a_bound_not_withheld() {
+        let ins = inspection_of("g", "Stable", &Classification::AssignedToTopic, Ok(vec![lag(3), lag(4)]), 1);
+        let Inspection::Listed(row) = ins else { panic!("must be listed") };
+        assert_eq!(row.total_lag, Some(7));
+        assert_eq!(row.unreadable_partitions, 1);
+        assert_eq!(row.error, None, "an unread partition is not an error, it is a bound");
+    }
+
+    // It committed here, so it consumes this topic: dropping it because every
+    // one of those partitions failed to read would hide a real consumer.
+    #[test]
+    fn a_group_whose_every_partition_here_is_unreadable_is_still_listed() {
+        let ins = inspection_of("g", "Empty", &Classification::MustInspect, Ok(vec![]), 2);
+        let Inspection::Listed(row) = ins else { panic!("a consumer of this topic stays listed") };
+        assert_eq!(row.total_lag, None);
+        assert_eq!(row.unreadable_partitions, 2);
+    }
+
     #[test]
     fn a_known_consumers_failed_lookup_keeps_its_row_and_says_why() {
-        let ins = inspection_of("g", "Stable", &Classification::AssignedToTopic, Err("Broker: Not coordinator".into()));
+        let ins = inspection_of("g", "Stable", &Classification::AssignedToTopic, Err("Broker: Not coordinator".into()), 0);
         let Inspection::Listed(row) = ins else { panic!("a known consumer stays listed") };
         assert_eq!(row.total_lag, None);
         assert_eq!(row.error.as_deref(), Some("Broker: Not coordinator"));
@@ -1022,7 +1043,7 @@ mod tests {
 
     #[test]
     fn an_unknown_groups_failed_lookup_is_disclosed_not_listed() {
-        let ins = inspection_of("g", "Empty", &Classification::MustInspect, Err("Broker: Not coordinator".into()));
+        let ins = inspection_of("g", "Empty", &Classification::MustInspect, Err("Broker: Not coordinator".into()), 0);
         let Inspection::Unchecked(u) = ins else { panic!("must be disclosed as unchecked") };
         assert_eq!(u.group_id, "g");
         assert_eq!(u.error, "Broker: Not coordinator");

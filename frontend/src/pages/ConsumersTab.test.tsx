@@ -23,7 +23,7 @@ describe('ConsumersTab', () => {
     vi.mocked(client.getTopicConsumers).mockResolvedValue({
       topic: 'orders',
       groups: [{
-        group_id: 'billing', state: 'Stable', total_lag: 7, error: null,
+        group_id: 'billing', state: 'Stable', total_lag: 7, unreadable_partitions: 0, error: null,
         partitions: [{ topic: 'orders', partition: 0, committed_offset: 35, end_offset: 42, lag: 7 }],
       }],
       unchecked: [],
@@ -91,13 +91,33 @@ describe('ConsumersTab', () => {
   })
 
   // Owner ruling 2026-08-19: an assigned group with no committed offset is
+  // Owner ruling 2026-08-20: one rule everywhere a lag total is shown — the
+  // partitions we read prove a floor, and the tooltip says the rest is unread.
+  it('states a topic total as a lower bound when one of its partitions is unreadable', async () => {
+    vi.mocked(client.getThroughput).mockResolvedValue({ topic: 'orders', samples: [], as_of: null })
+    vi.mocked(client.getTopicConsumers).mockResolvedValue({
+      topic: 'orders',
+      groups: [{
+        group_id: 'billing', state: 'Stable', total_lag: 4_200, unreadable_partitions: 1,
+        error: null, partitions: [],
+      }],
+      unchecked: [],
+      as_of: 1000,
+    })
+    renderWithQuery(<ConsumersTab cluster="prod" topic="orders" />)
+    expect(await screen.findByText('billing')).toBeInTheDocument()
+    const lag = screen.getByTestId('group-lag')
+    expect(lag).toHaveTextContent('≥ 4.2k')
+    expect(lag).toHaveAttribute('title', expect.stringContaining('1'))
+  })
+
   // consuming — where it reads is its own business until it commits — so it is
   // listed with an undetermined lag, never a fake 0.
   it('shows an assigned group that has not committed with a dash instead of zero lag', async () => {
     vi.mocked(client.getThroughput).mockResolvedValue({ topic: 'orders', samples: [], as_of: null })
     vi.mocked(client.getTopicConsumers).mockResolvedValue({
       topic: 'orders',
-      groups: [{ group_id: 'fresh', state: 'Stable', total_lag: null, error: null, partitions: [] }],
+      groups: [{ group_id: 'fresh', state: 'Stable', total_lag: null, unreadable_partitions: 0, error: null, partitions: [] }],
       unchecked: [],
       as_of: 1000,
     })
@@ -114,7 +134,7 @@ describe('ConsumersTab', () => {
     vi.mocked(client.getTopicConsumers).mockResolvedValue({
       topic: 'orders',
       groups: [{
-        group_id: 'billing', state: 'Stable', total_lag: null,
+        group_id: 'billing', state: 'Stable', total_lag: null, unreadable_partitions: 0,
         error: 'Broker: Not coordinator for group', partitions: [],
       }],
       unchecked: [],

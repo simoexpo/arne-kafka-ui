@@ -124,8 +124,11 @@ impl LagSnapshot {
 
     /// Whether this view is missing a partition, so its total cannot be
     /// stated. Summing what we have would under-report with confidence.
-    pub fn incomplete_for(&self, only_topic: Option<&str>) -> bool {
-        self.unknown.iter().any(|(t, _)| only_topic.is_none_or(|want| t == want))
+    /// How many of `topic`'s partitions this group commits on could not be
+    /// read. Per topic deliberately: trouble on one topic must not make
+    /// another topic's tab give up on a total it can state.
+    pub fn unreadable_on(&self, topic: &str) -> usize {
+        self.unknown.iter().filter(|(t, _)| t == topic).count()
     }
 }
 
@@ -326,15 +329,14 @@ mod tests {
 
     /// A partition whose head could not be read is NAMED, not dropped and not
     /// fatal: the rows we have stay usable, and only the views covering that
-    /// partition must withhold their total.
+    /// partition state their total as a bound.
     #[test]
     fn an_unreadable_head_is_named_per_partition_not_fatal() {
         let snap = lag_rows(&commits(), |_t, p| if p == 1 { None } else { Some(50) });
         assert_eq!(snap.unknown, vec![("orders".to_string(), 1)]);
         assert_eq!(snap.rows.len(), 2, "the readable partitions still have rows");
-        assert!(snap.incomplete_for(Some("orders")), "orders cannot state a total");
-        assert!(!snap.incomplete_for(Some("users")), "users is unaffected by orders' trouble");
-        assert!(snap.incomplete_for(None), "nor can the cluster-wide view");
+        assert_eq!(snap.unreadable_on("orders"), 1, "orders states a bound, not a total");
+        assert_eq!(snap.unreadable_on("users"), 0, "users is unaffected by orders' trouble");
     }
 
     #[test]

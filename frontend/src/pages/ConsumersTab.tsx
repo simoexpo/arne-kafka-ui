@@ -4,8 +4,22 @@ import { getThroughput, getTopicConsumers } from '../api/client'
 import { Panel } from '../components/Panel'
 import { StalenessChip } from '../components/StalenessChip'
 import { Sparkline } from '../components/Sparkline'
-import { formatAgo, formatCount } from '../lib/format'
+import { formatAgo } from '../lib/format'
+import { statedLag } from '../lib/lag'
 import type { TopicGroupLag } from '../api/types'
+
+function LagBound({ total, unreadable }: { total: number; unreadable: number }) {
+  const { text, title } = statedLag(total, unreadable)
+  return (
+    <span
+      data-testid="group-lag"
+      title={title}
+      className={`${total > 0 ? 'font-semibold' : 'text-zinc-400'} ${title ? 'cursor-help' : ''}`}
+    >
+      {text}
+    </span>
+  )
+}
 
 const NO_COMMIT_TITLE = "this group holds an assignment but hasn't committed an offset yet, so its position is unknown"
 
@@ -101,14 +115,18 @@ function GroupRow({ group }: { group: TopicGroupLag }) {
             <span
               data-testid="group-lag"
               className="cursor-help text-zinc-400"
-              title={group.error ? `Kafka couldn't read this group's offsets — ${group.error}` : NO_COMMIT_TITLE}
+              title={
+                group.error
+                  ? `Kafka couldn't read this group's offsets — ${group.error}`
+                  : group.unreadable_partitions > 0
+                    ? `none of this group's ${group.unreadable_partitions} committed partition(s) on this topic could be read`
+                    : NO_COMMIT_TITLE
+              }
             >
               —
             </span>
           ) : (
-            <span data-testid="group-lag" className={group.total_lag > 0 ? 'font-semibold' : 'text-zinc-400'}>
-              {formatCount(group.total_lag)}
-            </span>
+            <LagBound total={group.total_lag} unreadable={group.unreadable_partitions} />
           )}
         </span>
       </summary>

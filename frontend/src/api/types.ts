@@ -69,7 +69,10 @@ export interface TopicGroupLag {
   state: string
   // null when this group's position on the topic isn't determinable: it holds
   // an assignment but hasn't committed yet, or `error` says the lookup failed.
+  // A lower bound, not a total, when `unreadable_partitions` is non-zero.
   total_lag: number | null
+  // Partitions of THIS topic whose head could not be read.
+  unreadable_partitions: number
   partitions: PartitionLag[]
   error: string | null
 }
