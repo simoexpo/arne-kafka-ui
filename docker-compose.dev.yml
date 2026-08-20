@@ -133,6 +133,26 @@ services:
         /opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server kafka2:19092 \
           --group demo-orders-service --topic demo-orders >/dev/null
 
+  # Kafka 4 steers new clients to the KIP-848 protocol, whose groups carry no
+  # assignment blob and which the legacy describe path reports as Dead — so the
+  # dev cluster keeps one permanently, or that path is only ever exercised by
+  # hand. Two members on a 3-partition topic, which is also the only place the
+  # demo shows partitions split across owners.
+  demo-consumer-next:
+    image: apache/kafka:latest
+    depends_on: [kafka]
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        sleep 15
+        for i in 1 2; do
+          /opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server kafka:19092 \
+            --group demo-next-protocol --topic demo-orders \
+            --consumer-property group.protocol=consumer \
+            --consumer-property client.id=next-worker-$$i >/dev/null &
+        done
+        wait
+
   demo-producer-sr:
     image: confluentinc/cp-schema-registry:7.7.1
     depends_on: [kafka, schema-registry]
