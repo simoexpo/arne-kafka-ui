@@ -35,9 +35,7 @@ export function GroupDetailView({ cluster, group }: { cluster: string; group: st
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
         <Panel title="Group" error={detail.error} loading={detail.isPending} hasData={detail.data !== undefined}>
           {detail.data && (
-            // The three figures need only their digits; the strategy name
-            // takes what is left, so nothing is squeezed to a quarter.
-            <dl className="grid grid-cols-[auto_auto_auto_minmax(0,1fr)] gap-3 text-sm">
+            <dl className="flex justify-between gap-3 text-sm">
               <Stat label="topics" value={String(topics)} />
               <Stat label="partitions" value={String(partitionCount)} />
               <TotalLagStat rows={detail.data.partitions} unreadable={detail.data.unreadable_partitions} />
