@@ -98,6 +98,14 @@ pub struct LagSnapshot {
 }
 
 impl LagSnapshot {
+    /// The total this snapshot can prove: the sum of the partitions that were
+    /// read. With `unknown` non-empty it is a LOWER BOUND, never a total — a
+    /// caller must disclose it as such, since unread partitions can only add.
+    /// `None` means there is no position at all to be behind.
+    pub fn statable_total(&self) -> Option<i64> {
+        (!self.rows.is_empty()).then(|| self.rows.iter().map(|r| r.lag).sum())
+    }
+
     /// Whether this group holds any offsets on `topic` — what decides which
     /// freshness tier a topic's tab applies to the shared entry.
     pub fn covers(&self, topic: &str) -> bool {
@@ -184,6 +192,30 @@ pub fn partitions_of(commits: &[CommittedOffset], only_topic: Option<&str>) -> V
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn commit(topic: &str, partition: i32, offset: i64) -> CommittedOffset {
+        CommittedOffset { topic: topic.into(), partition, offset }
+    }
+
+    #[test]
+    fn a_total_is_summed_from_the_partitions_that_were_read() {
+        let snap = lag_rows(&[commit("t", 0, 5), commit("t", 1, 8)], |_, p| Some(10 + i64::from(p)));
+        assert_eq!(snap.statable_total(), Some(8));
+    }
+
+    // Owner ruling 2026-08-20: a lower bound beats "unknown" — the caller
+    // renders it as `>= n` because the real total can only be higher.
+    #[test]
+    fn an_unreadable_partition_still_yields_the_bound_the_rest_proves() {
+        let snap = lag_rows(&[commit("t", 0, 5), commit("t", 1, 8)], |_, p| (p == 0).then_some(12));
+        assert_eq!(snap.statable_total(), Some(7));
+        assert_eq!(snap.unknown.len(), 1);
+    }
+
+    #[test]
+    fn a_group_that_committed_nothing_has_no_total_at_all() {
+        assert_eq!(lag_rows(&[], |_, _| Some(10)).statable_total(), None);
+    }
 
     #[test]
     fn empty_group_must_be_inspected() {

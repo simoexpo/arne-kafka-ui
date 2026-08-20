@@ -218,7 +218,10 @@ pub struct GroupSummary {
 #[derive(Debug, Serialize, Clone)]
 pub struct GroupLagEntry {
     pub group_id: String,
+    /// The sum of the partitions that were read — a lower bound, not a total,
+    /// whenever `unreadable_partitions` is non-zero.
     pub total_lag: Option<i64>,
+    pub unreadable_partitions: usize,
     pub error: Option<String>,
 }
 
@@ -620,26 +623,17 @@ pub async fn groups_lag(handle: Arc<ClusterHandle>, groups: Vec<String>) -> Resu
             match group_lag_cached(&handle, &group, Some(LIVE_TTL_MS), now) {
                 Ok(entry) => {
                     oldest_served = Some(oldest_served.map_or(entry.sampled_at, |o: i64| o.min(entry.sampled_at)));
-                    let rows = &entry.value.rows;
-                    // Undetermined, never a confident number, when the group
-                    // has committed nothing anywhere OR when a partition's head
-                    // could not be read — summing the rest would under-report.
-                    let incomplete = entry.value.incomplete_for(None);
                     out.push(GroupLagEntry {
                         group_id: group,
-                        total_lag: if rows.is_empty() || incomplete {
-                            None
-                        } else {
-                            Some(rows.iter().map(|r| r.lag).sum())
-                        },
-                        error: incomplete.then(|| {
-                            format!("{} partition(s) could not be read", entry.value.unknown.len())
-                        }),
+                        total_lag: entry.value.statable_total(),
+                        unreadable_partitions: entry.value.unknown.len(),
+                        error: None,
                     });
                 }
                 Err(e) => out.push(GroupLagEntry {
                     group_id: group,
                     total_lag: None,
+                    unreadable_partitions: 0,
                     error: Some(lag_error_reason(&e)),
                 }),
             }

@@ -2,11 +2,12 @@ import { useMemo, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { Link, useParams } from '@tanstack/react-router'
 import { getGroupLag, getGroups } from '../api/client'
+import type { GroupLagEntry } from '../api/types'
 import { CopyButton } from '../components/CopyButton'
 import { FilterInput } from '../components/FilterInput'
 import { Panel } from '../components/Panel'
 import { StalenessChip } from '../components/StalenessChip'
-import { formatCount } from '../lib/format'
+import { statedLag } from '../lib/lag'
 import { nextAnchor, pageFrom, prevAnchor } from '../lib/namePage'
 
 /// Lag costs one broker request per group, so a page is what we ask for.
@@ -128,21 +129,28 @@ export function GroupsView({ cluster }: { cluster: string }) {
 /// Lag for one row. A dash is not zero: it means the group has committed
 /// nothing anywhere (no position to be behind), its lookup failed, or we have
 /// not asked yet — and the title says which.
-function TotalLag({ entry, pending }: { entry?: { total_lag: number | null; error: string | null }; pending: boolean }) {
+function TotalLag({ entry, pending }: { entry?: GroupLagEntry; pending: boolean }) {
   if (entry?.total_lag != null) {
+    const { text, title } = statedLag(entry.total_lag, entry.unreadable_partitions)
     return (
-      <span data-testid="group-total-lag" className={entry.total_lag > 0 ? 'font-semibold' : 'text-zinc-400'}>
-        {formatCount(entry.total_lag)}
+      <span
+        data-testid="group-total-lag"
+        title={title}
+        className={`${entry.total_lag > 0 ? 'font-semibold' : 'text-zinc-400'} ${title ? 'cursor-help' : ''}`}
+      >
+        {text}
       </span>
     )
   }
   const title = entry?.error
     ? `Kafka couldn't read this group's offsets — ${entry.error}`
-    : entry
-      ? 'this group has not committed any offset, so it has no position to be behind'
-      : pending
-        ? "reading this group's offsets…"
-        : 'no lag reported for this group'
+    : entry && entry.unreadable_partitions > 0
+      ? `none of this group's ${entry.unreadable_partitions} committed partition(s) could be read`
+      : entry
+        ? 'this group has not committed any offset, so it has no position to be behind'
+        : pending
+          ? "reading this group's offsets…"
+          : 'no lag reported for this group'
   return (
     <span data-testid="group-total-lag" className="cursor-help text-zinc-400" title={title}>
       —

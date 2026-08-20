@@ -91,7 +91,7 @@ describe('GroupsView', () => {
     }))
     vi.mocked(client.getGroups).mockResolvedValue({ groups: many, as_of: Date.now() })
     vi.mocked(client.getGroupLag).mockResolvedValue({
-      groups: [{ group_id: 'g-00', total_lag: 42, error: null }],
+      groups: [{ group_id: 'g-00', total_lag: 42, unreadable_partitions: 0, error: null }],
       as_of: Date.now(),
     })
     await renderWithRouter(<GroupsView cluster="prod" />)
@@ -129,12 +129,28 @@ describe('GroupsView', () => {
       as_of: Date.now(),
     })
     vi.mocked(client.getGroupLag).mockResolvedValue({
-      groups: [{ group_id: 'fresh', total_lag: null, error: null }],
+      groups: [{ group_id: 'fresh', total_lag: null, unreadable_partitions: 0, error: null }],
       as_of: Date.now(),
     })
     await renderWithRouter(<GroupsView cluster="prod" />)
     await screen.findByText('fresh')
     expect(await screen.findByTestId('group-total-lag')).toHaveTextContent('—')
+  })
+
+  it('states a group with an unreadable partition as a lower bound, with the reason', async () => {
+    vi.mocked(client.getGroups).mockResolvedValue({
+      groups: [{ group_id: 'partial', state: 'Stable', protocol_type: 'consumer', member_count: 1 }],
+      as_of: Date.now(),
+    })
+    vi.mocked(client.getGroupLag).mockResolvedValue({
+      groups: [{ group_id: 'partial', total_lag: 12_000, unreadable_partitions: 2, error: null }],
+      as_of: Date.now(),
+    })
+    await renderWithRouter(<GroupsView cluster="prod" />)
+    await screen.findByText('partial')
+    const cell = await screen.findByTestId('group-total-lag')
+    expect(cell).toHaveTextContent('≥ 12.0k')
+    expect(cell).toHaveAttribute('title', expect.stringContaining('2'))
   })
 
   it('copies the group id without navigating when the row copy button is clicked', async () => {

@@ -44,11 +44,23 @@ describe('GroupDetailView', () => {
     expect(screen.getByTestId('stat-total lag')).toHaveTextContent('9')
   })
 
-  it('states the total as undetermined when a partition could not be read', async () => {
+  // Owner ruling 2026-08-20: lag is not an alarm — a healthy consumer on a
+  // busy topic sits thousands of messages behind and is perfectly fine.
+  it('does not colour a non-zero total as a failure', async () => {
+    vi.mocked(client.getGroupDetail).mockResolvedValue(detail())
+    renderWithQuery(<GroupDetailView cluster="prod" group="billing" />)
+    const value = (await screen.findByTestId('stat-total lag')).querySelector('dd')!
+    expect(value.className).not.toMatch(/red|amber/)
+  })
+
+  // Owner ruling 2026-08-20: the readable sum is worth stating as a lower
+  // bound — "unknown" throws away a magnitude the operator needs — but it
+  // must never read as a complete total, hence `>=` plus the tooltip.
+  it('states the readable total as a lower bound when a partition could not be read', async () => {
     vi.mocked(client.getGroupDetail).mockResolvedValue(detail({ unreadable_partitions: 2 }))
     renderWithQuery(<GroupDetailView cluster="prod" group="billing" />)
     const total = await screen.findByTestId('stat-total lag')
-    expect(total).toHaveTextContent('—')
+    expect(total).toHaveTextContent('≥ 9')
     expect(total).toHaveAttribute('title', expect.stringContaining('2'))
     // the partitions it commits on include the ones we could not read
     expect(screen.getByTestId('stat-partitions')).toHaveTextContent('5')

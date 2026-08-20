@@ -5,7 +5,7 @@ import { CopyButton } from '../components/CopyButton'
 import { Panel } from '../components/Panel'
 import { Stat } from '../components/Stat'
 import { StalenessChip } from '../components/StalenessChip'
-import { formatCount } from '../lib/format'
+import { statedLag } from '../lib/lag'
 
 export function GroupDetailView({ cluster, group }: { cluster: string; group: string }) {
   const detail = useQuery({
@@ -85,19 +85,11 @@ export function GroupDetailView({ cluster, group }: { cluster: string; group: st
   )
 }
 
-/// A total is stateable only when every partition was read. Summing the rest
-/// would under-report with confidence, so it says so instead.
+// Not tinted as a failure at any size: a healthy consumer on a busy topic sits
+// thousands of messages behind, so a red number here would cry wolf.
 function TotalLagStat({ rows, unreadable }: { rows: { lag: number }[]; unreadable: number }) {
-  if (unreadable > 0) {
-    return (
-      <div data-testid="stat-total lag" title={`${unreadable} partition(s) could not be read`} className="cursor-help">
-        <dt className="text-xs text-zinc-500">total lag</dt>
-        <dd className="text-xl font-semibold text-zinc-400">—</dd>
-      </div>
-    )
-  }
-  const total = rows.reduce((sum, p) => sum + p.lag, 0)
-  return <Stat label="total lag" value={formatCount(total)} warn={total > 0} />
+  const { text, title } = statedLag(rows.reduce((sum, p) => sum + p.lag, 0), unreadable)
+  return <Stat label="total lag" value={text} title={title} />
 }
 
 export function GroupDetailPage() {
