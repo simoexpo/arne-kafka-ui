@@ -53,6 +53,15 @@ describe('GroupDetailView', () => {
     expect(await screen.findByTestId('stat-assignment strategy')).toHaveTextContent('CooperativeSticky')
   })
 
+  // Owner ruling 2026-08-20: it sits against the right edge of the box while
+  // the three figures stay left, so the row reads as numbers-then-strategy.
+  it('parks the strategy against the right edge of the panel', async () => {
+    vi.mocked(client.getGroupDetail).mockResolvedValue(detail())
+    renderWithQuery(<GroupDetailView cluster="prod" group="billing" />)
+    expect((await screen.findByTestId('stat-assignment strategy')).className).toMatch(/text-right/)
+    expect(screen.getByTestId('stat-topics').className).not.toMatch(/text-right/)
+  })
+
   // An unknown protocol is passed through, never mapped to a wrong class: a
   // custom assignor or a KIP-848 group must read as what the broker said.
   it('passes an unrecognised assignor through untranslated', async () => {

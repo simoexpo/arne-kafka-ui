@@ -43,6 +43,7 @@ export function GroupDetailView({ cluster, group }: { cluster: string; group: st
               <TotalLagStat rows={detail.data.partitions} unreadable={detail.data.unreadable_partitions} />
               <Stat
                 label="assignment strategy"
+                className="text-right"
                 value={assignorClass(detail.data.assignment_strategy)}
                 title={
                   detail.data.assignment_strategy
