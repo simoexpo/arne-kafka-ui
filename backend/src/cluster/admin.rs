@@ -240,6 +240,10 @@ pub struct GroupDetail {
     pub state: String,
     pub members: Vec<MemberInfo>,
     pub partitions: Vec<PartitionLag>,
+    /// How many partitions this group has committed on whose head could not be
+    /// read. They are absent from `partitions`, so a total computed from those
+    /// rows alone would under-report — the page states "undetermined" instead.
+    pub unreadable_partitions: usize,
     pub as_of: i64,
 }
 
@@ -696,6 +700,7 @@ async fn group_detail_uncached(handle: Arc<ClusterHandle>, group: String) -> Res
         let entry = group_lag_cached(&handle, &group, Some(super::group_lag_cache::LIVE_TTL_MS), now_ms())?;
         // The snapshot is shared, so this view copies just the rows it renders.
         let (partitions, pair_at) = (entry.value.rows.clone(), entry.sampled_at);
+        let unreadable_partitions = entry.value.unknown.len();
         // A group with no broker-side entry AND no committed offsets does not exist.
         let info = match (info, partitions.is_empty()) {
             (Some(i), _) => Some(i),
@@ -711,6 +716,7 @@ async fn group_detail_uncached(handle: Arc<ClusterHandle>, group: String) -> Res
                 client_host: m.client_host().to_string(),
             }).collect()).unwrap_or_default(),
             partitions,
+            unreadable_partitions,
             // as fresh as the older of the two samples behind the lag
             as_of: pair_at,
         })

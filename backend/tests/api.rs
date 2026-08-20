@@ -162,6 +162,8 @@ async fn groups_list_and_detail_report_lag() {
     let (status, body) = get_json(app(state), "/api/clusters/test/groups/lag-group").await;
     assert_eq!(status, 200);
     assert_eq!(body["group_id"], "lag-group");
+    // a healthy group hides nothing, so its total is stateable
+    assert_eq!(body["unreadable_partitions"], 0, "every partition's head was read: {body}");
     let parts = body["partitions"].as_array().unwrap();
     assert_eq!(parts.len(), 1);
     assert_eq!(parts[0]["topic"], "lag-topic");

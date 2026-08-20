@@ -122,6 +122,9 @@ export interface GroupDetail {
   state: string
   members: MemberInfo[]
   partitions: PartitionLag[]
+  // Partitions this group commits on whose head could not be read: absent from
+  // `partitions`, so a total summed from those rows alone would under-report.
+  unreadable_partitions: number
   as_of: number
 }
 
