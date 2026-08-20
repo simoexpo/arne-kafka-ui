@@ -29,6 +29,12 @@ pub struct Config {
 pub struct ClusterConfig {
     pub name: String,
     pub bootstrap: String,
+    /// How often librdkafka should report what it has sent this cluster, in
+    /// milliseconds. `0` — the default — leaves the report off entirely: the
+    /// callback is never armed, so nothing is parsed and nothing is stored.
+    /// Diagnostic only; it costs no broker traffic either way.
+    #[serde(default)]
+    pub broker_call_stats_ms: u64,
     #[serde(default)]
     pub sasl: Option<SaslConfig>,
     #[serde(default)]

@@ -11,6 +11,7 @@ use rdkafka::producer::{FutureProducer, FutureRecord, Producer};
 use rdkafka::ClientConfig;
 use std::sync::Arc;
 use std::time::Duration;
+use std::collections::BTreeMap;
 use testcontainers_modules::kafka::apache::Kafka;
 use testcontainers_modules::testcontainers::runners::AsyncRunner;
 use testcontainers_modules::testcontainers::{ContainerAsync, ImageExt, ReuseDirective};
@@ -150,8 +151,75 @@ async fn reset_cluster_state(bootstrap: &str) {
     }
 }
 
+/// The one cluster a test drives. Counters live on it, so an assertion reads
+/// only the traffic this test caused.
+pub fn handle_of(state: &AppState) -> Arc<arne::cluster::ClusterHandle> {
+    state.registry.get("test").expect("the test cluster")
+}
+
 pub fn cluster_cfg(name: &str, bootstrap: &str) -> ClusterConfig {
-    ClusterConfig { name: name.into(), bootstrap: bootstrap.into(), sasl: None, schema_registry: None }
+    ClusterConfig {
+        name: name.into(),
+        bootstrap: bootstrap.into(),
+        sasl: None,
+        schema_registry: None,
+        broker_call_stats_ms: 0,
+    }
+}
+
+/// A cluster that reports what it sent the brokers, so a test can assert the
+/// call shape of a page instead of trusting a reading of librdkafka's source.
+/// The interval is short because every assertion waits for a fresh tally.
+pub fn state_with_call_stats(bootstrap: &str) -> AppState {
+    let mut cfg = cluster_cfg("test", bootstrap);
+    cfg.broker_call_stats_ms = 100;
+    AppState {
+        registry: Arc::new(ClusterRegistry::from_config(vec![cfg]).unwrap()),
+        limits: Arc::new(Limits::default()),
+    }
+}
+
+/// The tally as it stands, once one exists.
+pub async fn broker_calls(state: &AppState) -> BTreeMap<String, u64> {
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let handle = state.registry.get("test").unwrap();
+        handle.serve_client_events();
+        let report = handle.call_stats.report();
+        if report.sampled_at.is_some() {
+            return report.totals;
+        }
+        assert!(std::time::Instant::now() < deadline, "no tally arrived — are stats enabled?");
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
+/// What has been sent since `before`. Waits for a tally recorded after THIS
+/// call started — the action is already finished by then, so that tally
+/// necessarily includes every request it made. (Waiting on librdkafka's own
+/// stamp does not work: it has one-second granularity, so a "newer" tally can
+/// still predate the action.)
+pub async fn calls_since(state: &AppState, before: &BTreeMap<String, u64>) -> BTreeMap<String, u64> {
+    let handle = state.registry.get("test").unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    handle.serve_client_events();
+    let at_entry = handle.call_stats.report().recorded;
+    loop {
+        handle.serve_client_events();
+        let report = handle.call_stats.report();
+        if report.recorded > at_entry {
+            let mut delta = BTreeMap::new();
+            for (api, sent) in report.totals {
+                let was = before.get(&api).copied().unwrap_or(0);
+                if sent > was {
+                    delta.insert(api, sent - was);
+                }
+            }
+            return delta;
+        }
+        assert!(std::time::Instant::now() < deadline, "no fresh tally after the action");
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
 }
 
 pub fn state_for(bootstrap: &str, extra: Vec<ClusterConfig>) -> AppState {

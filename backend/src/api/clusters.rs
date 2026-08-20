@@ -24,6 +24,18 @@ pub async fn list(State(state): State<AppState>) -> Json<Value> {
     Json(json!({ "clusters": clusters }))
 }
 
+/// What Arne has asked this cluster's brokers, as librdkafka counted it.
+/// Diagnostic: empty until `broker_call_stats_ms` is configured for the
+/// cluster, and it never itself talks to a broker.
+pub async fn broker_calls(
+    State(state): State<AppState>,
+    Path(cluster): Path<String>,
+) -> Result<Json<crate::cluster::call_stats::CallReport>, ApiError> {
+    let handle = state.registry.get(&cluster)?;
+    handle.serve_client_events();
+    Ok(Json(handle.call_stats.report()))
+}
+
 pub async fn overview(
     State(state): State<AppState>,
     Path(cluster): Path<String>,

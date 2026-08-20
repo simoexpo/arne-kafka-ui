@@ -10,8 +10,8 @@
 
 use super::ClusterHandle;
 use crate::error::ApiError;
+use super::call_stats::StatsContext;
 use rdkafka::admin::AdminClient;
-use rdkafka::client::DefaultClientContext;
 use rdkafka_sys as rd;
 use std::ffi::{CStr, CString};
 use std::time::Duration;
@@ -26,7 +26,7 @@ struct AdminCall {
 
 impl AdminCall {
     fn new(
-        admin: &AdminClient<DefaultClientContext>,
+        admin: &AdminClient<StatsContext>,
         op: rd::rd_kafka_admin_op_t,
         timeout: Duration,
         cluster: &str,

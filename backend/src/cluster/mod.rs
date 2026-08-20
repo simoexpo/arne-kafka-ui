@@ -1,5 +1,6 @@
 pub mod admin;
 pub mod assignment;
+pub mod call_stats;
 pub mod ffi;
 pub mod group_lag_cache;
 pub mod keyed_cache;
@@ -11,7 +12,6 @@ pub mod snapshot;
 use crate::config::{ClusterConfig, SaslMechanism};
 use crate::message::schema_registry::SchemaRegistry;
 use rdkafka::admin::AdminClient;
-use rdkafka::client::DefaultClientContext;
 use rdkafka::consumer::{BaseConsumer, Consumer};
 use rdkafka::error::KafkaResult;
 use rdkafka::ClientConfig;
@@ -31,6 +31,10 @@ pub const DETAIL_HORIZON_MS: i64 = 600_000;
 /// Just under the detail pages' 10s poll.
 pub const DETAIL_TTL_MS: i64 = 8_000;
 
+/// Tallies to drain from a client's queue in one read. Bounded: a queue left
+/// unread for hours must not make one request pay for all of it.
+const MAX_TALLY_DRAIN: usize = 256;
+
 /// Deliberately SHORT next to the other snapshots: health is the cheapest
 /// call we make (one DescribeCluster) and the one users most need current, so
 /// this window only exists to collapse simultaneous polls from several tabs —
@@ -46,6 +50,9 @@ pub fn build_client_config(cfg: &ClusterConfig) -> ClientConfig {
     cc.set("bootstrap.servers", &cfg.bootstrap);
     cc.set("allow.auto.create.topics", "false");
     cc.set("socket.keepalive.enable", "true");
+    if cfg.broker_call_stats_ms > 0 {
+        cc.set("statistics.interval.ms", cfg.broker_call_stats_ms.to_string());
+    }
     match &cfg.sasl {
         None => { cc.set("security.protocol", "plaintext"); }
         Some(s) => {
@@ -120,8 +127,18 @@ pub struct ClusterHandle {
     pub group_description: keyed_cache::KeyedCache<String, Arc<ffi::GroupDescription>>,
     pub describe_flight: single_flight::SingleFlight<String>,
     pub schema_registry: Option<Arc<SchemaRegistry>>,
-    consumer: RwLock<Arc<BaseConsumer>>,
-    admin: RwLock<Arc<AdminClient<DefaultClientContext>>>,
+    consumer: RwLock<Arc<BaseConsumer<call_stats::StatsContext>>>,
+    admin: RwLock<Arc<AdminClient<call_stats::StatsContext>>>,
+    /// What librdkafka counted itself sending, per broker and per API. Empty
+    /// unless a stats interval is configured.
+    pub call_stats: Arc<call_stats::CallStats>,
+    /// Test-only tallies of the per-group broker reads this handle made. On
+    /// the handle rather than in a global, so concurrent tests sharing a
+    /// broker cannot read each other's traffic.
+    #[doc(hidden)]
+    pub offset_fetches: std::sync::Mutex<std::collections::HashMap<(String, String), u64>>,
+    #[doc(hidden)]
+    pub watermark_fetches: std::sync::Mutex<std::collections::HashMap<(String, String), u64>>,
     pub(crate) health_failures: AtomicU32,
     pub(crate) probe_in_flight: AtomicBool,
 }
@@ -146,8 +163,11 @@ pub struct ClusterHealth {
 impl ClusterHandle {
     pub fn connect(config: ClusterConfig) -> KafkaResult<Self> {
         let cc = build_client_config(&config);
-        let consumer: BaseConsumer = cc.create()?;
-        let admin: AdminClient<DefaultClientContext> = cc.create()?;
+        let call_stats = Arc::new(call_stats::CallStats::default());
+        let consumer: BaseConsumer<_> =
+            cc.create_with_context(call_stats::StatsContext::new(call_stats.clone(), call_stats::CONSUMER))?;
+        let admin: AdminClient<_> =
+            cc.create_with_context(call_stats::StatsContext::new(call_stats.clone(), call_stats::ADMIN))?;
         let schema_registry = config.schema_registry.as_ref().map(|sr| Arc::new(SchemaRegistry::new(&sr.url)));
         Ok(Self {
             name: config.name.clone(),
@@ -170,20 +190,72 @@ impl ClusterHandle {
             schema_registry,
             consumer: RwLock::new(Arc::new(consumer)),
             admin: RwLock::new(Arc::new(admin)),
+            call_stats,
+            offset_fetches: std::sync::Mutex::new(std::collections::HashMap::new()),
+            watermark_fetches: std::sync::Mutex::new(std::collections::HashMap::new()),
             health_failures: AtomicU32::new(0),
             probe_in_flight: AtomicBool::new(false),
         })
     }
 
-    pub fn consumer(&self) -> Arc<BaseConsumer> {
+    /// How many times this handle read a group's committed offsets under
+    /// `scope` (`"*"` cluster-wide, or a topic name). Test hook.
+    #[doc(hidden)]
+    pub fn offset_fetch_count(&self, scope: &str, group: &str) -> u64 {
+        admin::count_of(&self.offset_fetches, scope, group)
+    }
+
+    /// How many times this handle read `topic`'s watermarks for `caller`.
+    /// Test hook.
+    #[doc(hidden)]
+    pub fn watermark_fetch_count(&self, caller: &str, topic: &str) -> u64 {
+        admin::count_of(&self.watermark_fetches, caller, topic)
+    }
+
+    /// Delivers any tally librdkafka has queued for the resident consumer.
+    /// Worth calling only when a report is about to be read — nothing polls
+    /// on a timer, so an idle Arne does no work here at all.
+    ///
+    /// Only the consumer: rust-rdkafka enables `RD_KAFKA_EVENT_STATS` on a
+    /// `BaseConsumer`'s queue (`base_consumer.rs`) but builds its
+    /// `AdminClient` with no event mask and no stats callback, so that
+    /// client's tally is unreachable — see `call_stats`' own note.
+    ///
+    /// Safe against message reads: the resident consumer never holds an
+    /// assignment (`message::fetch`/`tail` build their own), so this can
+    /// consume nothing.
+    pub fn serve_client_events(&self) {
+        let consumer = self.consumer();
+        // One poll consumes ONE queued event, and tallies queue up between
+        // reads — polling once would read the client's oldest, not its latest.
+        // Drain until a poll delivers no further tally, bounded so a long-idle
+        // queue cannot turn one request into unbounded work.
+        let mut seen = self.call_stats.recorded();
+        for _ in 0..MAX_TALLY_DRAIN {
+            let _ = consumer.poll(std::time::Duration::ZERO);
+            let now = self.call_stats.recorded();
+            if now == seen {
+                break;
+            }
+            seen = now;
+        }
+    }
+
+    pub fn consumer(&self) -> Arc<BaseConsumer<call_stats::StatsContext>> {
         self.consumer.read().expect("consumer lock poisoned").clone()
     }
 
-    pub fn admin(&self) -> Arc<AdminClient<DefaultClientContext>> {
+    pub fn admin(&self) -> Arc<AdminClient<call_stats::StatsContext>> {
         self.admin.read().expect("admin lock poisoned").clone()
     }
 
-    fn swap_clients(&self, consumer: BaseConsumer, admin: AdminClient<DefaultClientContext>) {
+    fn swap_clients(
+        &self,
+        consumer: BaseConsumer<call_stats::StatsContext>,
+        admin: AdminClient<call_stats::StatsContext>,
+    ) {
+        // The counts belong to the outgoing clients and restart at zero.
+        self.call_stats.client_replaced();
         // The two slots swap under separate locks, so a concurrent reader can
         // briefly observe new-consumer + old-admin. Both are built from the
         // same config; worst case is one bounded call on the outgoing client.
@@ -209,8 +281,10 @@ impl ClusterHandle {
         let mut cfg = self.config.clone();
         cfg.bootstrap = bootstrap.to_string();
         let cc = build_client_config(&cfg);
-        let consumer: BaseConsumer = cc.create()?;
-        let admin: AdminClient<DefaultClientContext> = cc.create()?;
+        let consumer: BaseConsumer<_> =
+            cc.create_with_context(call_stats::StatsContext::new(self.call_stats.clone(), call_stats::CONSUMER))?;
+        let admin: AdminClient<_> =
+            cc.create_with_context(call_stats::StatsContext::new(self.call_stats.clone(), call_stats::ADMIN))?;
         self.swap_clients(consumer, admin);
         Ok(())
     }
@@ -316,9 +390,11 @@ impl ClusterHandle {
         // `probe_in_flight` at `true` forever, silently disabling self-heal.
         let _guard = ProbeGuard(&self.probe_in_flight);
         let cc = build_client_config(&self.config);
-        let consumer: BaseConsumer = cc.create().ok()?;
+        let consumer: BaseConsumer<call_stats::StatsContext> =
+            cc.create_with_context(call_stats::StatsContext::new(self.call_stats.clone(), call_stats::CONSUMER)).ok()?;
         let brokers = consumer.fetch_metadata(None, HEALTH_TIMEOUT).ok()?.brokers().len();
-        let admin: AdminClient<DefaultClientContext> = cc.create().ok()?;
+        let admin: AdminClient<call_stats::StatsContext> =
+            cc.create_with_context(call_stats::StatsContext::new(self.call_stats.clone(), call_stats::ADMIN)).ok()?;
         self.swap_clients(consumer, admin);
         self.health_failures.store(0, Ordering::SeqCst);
         tracing::warn!(cluster = %self.name, "stale kafka connection replaced with a fresh one");
@@ -343,11 +419,23 @@ mod tests {
     use crate::config::{ClusterConfig, SaslConfig, SaslMechanism};
 
     fn base(name: &str) -> ClusterConfig {
-        ClusterConfig { name: name.into(), bootstrap: "b:9092".into(), sasl: None, schema_registry: None }
+        ClusterConfig {
+            name: name.into(),
+            bootstrap: "b:9092".into(),
+            sasl: None,
+            schema_registry: None,
+            broker_call_stats_ms: 0,
+        }
     }
 
     fn base_with_bootstrap(bootstrap: &str) -> ClusterConfig {
-        ClusterConfig { name: "a".into(), bootstrap: bootstrap.into(), sasl: None, schema_registry: None }
+        ClusterConfig {
+            name: "a".into(),
+            bootstrap: bootstrap.into(),
+            sasl: None,
+            schema_registry: None,
+            broker_call_stats_ms: 0,
+        }
     }
 
     #[test]
@@ -398,7 +486,7 @@ mod tests {
         let after = handle.consumer();
         assert!(!Arc::ptr_eq(&before, &after), "swap must install a new client");
         // the old Arc is still usable by in-flight work
-        let _still_alive: &BaseConsumer = &before;
+        let _still_alive: &BaseConsumer<call_stats::StatsContext> = &before;
     }
 
     #[test]

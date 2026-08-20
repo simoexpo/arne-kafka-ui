@@ -22,6 +22,7 @@ pub fn app(state: AppState) -> Router {
         .route("/api/clusters/{cluster}/groups", get(groups::list))
         // distinct path, not /groups/lag: a group could legitimately be named "lag"
         .route("/api/clusters/{cluster}/group-lag", get(groups::lag))
+        .route("/api/clusters/{cluster}/broker-calls", get(clusters::broker_calls))
         .route("/api/clusters/{cluster}/groups/{group}", get(groups::detail))
         .route("/api/clusters/{cluster}/schema-registry", get(subjects::registry_settings))
         .route("/api/clusters/{cluster}/schema-ids/{id}", get(subjects::subject_of_id))
@@ -55,7 +56,7 @@ mod tests {
         use crate::cluster::registry::ClusterRegistry;
         use crate::config::{ClusterConfig, Limits};
         use std::sync::Arc;
-        let cfg = ClusterConfig { name: "t".into(), bootstrap: "localhost:1".into(), sasl: None, schema_registry: None };
+        let cfg = ClusterConfig { name: "t".into(), bootstrap: "localhost:1".into(), sasl: None, schema_registry: None, broker_call_stats_ms: 0 };
         AppState { registry: Arc::new(ClusterRegistry::from_config(vec![cfg]).unwrap()), limits: Arc::new(Limits::default()) }
     }
 

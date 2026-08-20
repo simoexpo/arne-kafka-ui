@@ -8,7 +8,7 @@ use rdkafka::consumer::Consumer;
 use serde::Serialize;
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::{Mutex, OnceLock};
+use std::sync::Mutex;
 
 #[derive(Debug, Serialize, Clone)]
 pub struct TopicSummary {
@@ -289,52 +289,47 @@ pub struct GroupDetail {
 /// unlabelled counter would let a test that opens the messages tab silently
 /// break a lag assertion on the same topic. Read only by tests. Compiles
 /// unconditionally — see `GROUP_METADATA_FETCHES`.
-static GROUP_WATERMARK_FETCHES: OnceLock<Mutex<HashMap<(String, String), u64>>> = OnceLock::new();
-
-fn record_group_watermark_fetch(label: &str, topic: &str) {
-    let calls = GROUP_WATERMARK_FETCHES.get_or_init(|| Mutex::new(HashMap::new()));
-    *calls.lock().unwrap().entry((label.to_string(), topic.to_string())).or_insert(0) += 1;
+fn record_group_watermark_fetch(handle: &ClusterHandle, label: &str, topic: &str) {
+    bump(&handle.watermark_fetches, label, topic);
 }
 
-/// Per-`(scope, group)` count of group-offset INSPECTIONS — one bump per
-/// `group_lag_blocking` call, whether its `committed_offsets` succeeds,
-/// errors, or takes several coordinator retries. Scope is the endpoint's
-/// calling endpoint ("*" for the whole-cluster group list/detail). Read only
-/// by tests: proves the consumers-tab cache and the moved-away filter
-/// suppress per-group fetches. Scoped so a concurrent test exercising
-/// `/groups` against the shared broker (which fetches EVERY group) cannot
-/// bump a topic-scoped assertion.
-static GROUP_OFFSET_FETCHES: OnceLock<Mutex<HashMap<(String, String), u64>>> = OnceLock::new();
-
-/// Bounds the counter's keyspace, which is `topics viewed × groups` — a
+/// Bounds a counter's keyspace, which is `topics viewed × groups` — a
 /// long-lived process on a large cluster would otherwise accumulate entries
 /// forever for numbers only tests read. Far above any test's cardinality,
 /// so assertions stay exact.
 const MAX_TRACKED_GROUP_FETCHES: usize = 4096;
 
-fn record_group_offset_fetch(scope: &str, group: &str) {
-    let calls = GROUP_OFFSET_FETCHES.get_or_init(|| Mutex::new(HashMap::new()));
-    let mut calls = calls.lock().unwrap();
-    let key = (scope.to_string(), group.to_string());
-    let room = calls.len() < MAX_TRACKED_GROUP_FETCHES;
-    match calls.get_mut(&key) {
+/// Per-`(scope, group)` count of group-offset INSPECTIONS — one bump per
+/// sample, whether its `committed_offsets` succeeds, errors, or takes several
+/// coordinator retries. Scope is the calling view (`"*"` for the whole-cluster
+/// group list/detail), so a topic-scoped assertion is not moved by a
+/// cluster-wide read. Read only by tests: proves the activity tab's cache and
+/// its moved-away filter suppress per-group fetches.
+fn record_group_offset_fetch(handle: &ClusterHandle, scope: &str, group: &str) {
+    bump(&handle.offset_fetches, scope, group);
+}
+
+/// Counts live on the HANDLE, not in a global: every test drives its own
+/// handle against the shared broker, and one test's activity tab inspects
+/// every group in the roster — including groups another test owns. A global
+/// tally made those assertions read each other's traffic.
+fn bump(counts: &Mutex<HashMap<(String, String), u64>>, scope: &str, subject: &str) {
+    let mut counts = counts.lock().expect("fetch counts lock poisoned");
+    let key = (scope.to_string(), subject.to_string());
+    let room = counts.len() < MAX_TRACKED_GROUP_FETCHES;
+    match counts.get_mut(&key) {
         Some(n) => *n += 1,
         None if room => {
-            calls.insert(key, 1);
+            counts.insert(key, 1);
         }
         None => {}
     }
 }
 
-pub fn group_offset_fetch_count(scope: &str, group: &str) -> u64 {
-    GROUP_OFFSET_FETCHES.get()
-        .and_then(|m| m.lock().unwrap().get(&(scope.to_string(), group.to_string())).copied())
-        .unwrap_or(0)
-}
-
-pub fn group_watermark_fetch_count(caller: &str, topic: &str) -> u64 {
-    GROUP_WATERMARK_FETCHES.get()
-        .and_then(|m| m.lock().unwrap().get(&(caller.to_string(), topic.to_string())).copied())
+pub fn count_of(counts: &Mutex<HashMap<(String, String), u64>>, scope: &str, subject: &str) -> u64 {
+    counts.lock().expect("fetch counts lock poisoned")
+        .get(&(scope.to_string(), subject.to_string()))
+        .copied()
         .unwrap_or(0)
 }
 
@@ -400,7 +395,7 @@ impl<'a> Watermarks<'a> {
             return Ok(oldest.unwrap_or(now));
         }
         for topic in missing.iter().map(|(t, _)| t.as_str()).collect::<std::collections::BTreeSet<_>>() {
-            record_group_watermark_fetch(self.label, topic);
+            record_group_watermark_fetch(self.handle, self.label, topic);
         }
         let fetched_at = now_ms();
         // A partition whose own entry carried an error is deliberately NOT
@@ -485,7 +480,7 @@ pub fn group_lag_cached(
 /// topic: one answer serves the consumers list, every topic's tab and the
 /// group's own page.
 fn fetch_group_commits(handle: &ClusterHandle, group: &str) -> Result<Vec<CommittedOffset>, ApiError> {
-    record_group_offset_fetch(CLUSTER_WIDE, group);
+    record_group_offset_fetch(handle, CLUSTER_WIDE, group);
     // NotCoordinator/CoordinatorNotAvailable/CoordinatorLoadInProgress are
     // transient by protocol contract: the coordinator is moving or still
     // loading. Retry briefly instead of surfacing a 502 for a healthy cluster.

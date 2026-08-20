@@ -36,7 +36,7 @@ mod tests {
     use crate::config::ClusterConfig;
 
     fn cfg(name: &str) -> ClusterConfig {
-        ClusterConfig { name: name.into(), bootstrap: "localhost:19092".into(), sasl: None, schema_registry: None }
+        ClusterConfig { name: name.into(), bootstrap: "localhost:19092".into(), sasl: None, schema_registry: None, broker_call_stats_ms: 0 }
     }
 
     #[test]

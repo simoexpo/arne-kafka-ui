@@ -230,8 +230,7 @@ async fn a_new_protocol_group_that_moved_topics_leaves_its_old_tab() {
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     }
 
-    use arne::cluster::admin::group_offset_fetch_count;
-    let before = group_offset_fetch_count("*", "kn-mv");
+    let before = handle_of(&state).offset_fetch_count("*", "kn-mv");
     let (status, body) = get_json(app(state.clone()), "/api/clusters/test/topics/kn-a/consumers").await;
     assert_eq!(status, 200);
     assert!(
@@ -243,7 +242,7 @@ async fn a_new_protocol_group_that_moved_topics_leaves_its_old_tab() {
         "and it is not 'unchecked' either — the coordinator said where it is: {body}"
     );
     assert_eq!(
-        group_offset_fetch_count("*", "kn-mv"),
+        handle_of(&state).offset_fetch_count("*", "kn-mv"),
         before,
         "classifying it must cost no offset read"
     );
@@ -254,6 +253,50 @@ async fn a_new_protocol_group_that_moved_topics_leaves_its_old_tab() {
         body["groups"].as_array().unwrap().iter().any(|g| g["group_id"] == "kn-mv"),
         "it consumes kn-b: {body}"
     );
+}
+
+/// librdkafka counts every request it sends, per broker and per API. Exposing
+/// those counts turns this project's cost claims into assertions: this one
+/// pins that a group's page describes its coordinator instead of asking every
+/// broker for the whole group list, which is what it used to do.
+#[tokio::test]
+async fn a_group_page_asks_its_coordinator_and_never_enumerates_the_brokers() {
+    let bootstrap = start_kafka().await;
+    create_topic(&bootstrap, "bc-topic", 1).await;
+    produce(&bootstrap, "bc-topic", 3).await;
+    consume_and_commit(&bootstrap, "bc-topic", "bc-group", 2).await;
+    let state = state_with_call_stats(&bootstrap);
+
+    let before = broker_calls(&state).await;
+    let (status, _) = get_json(app(state.clone()), "/api/clusters/test/groups/bc-group").await;
+    assert_eq!(status, 200);
+    let delta = calls_since(&state, &before).await;
+
+    // The describe itself goes out on the admin client, whose tally librdkafka
+    // discards (see `call_stats`); what matters here is the absence — the page
+    // used to reach this data by listing every broker's groups first.
+    assert_eq!(
+        delta.get("ListGroups").copied().unwrap_or(0),
+        0,
+        "no per-broker group-list fan-out for one group's page: {delta:?}"
+    );
+    assert_eq!(
+        delta.get("DescribeGroups").copied().unwrap_or(0),
+        0,
+        "nor the classic describe it used to follow with: {delta:?}"
+    );
+
+    // Positive control: an absence proves nothing if the instrument reads
+    // nothing. The LIST does enumerate — that is its job — and the same tally
+    // sees it, so the assertions above are about this page, not about a dead
+    // counter. This also pins the list's shape: one enumeration and one
+    // describe per broker, and no per-group describe.
+    let before = broker_calls(&state).await;
+    let (status, _) = get_json(app(state.clone()), "/api/clusters/test/groups").await;
+    assert_eq!(status, 200);
+    let delta = calls_since(&state, &before).await;
+    assert!(delta.get("ListGroups").copied().unwrap_or(0) >= 1, "the list enumerates: {delta:?}");
+    assert!(delta.get("DescribeGroups").copied().unwrap_or(0) >= 1, "and describes in one batch: {delta:?}");
 }
 
 #[tokio::test]
@@ -343,7 +386,6 @@ async fn topic_consumers_lists_every_group_reading_the_topic() {
 /// change) no longer pays an OffsetFetch for it on every poll.
 #[tokio::test]
 async fn topic_consumers_skips_live_groups_that_moved_to_another_topic() {
-    use arne::cluster::admin::group_offset_fetch_count;
 
     let bootstrap = start_kafka().await;
     create_topic(&bootstrap, "mv-a", 1).await;
@@ -400,7 +442,7 @@ async fn topic_consumers_skips_live_groups_that_moved_to_another_topic() {
     // polls above legitimately read this group. What must hold is that viewing
     // the OLD topic reads nothing further: a moved-away group is skipped before
     // the cache is even consulted.
-    let before_old_topic = group_offset_fetch_count("*", "mv-group");
+    let before_old_topic = handle_of(&state).offset_fetch_count("*", "mv-group");
     let (status, body) = get_json(app(state.clone()), "/api/clusters/test/topics/mv-a/consumers").await;
     assert_eq!(status, 200);
     let groups = body["groups"].as_array().unwrap();
@@ -409,7 +451,7 @@ async fn topic_consumers_skips_live_groups_that_moved_to_another_topic() {
         "a group assigned elsewhere must not appear on its old topic: {body}"
     );
     assert_eq!(
-        group_offset_fetch_count("*", "mv-group"),
+        handle_of(&state).offset_fetch_count("*", "mv-group"),
         before_old_topic,
         "viewing the old topic must not inspect a group that moved away"
     );
@@ -423,7 +465,6 @@ async fn topic_consumers_skips_live_groups_that_moved_to_another_topic() {
 /// hinge on wall-clock timing against a broker shared with every other test.
 #[tokio::test]
 async fn topic_consumers_lists_stopped_groups_that_still_hold_offsets() {
-    use arne::cluster::admin::group_offset_fetch_count;
 
     let bootstrap = start_kafka().await;
     create_topic(&bootstrap, "ttl-topic", 1).await;
@@ -439,7 +480,7 @@ async fn topic_consumers_lists_stopped_groups_that_still_hold_offsets() {
     assert_eq!(g["total_lag"], 3);
     // Commits are read per GROUP now (one request each, whatever topics they
     // cover), so the scope label is the cluster-wide one.
-    assert!(group_offset_fetch_count("*", "ttl-group") >= 1, "an Empty group must be inspected");
+    assert!(handle_of(&state).offset_fetch_count("*", "ttl-group") >= 1, "an Empty group must be inspected");
 }
 
 /// Owner ruling 2026-08-19: a group that holds an assignment for the topic is
@@ -649,7 +690,6 @@ async fn ffi_committed_offsets_read_a_groups_position_without_a_throwaway_consum
 /// already in flight — the counter proves only one inspection happened.
 #[tokio::test]
 async fn concurrent_polls_of_one_topic_inspect_each_group_once() {
-    use arne::cluster::admin::group_offset_fetch_count;
 
     let bootstrap = start_kafka().await;
     create_topic(&bootstrap, "sf-topic", 1).await;
@@ -658,7 +698,7 @@ async fn concurrent_polls_of_one_topic_inspect_each_group_once() {
     let state = state_for(&bootstrap, vec![]);
     let url = "/api/clusters/test/topics/sf-topic/consumers";
 
-    let before = group_offset_fetch_count("*", "sf-group");
+    let before = handle_of(&state).offset_fetch_count("*", "sf-group");
     // eight simultaneous pollers, as eight open tabs would be
     let mut set = tokio::task::JoinSet::new();
     for _ in 0..8 {
@@ -676,7 +716,7 @@ async fn concurrent_polls_of_one_topic_inspect_each_group_once() {
         served += 1;
     }
     assert_eq!(served, 8);
-    let inspections = group_offset_fetch_count("*", "sf-group") - before;
+    let inspections = handle_of(&state).offset_fetch_count("*", "sf-group") - before;
     // Not exactly one: a sample that outlasts the 2s wait lets a waiter sample
     // too, deliberately — a page that renders nothing is worse than a
     // duplicated read. What must hold is that the pollers SHARE rather than
@@ -718,7 +758,6 @@ async fn concurrent_list_requests_share_one_snapshot() {
 /// call, no lag — and lag is asked for by name, for the rows on screen.
 #[tokio::test]
 async fn groups_list_is_identity_only_and_lag_is_requested_per_group() {
-    use arne::cluster::admin::group_offset_fetch_count;
 
     let bootstrap = start_kafka().await;
     create_topic(&bootstrap, "gl-a", 1).await;
@@ -729,8 +768,8 @@ async fn groups_list_is_identity_only_and_lag_is_requested_per_group() {
     consume_and_commit(&bootstrap, "gl-b", "gl-group-b", 5).await;
     let state = state_for(&bootstrap, vec![]);
 
-    let before_a = group_offset_fetch_count("*", "gl-group-a");
-    let before_b = group_offset_fetch_count("*", "gl-group-b");
+    let before_a = handle_of(&state).offset_fetch_count("*", "gl-group-a");
+    let before_b = handle_of(&state).offset_fetch_count("*", "gl-group-b");
     let (status, body) = get_json(app(state.clone()), "/api/clusters/test/groups").await;
     assert_eq!(status, 200);
     let listed = body["groups"].as_array().unwrap();
@@ -739,10 +778,10 @@ async fn groups_list_is_identity_only_and_lag_is_requested_per_group() {
     assert_eq!(a["member_count"], 0);
     assert!(a.get("total_lag").is_none(), "the list carries no lag any more: {body}");
     assert_eq!(
-        group_offset_fetch_count("*", "gl-group-a"), before_a,
+        handle_of(&state).offset_fetch_count("*", "gl-group-a"), before_a,
         "listing groups must not inspect any group's offsets"
     );
-    assert_eq!(group_offset_fetch_count("*", "gl-group-b"), before_b);
+    assert_eq!(handle_of(&state).offset_fetch_count("*", "gl-group-b"), before_b);
 
     // lag for exactly the groups asked for
     let (status, body) = get_json(
@@ -756,7 +795,7 @@ async fn groups_list_is_identity_only_and_lag_is_requested_per_group() {
     assert_eq!(entries[0]["total_lag"], 0, "it committed everything: {body}");
     assert!(body["as_of"].as_i64().unwrap() > 0);
     assert!(
-        group_offset_fetch_count("*", "gl-group-a") == before_a,
+        handle_of(&state).offset_fetch_count("*", "gl-group-a") == before_a,
         "a group nobody asked about is never inspected"
     );
 
@@ -826,7 +865,7 @@ async fn detail_pages_are_cached_per_entity_and_never_cross_over() {
 /// fail a correct implementation.
 #[tokio::test]
 async fn watermarks_are_shared_across_requests_not_refetched() {
-    use arne::cluster::admin::{group_watermark_fetch_count, Watermarks};
+    use arne::cluster::admin::Watermarks;
 
     let bootstrap = start_kafka().await;
     // ONE partition, so the group necessarily commits on it and the reader
@@ -837,11 +876,11 @@ async fn watermarks_are_shared_across_requests_not_refetched() {
     let state = state_for(&bootstrap, vec![]);
 
     // a lag request fills the shared cache for the partitions it touched
-    let before = group_watermark_fetch_count("lag", "wm-topic");
+    let before = handle_of(&state).watermark_fetch_count("lag", "wm-topic");
     let (status, body) = get_json(app(state.clone()), "/api/clusters/test/group-lag?groups=wm-group-a").await;
     assert_eq!(status, 200);
     assert!(body["groups"][0]["total_lag"].is_i64(), "a lag was computed: {body}");
-    let after_first = group_watermark_fetch_count("lag", "wm-topic");
+    let after_first = handle_of(&state).watermark_fetch_count("lag", "wm-topic");
     assert!(after_first > before, "the first request had to read the heads");
 
     // a later reader with a generous window finds them already there
@@ -854,7 +893,7 @@ async fn watermarks_are_shared_across_requests_not_refetched() {
             let mut heads = Watermarks::new(&handle, 60_000);
             heads.ensure(&wanted).expect("heads");
             let found: Vec<Option<i64>> = wanted.iter().map(|(t, p)| heads.get(t, *p)).collect();
-            (found, group_watermark_fetch_count("lag", "wm-topic"))
+            (found, handle.watermark_fetch_count("lag", "wm-topic"))
         }
     })
     .await
@@ -879,7 +918,7 @@ async fn watermarks_are_shared_across_requests_not_refetched() {
 /// fetched independently.
 #[tokio::test]
 async fn one_commits_read_serves_the_list_the_topic_tab_and_the_group_page() {
-    use arne::cluster::admin::{group_lag_cached, group_offset_fetch_count};
+    use arne::cluster::admin::group_lag_cached;
 
     let bootstrap = start_kafka().await;
     create_topic(&bootstrap, "cv-topic", 1).await;
@@ -887,10 +926,10 @@ async fn one_commits_read_serves_the_list_the_topic_tab_and_the_group_page() {
     consume_and_commit(&bootstrap, "cv-topic", "cv-group", 5).await;
     let state = state_for(&bootstrap, vec![]);
 
-    let before = group_offset_fetch_count("*", "cv-group");
+    let before = handle_of(&state).offset_fetch_count("*", "cv-group");
     let (_, list) = get_json(app(state.clone()), "/api/clusters/test/group-lag?groups=cv-group").await;
     let listed = list["groups"][0]["total_lag"].as_i64().expect("the list computed a lag");
-    let after_list = group_offset_fetch_count("*", "cv-group");
+    let after_list = handle_of(&state).offset_fetch_count("*", "cv-group");
     assert_eq!(after_list, before + 1, "the list read this group's commits once");
 
     // A later reader with a generous window finds those commits already there
@@ -907,7 +946,7 @@ async fn one_commits_read_serves_the_list_the_topic_tab_and_the_group_page() {
                 .as_millis() as i64;
             let entry = group_lag_cached(&handle, "cv-group", Some(60_000), now).expect("lag rows");
             assert!(!entry.value.rows.is_empty(), "the shared entry carries this group's rows");
-            group_offset_fetch_count("*", "cv-group")
+            handle.offset_fetch_count("*", "cv-group")
         }
     })
     .await
@@ -948,11 +987,13 @@ async fn the_roster_is_read_once_and_shared_by_every_view() {
             let b = group_roster_cached(&handle, 60_000).expect("roster");
             let c = group_roster_cached(&handle, 60_000).expect("roster");
             let listed = a.groups.iter().any(|g| g.group_id == "rr-group");
-            // the assignments are the whole reason the tab can read this
-            let has_assignments = a.groups.iter().any(|g| !g.member_topics.is_empty())
-                // Some(0): counted and empty. `None` would mean "uncountable",
-                // which is not the same as "nobody has joined yet".
-                || a.groups.iter().all(|g| g.member_count == Some(0));
+            // The assignments are the whole reason the tab can read this —
+            // asserted about THIS test's group only. The roster covers the
+            // whole shared broker, so a concurrent test's group (a KIP-848 one
+            // has no countable members here) must not decide this.
+            let has_assignments = a.groups.iter()
+                .find(|g| g.group_id == "rr-group")
+                .is_some_and(|g| !g.member_topics.is_empty() || g.member_count == Some(0));
             ([a.as_of, b.as_of, c.as_of], listed, has_assignments)
         }
     })
