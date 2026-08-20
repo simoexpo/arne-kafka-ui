@@ -341,18 +341,17 @@ fn group_lag_topic_partitions(handle: &ClusterHandle, topic_filter: Option<&str>
 /// purpose. Whatever isn't fresh enough is fetched in a single batched
 /// ListOffsets, and every fetch populates the shared cache for everyone else.
 ///
-/// `oldest_used` is the honest stamp: lag computed against a cached watermark
-/// is only as current as that watermark, so a caller reports the OLDER of its
-/// two sides rather than the flattering one.
+/// `ensure` reports how old the values it served are, because lag computed
+/// against a cached watermark is only as current as that watermark: callers
+/// stamp the PAIR with the older of their two sides, never the flattering one.
 pub struct Watermarks<'a> {
     handle: &'a ClusterHandle,
     ttl_ms: i64,
-    oldest_used: Option<i64>,
 }
 
 impl<'a> Watermarks<'a> {
     pub fn new(handle: &'a ClusterHandle, ttl_ms: i64) -> Self {
-        Self { handle, ttl_ms, oldest_used: None }
+        Self { handle, ttl_ms }
     }
 
     /// A caller that must see the current head (a bounded scan deciding
@@ -363,19 +362,22 @@ impl<'a> Watermarks<'a> {
         Self::new(handle, 0)
     }
 
-    pub fn ensure(&mut self, wanted: &[(String, i32)]) -> Result<(), ApiError> {
+    /// Returns when the OLDEST value backing `wanted` was sampled — the
+    /// caller's honest lower bound for anything it computes from them.
+    pub fn ensure(&mut self, wanted: &[(String, i32)]) -> Result<i64, ApiError> {
         let now = now_ms();
+        let mut oldest = None;
         let mut missing = Vec::new();
         for key in wanted {
             match self.handle.watermarks.sampled_at(key) {
                 Some(at) if self.ttl_ms > 0 && now - at < self.ttl_ms => {
-                    self.oldest_used = Some(self.oldest_used.map_or(at, |o: i64| o.min(at)));
+                    oldest = Some(oldest.map_or(at, |o: i64| o.min(at)));
                 }
                 _ => missing.push(key.clone()),
             }
         }
         if missing.is_empty() {
-            return Ok(());
+            return Ok(oldest.unwrap_or(now));
         }
         for topic in missing.iter().map(|(t, _)| t.as_str()).collect::<std::collections::BTreeSet<_>>() {
             record_group_watermark_fetch(topic);
@@ -386,20 +388,13 @@ impl<'a> Watermarks<'a> {
                 self.handle.watermarks.insert((p.topic, p.partition), p.offset, fetched_at);
             }
         }
-        self.oldest_used = Some(self.oldest_used.map_or(fetched_at, |o: i64| o.min(fetched_at)));
-        Ok(())
+        Ok(oldest.map_or(fetched_at, |o: i64| o.min(fetched_at)))
     }
 
     pub fn get(&self, topic: &str, partition: i32) -> Option<i64> {
         self.handle.watermarks.get(&(topic.to_string(), partition)).map(|e| e.value)
     }
 
-    /// When the oldest watermark this request relied on was sampled — what a
-    /// caller should report as its own `as_of` when that is older than its
-    /// other inputs.
-    pub fn oldest_used(&self) -> Option<i64> {
-        self.oldest_used
-    }
 }
 
 /// Committed offsets fetched WITHOUT joining the group: ListConsumerGroupOffsets
@@ -420,8 +415,9 @@ pub fn group_lag_blocking(
     group: &str,
     partitions: Option<&[(String, i32)]>,
     watermark_cache: &mut Watermarks<'_>,
-) -> Result<Vec<PartitionLag>, ApiError> {
+) -> Result<(Vec<PartitionLag>, i64), ApiError> {
     record_group_offset_fetch(scope, group);
+    let committed_at = now_ms();
     // NotCoordinator/CoordinatorNotAvailable/CoordinatorLoadInProgress are
     // transient by protocol contract: the coordinator is moving or still
     // loading. Retry briefly instead of surfacing a 502 for a healthy cluster.
@@ -441,7 +437,7 @@ pub fn group_lag_blocking(
     // One batched watermark fetch for everything this group committed on that
     // the request doesn't already know.
     let needed: Vec<(String, i32)> = committed.keys().cloned().collect();
-    watermark_cache.ensure(&needed)?;
+    let watermarks_at = watermark_cache.ensure(&needed)?;
     let mut out = Vec::new();
     for ((topic, partition), c) in committed {
         let hi = watermark_cache.get(&topic, partition).ok_or_else(|| {
@@ -453,7 +449,8 @@ pub fn group_lag_blocking(
         });
     }
     out.sort_by_key(|a| (a.topic.clone(), a.partition));
-    Ok(out)
+    // The pair is only as fresh as its older half.
+    Ok((out, committed_at.min(watermarks_at)))
 }
 
 /// The coordinator moving or still loading its state reads as a failure but
@@ -536,25 +533,38 @@ pub async fn groups_lag(handle: Arc<ClusterHandle>, groups: Vec<String>) -> Resu
         let now = now_ms();
         let mut watermark_cache = Watermarks::new(&handle, LAG_WATERMARK_TTL_MS);
         let mut out = Vec::with_capacity(groups.len());
+        // The batch is only as fresh as the oldest entry it serves — a cached
+        // row must not be presented under a "just now" stamp.
+        let mut oldest_served: Option<i64> = None;
         for group in groups {
-            let cached = handle.cluster_lag_cache.fresh(&group, LIVE_TTL_MS, now);
+            let cached = handle
+                .cluster_lag_cache
+                .get(&group)
+                .filter(|e| now - e.sampled_at < LIVE_TTL_MS);
             let rows = match cached {
-                Some(rows) => Ok(rows),
+                Some(entry) => {
+                    oldest_served = Some(oldest_served.map_or(entry.sampled_at, |o: i64| o.min(entry.sampled_at)));
+                    Ok(entry.value)
+                }
                 None => match handle
                     .cluster_lag_flight
                     .begin_or_wait(group.clone(), single_flight::MAX_WAIT)
                 {
                     // Someone else is reading this group right now.
-                    None => match handle.cluster_lag_cache.get(&group).map(|e| e.value) {
-                        Some(rows) => Ok(rows),
+                    None => match handle.cluster_lag_cache.get(&group) {
+                        Some(entry) => {
+                            oldest_served = Some(oldest_served.map_or(entry.sampled_at, |o: i64| o.min(entry.sampled_at)));
+                            Ok(entry.value)
+                        }
                         None => Err("still being read by another request".to_string()),
                     },
                     Some(_flight) => {
                         // None = every partition this group committed on, in
                         // one small request (spike 2026-08-20).
                         match group_lag_blocking(&handle, CLUSTER_WIDE, &group, None, &mut watermark_cache) {
-                            Ok(rows) => {
-                                handle.cluster_lag_cache.insert(group.clone(), rows.clone(), now_ms());
+                            Ok((rows, pair_at)) => {
+                                handle.cluster_lag_cache.insert(group.clone(), rows.clone(), pair_at);
+                                oldest_served = Some(oldest_served.map_or(pair_at, |o: i64| o.min(pair_at)));
                                 Ok(rows)
                             }
                             Err(e) => Err(lag_error_reason(&e)),
@@ -574,7 +584,7 @@ pub async fn groups_lag(handle: Arc<ClusterHandle>, groups: Vec<String>) -> Resu
                 Err(reason) => GroupLagEntry { group_id: group, total_lag: None, error: Some(reason) },
             });
         }
-        Ok(GroupLagBatch { groups: out, as_of: now })
+        Ok(GroupLagBatch { groups: out, as_of: oldest_served.unwrap_or(now) })
     })
     .await
     .map_err(ApiError::task_join)?
@@ -627,7 +637,7 @@ async fn group_detail_uncached(handle: Arc<ClusterHandle>, group: String) -> Res
         let mut watermark_cache = Watermarks::new(&handle, LAG_WATERMARK_TTL_MS);
         // Everything this group committed, in one request: no cluster-wide
         // partition enumeration (spike 2026-08-20).
-        let partitions = group_lag_blocking(&handle, CLUSTER_WIDE, &group, None, &mut watermark_cache)?;
+        let (partitions, pair_at) = group_lag_blocking(&handle, CLUSTER_WIDE, &group, None, &mut watermark_cache)?;
         // A group with no broker-side entry AND no committed offsets does not exist.
         let info = match (info, partitions.is_empty()) {
             (Some(i), _) => Some(i),
@@ -643,7 +653,8 @@ async fn group_detail_uncached(handle: Arc<ClusterHandle>, group: String) -> Res
                 client_host: m.client_host().to_string(),
             }).collect()).unwrap_or_default(),
             partitions,
-            as_of: now_ms(),
+            // as fresh as the older of the two samples behind the lag
+            as_of: pair_at,
         })
     })
     .await
@@ -803,10 +814,12 @@ pub async fn topic_consumers(handle: Arc<ClusterHandle>, topic: String) -> Resul
                                 None => tpl.insert(group_lag_topic_partitions(&handle, Some(&topic))?),
                             };
                             match group_lag_blocking(&handle, &topic, g.name(), Some(tpl), &mut watermark_cache) {
-                                Ok(partitions) => {
-                                    // stamped on completion, not at request start: a long
-                                    // sweep must not record its last entries as already stale
-                                    let entry = CachedEntry { partitions, sampled_at: now_ms() };
+                                Ok((partitions, pair_at)) => {
+                                    // Stamped with the older of the two samples behind
+                                    // the lag, and on completion rather than at request
+                                    // start: a long sweep must not record its last
+                                    // entries as already stale.
+                                    let entry = CachedEntry { partitions, sampled_at: pair_at };
                                     handle.group_lag_cache.insert(&topic, g.name(), entry.clone());
                                     Ok(entry)
                                 }

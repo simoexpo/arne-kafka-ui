@@ -696,6 +696,16 @@ async fn watermarks_are_shared_across_requests_not_refetched() {
         group_watermark_fetch_count("wm-topic"), after_first,
         "the second group reused the shared watermarks instead of refetching them"
     );
+
+    // A batch must disclose the age of what it SERVED, not the moment it was
+    // asked: asking again inside the window returns the same stamp, because it
+    // is the same sample (owner ruling 2026-08-20).
+    let (_, first) = get_json(app(state.clone()), "/api/clusters/test/group-lag?groups=wm-group-a").await;
+    let (_, again) = get_json(app(state.clone()), "/api/clusters/test/group-lag?groups=wm-group-a").await;
+    assert_eq!(
+        again["as_of"], first["as_of"],
+        "a cached answer keeps its own timestamp instead of claiming to be new"
+    );
 }
 
 #[tokio::test]
