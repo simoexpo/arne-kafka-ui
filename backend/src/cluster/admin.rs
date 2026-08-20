@@ -3,7 +3,6 @@ use super::keyed_cache::Stamped;
 use super::{ffi, single_flight, snapshot, ClusterHandle, ADMIN_TIMEOUT};
 use crate::error::{self, ApiError};
 use crate::util::now_ms;
-use rdkafka::admin::{AdminOptions, ResourceSpecifier};
 use rdkafka::consumer::Consumer;
 use serde::Serialize;
 use std::collections::HashMap;
@@ -133,26 +132,24 @@ pub async fn topic_detail(handle: Arc<ClusterHandle>, topic: String) -> Result<A
 }
 
 async fn topic_detail_uncached(handle: Arc<ClusterHandle>, topic: String) -> Result<TopicDetail, ApiError> {
-    // configs via AdminClient (async), partitions/offsets via blocking consumer
+    // Configs and partitions/offsets both go through the one resident client.
     let cfg_handle = handle.clone();
     let cfg_topic = topic.clone();
     let configs_fut = async move {
-        let opts = AdminOptions::new()
-            .operation_timeout(Some(ADMIN_TIMEOUT))
-            .request_timeout(Some(ADMIN_TIMEOUT));
-        let res = cfg_handle.admin()
-            .describe_configs(&[ResourceSpecifier::Topic(&cfg_topic)], &opts)
-            .await
-            .map_err(|e| error::from_kafka(&cfg_handle.name, "describe configs", &e))?;
-        let mut out = Vec::new();
-        for r in res {
-            let resource = r.map_err(|e| ApiError::kafka(&cfg_handle.name, format!("describe configs: {e}")))?;
-            for entry in resource.entries {
-                out.push(ConfigEntryOut { name: entry.name, value: entry.value, is_default: entry.is_default });
-            }
-        }
-        out.sort_by(|a, b| a.name.cmp(&b.name));
-        Ok::<_, ApiError>(out)
+        tokio::task::spawn_blocking(move || {
+            let mut out: Vec<ConfigEntryOut> = super::ffi::describe_topic_config_blocking(
+                &cfg_handle,
+                &cfg_topic,
+                ADMIN_TIMEOUT,
+            )?
+            .into_iter()
+            .map(|e| ConfigEntryOut { name: e.name, value: e.value, is_default: e.is_default })
+            .collect();
+            out.sort_by(|a, b| a.name.cmp(&b.name));
+            Ok::<_, ApiError>(out)
+        })
+        .await
+        .map_err(ApiError::task_join)?
     };
 
     let part_handle = handle.clone();

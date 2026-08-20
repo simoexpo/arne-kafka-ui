@@ -11,14 +11,21 @@
 use super::ClusterHandle;
 use crate::error::ApiError;
 use super::call_stats::StatsContext;
-use rdkafka::admin::AdminClient;
+use rdkafka::consumer::BaseConsumer;
 use rdkafka_sys as rd;
 use std::ffi::{CStr, CString};
 use std::time::Duration;
 
 /// Owns the queue + options pair every admin call needs and destroys both on
 /// drop, so an early return can never leak them.
+///
+/// The calls go out on the cluster's ONE resident client. librdkafka's admin
+/// API accepts any client handle, and using the same one everything else uses
+/// means every request Arne makes is counted in one place (`call_stats`) —
+/// a second client would have its own tally that rust-rdkafka cannot deliver.
 struct AdminCall {
+    /// Held for the duration: `rk` borrows from this client.
+    _client: std::sync::Arc<BaseConsumer<StatsContext>>,
     rk: *mut rd::RDKafka,
     queue: *mut rd::rd_kafka_queue_t,
     options: *mut rd::rd_kafka_AdminOptions_t,
@@ -26,12 +33,13 @@ struct AdminCall {
 
 impl AdminCall {
     fn new(
-        admin: &AdminClient<StatsContext>,
+        handle: &ClusterHandle,
         op: rd::rd_kafka_admin_op_t,
         timeout: Duration,
-        cluster: &str,
     ) -> Result<Self, ApiError> {
-        let rk = admin.inner().native_ptr();
+        let cluster = handle.name.as_str();
+        let client = handle.consumer();
+        let rk = rdkafka::consumer::Consumer::client(client.as_ref()).native_ptr();
         // SAFETY: `rk` is a live client owned by the caller's ClusterHandle;
         // both constructors return owned handles this struct now owns.
         unsafe {
@@ -51,7 +59,7 @@ impl AdminCall {
                 rd::rd_kafka_queue_destroy(queue);
                 return Err(ApiError::kafka(cluster, cstr_to_string(errbuf.as_ptr())));
             }
-            Ok(Self { rk, queue, options })
+            Ok(Self { _client: client, rk, queue, options })
         }
     }
 
@@ -117,12 +125,10 @@ pub fn describe_cluster_blocking(
     handle: &ClusterHandle,
     timeout: Duration,
 ) -> Result<ClusterDescription, ApiError> {
-    let admin = handle.admin();
     let call = AdminCall::new(
-        &admin,
+        handle,
         rd::rd_kafka_admin_op_t::RD_KAFKA_ADMIN_OP_DESCRIBECLUSTER,
         timeout,
-        &handle.name,
     )?;
     // SAFETY: issuing the call onto our own queue with our own options.
     unsafe { rd::rd_kafka_DescribeCluster(call.rk, call.options, call.queue) };
@@ -170,12 +176,10 @@ pub fn list_offsets_blocking(
     if partitions.is_empty() {
         return Ok(Vec::new());
     }
-    let admin = handle.admin();
     let call = AdminCall::new(
-        &admin,
+        handle,
         rd::rd_kafka_admin_op_t::RD_KAFKA_ADMIN_OP_LISTOFFSETS,
         timeout,
-        &handle.name,
     )?;
     let tpl = OwnedTpl::build(partitions, spec)?;
     // SAFETY: the list stays alive for the duration of the call.
@@ -254,12 +258,10 @@ pub fn committed_offsets_blocking(
     if partitions.is_some_and(|p| p.is_empty()) {
         return Ok(std::collections::HashMap::new());
     }
-    let admin = handle.admin();
     let call = AdminCall::new(
-        &admin,
+        handle,
         rd::rd_kafka_admin_op_t::RD_KAFKA_ADMIN_OP_LISTCONSUMERGROUPOFFSETS,
         timeout,
-        &handle.name,
     )?;
     let tpl = partitions.map(|p| OwnedTpl::build(p, OffsetSpec::Invalid)).transpose()?;
     let group_id = CString::new(group)
@@ -403,12 +405,10 @@ pub fn describe_consumer_group_blocking(
     group: &str,
     timeout: Duration,
 ) -> Result<Option<GroupDescription>, ApiError> {
-    let admin = handle.admin();
     let call = AdminCall::new(
-        &admin,
+        handle,
         rd::rd_kafka_admin_op_t::RD_KAFKA_ADMIN_OP_DESCRIBECONSUMERGROUPS,
         timeout,
-        &handle.name,
     )?;
     let group_id = CString::new(group)
         .map_err(|_| ApiError::kafka(&handle.name, format!("group id contains a NUL byte: {group:?}")))?;
@@ -501,12 +501,10 @@ pub fn list_consumer_groups_blocking(
     handle: &ClusterHandle,
     timeout: Duration,
 ) -> Result<Vec<GroupListing>, ApiError> {
-    let admin = handle.admin();
     let call = AdminCall::new(
-        &admin,
+        handle,
         rd::rd_kafka_admin_op_t::RD_KAFKA_ADMIN_OP_LISTCONSUMERGROUPS,
         timeout,
-        &handle.name,
     )?;
     // SAFETY: issuing onto our own queue; every string is copied out of the
     // result before the event drops.
@@ -540,6 +538,76 @@ pub fn list_consumer_groups_blocking(
                     rd::rd_kafka_ConsumerGroupListing_type(listing),
                 )),
             });
+        }
+        Ok(out)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ConfigEntry {
+    pub name: String,
+    pub value: Option<String>,
+    pub is_default: bool,
+}
+
+/// One topic's configuration. Bound here rather than taken from
+/// rust-rdkafka's `AdminClient` so the cluster keeps ONE client: two clients
+/// means two tallies, and librdkafka can only deliver the consumer's — an
+/// admin client's requests would be spent invisibly (`call_stats`).
+pub fn describe_topic_config_blocking(
+    handle: &ClusterHandle,
+    topic: &str,
+    timeout: Duration,
+) -> Result<Vec<ConfigEntry>, ApiError> {
+    let call = AdminCall::new(
+        handle,
+        rd::rd_kafka_admin_op_t::RD_KAFKA_ADMIN_OP_DESCRIBECONFIGS,
+        timeout,
+    )?;
+    let name = CString::new(topic)
+        .map_err(|_| ApiError::kafka(&handle.name, format!("topic name contains a NUL byte: {topic:?}")))?;
+    // SAFETY: the resource is destroyed on every path below before returning,
+    // and every string is copied out of the result before the event drops.
+    unsafe {
+        let resource = rd::rd_kafka_ConfigResource_new(
+            rd::rd_kafka_ResourceType_t::RD_KAFKA_RESOURCE_TOPIC,
+            name.as_ptr(),
+        );
+        if resource.is_null() {
+            return Err(ApiError::kafka(&handle.name, "describe configs: invalid topic resource"));
+        }
+        let mut resources = [resource];
+        rd::rd_kafka_DescribeConfigs(call.rk, resources.as_mut_ptr(), 1, call.options, call.queue);
+        let event = call.wait(timeout, &handle.name, "describe configs");
+        rd::rd_kafka_ConfigResource_destroy(resource);
+        let event = event?;
+        let result = rd::rd_kafka_event_DescribeConfigs_result(event.0);
+        if result.is_null() {
+            return Err(ApiError::kafka(&handle.name, "describe configs: unexpected result type"));
+        }
+        let mut count = 0usize;
+        let described = rd::rd_kafka_DescribeConfigs_result_resources(result, &mut count);
+        let mut out = Vec::new();
+        for i in 0..count {
+            let res = *described.add(i);
+            let err = rd::rd_kafka_ConfigResource_error(res);
+            if err as i32 != rd::rd_kafka_resp_err_t::RD_KAFKA_RESP_ERR_NO_ERROR as i32 {
+                let detail = cstr_to_string(rd::rd_kafka_ConfigResource_error_string(res));
+                return Err(ApiError::kafka(&handle.name, format!("describe configs: {detail}")));
+            }
+            let mut entry_count = 0usize;
+            let entries = rd::rd_kafka_ConfigResource_configs(res, &mut entry_count);
+            for j in 0..entry_count {
+                let entry = *entries.add(j);
+                let raw = rd::rd_kafka_ConfigEntry_value(entry);
+                out.push(ConfigEntry {
+                    name: cstr_to_string(rd::rd_kafka_ConfigEntry_name(entry)),
+                    // A null value is a config with none set, which is not the
+                    // same as one set to the empty string.
+                    value: (!raw.is_null()).then(|| cstr_to_string(raw)),
+                    is_default: rd::rd_kafka_ConfigEntry_is_default(entry) != 0,
+                });
+            }
         }
         Ok(out)
     }

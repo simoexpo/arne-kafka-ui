@@ -11,7 +11,6 @@ pub mod snapshot;
 
 use crate::config::{ClusterConfig, SaslMechanism};
 use crate::message::schema_registry::SchemaRegistry;
-use rdkafka::admin::AdminClient;
 use rdkafka::consumer::{BaseConsumer, Consumer};
 use rdkafka::error::KafkaResult;
 use rdkafka::ClientConfig;
@@ -31,9 +30,12 @@ pub const DETAIL_HORIZON_MS: i64 = 600_000;
 /// Just under the detail pages' 10s poll.
 pub const DETAIL_TTL_MS: i64 = 8_000;
 
-/// Tallies to drain from a client's queue in one read. Bounded: a queue left
-/// unread for hours must not make one request pay for all of it.
-const MAX_TALLY_DRAIN: usize = 256;
+/// How long one read may spend draining a client's tally queue. A time budget
+/// rather than a count: a queue left unread for hours holds thousands of
+/// tallies, and a count cap made a read return hours-old counts while looking
+/// perfectly healthy — several reads were needed before the numbers meant
+/// anything. `sampled_at` still discloses whatever staleness is left.
+const MAX_TALLY_DRAIN: std::time::Duration = std::time::Duration::from_millis(50);
 
 /// Deliberately SHORT next to the other snapshots: health is the cheapest
 /// call we make (one DescribeCluster) and the one users most need current, so
@@ -128,7 +130,6 @@ pub struct ClusterHandle {
     pub describe_flight: single_flight::SingleFlight<String>,
     pub schema_registry: Option<Arc<SchemaRegistry>>,
     consumer: RwLock<Arc<BaseConsumer<call_stats::StatsContext>>>,
-    admin: RwLock<Arc<AdminClient<call_stats::StatsContext>>>,
     /// What librdkafka counted itself sending, per broker and per API. Empty
     /// unless a stats interval is configured.
     pub call_stats: Arc<call_stats::CallStats>,
@@ -166,8 +167,6 @@ impl ClusterHandle {
         let call_stats = Arc::new(call_stats::CallStats::default());
         let consumer: BaseConsumer<_> =
             cc.create_with_context(call_stats::StatsContext::new(call_stats.clone(), call_stats::CONSUMER))?;
-        let admin: AdminClient<_> =
-            cc.create_with_context(call_stats::StatsContext::new(call_stats.clone(), call_stats::ADMIN))?;
         let schema_registry = config.schema_registry.as_ref().map(|sr| Arc::new(SchemaRegistry::new(&sr.url)));
         Ok(Self {
             name: config.name.clone(),
@@ -189,7 +188,6 @@ impl ClusterHandle {
             detail_flight: Arc::new(single_flight::SingleFlight::new()),
             schema_registry,
             consumer: RwLock::new(Arc::new(consumer)),
-            admin: RwLock::new(Arc::new(admin)),
             call_stats,
             offset_fetches: std::sync::Mutex::new(std::collections::HashMap::new()),
             watermark_fetches: std::sync::Mutex::new(std::collections::HashMap::new()),
@@ -216,10 +214,8 @@ impl ClusterHandle {
     /// Worth calling only when a report is about to be read — nothing polls
     /// on a timer, so an idle Arne does no work here at all.
     ///
-    /// Only the consumer: rust-rdkafka enables `RD_KAFKA_EVENT_STATS` on a
-    /// `BaseConsumer`'s queue (`base_consumer.rs`) but builds its
-    /// `AdminClient` with no event mask and no stats callback, so that
-    /// client's tally is unreachable — see `call_stats`' own note.
+    /// There is one resident client and every call goes through it, so this
+    /// tally is the whole picture — see `call_stats`' own note.
     ///
     /// Safe against message reads: the resident consumer never holds an
     /// assignment (`message::fetch`/`tail` build their own), so this can
@@ -231,10 +227,11 @@ impl ClusterHandle {
         // Drain until a poll delivers no further tally, bounded so a long-idle
         // queue cannot turn one request into unbounded work.
         let mut seen = self.call_stats.recorded();
-        for _ in 0..MAX_TALLY_DRAIN {
+        let until = std::time::Instant::now() + MAX_TALLY_DRAIN;
+        loop {
             let _ = consumer.poll(std::time::Duration::ZERO);
             let now = self.call_stats.recorded();
-            if now == seen {
+            if now == seen || std::time::Instant::now() >= until {
                 break;
             }
             seen = now;
@@ -245,32 +242,16 @@ impl ClusterHandle {
         self.consumer.read().expect("consumer lock poisoned").clone()
     }
 
-    pub fn admin(&self) -> Arc<AdminClient<call_stats::StatsContext>> {
-        self.admin.read().expect("admin lock poisoned").clone()
-    }
-
-    fn swap_clients(
-        &self,
-        consumer: BaseConsumer<call_stats::StatsContext>,
-        admin: AdminClient<call_stats::StatsContext>,
-    ) {
+    fn swap_clients(&self, consumer: BaseConsumer<call_stats::StatsContext>) {
         // The counts belong to the outgoing clients and restart at zero.
         self.call_stats.client_replaced();
-        // The two slots swap under separate locks, so a concurrent reader can
-        // briefly observe new-consumer + old-admin. Both are built from the
-        // same config; worst case is one bounded call on the outgoing client.
-        let old_consumer = std::mem::replace(
+        let old = std::mem::replace(
             &mut *self.consumer.write().expect("consumer lock poisoned"),
             Arc::new(consumer),
         );
-        let old_admin = std::mem::replace(
-            &mut *self.admin.write().expect("admin lock poisoned"),
-            Arc::new(admin),
-        );
-        // Dropped here, after both locks are released: rd_kafka_destroy can
+        // Dropped here, after the lock is released: rd_kafka_destroy can
         // stall, and it must never run while readers block on the lock.
-        drop(old_consumer);
-        drop(old_admin);
+        drop(old);
     }
 
     /// Test hook: rebuild the resident client pair against a different
@@ -283,9 +264,7 @@ impl ClusterHandle {
         let cc = build_client_config(&cfg);
         let consumer: BaseConsumer<_> =
             cc.create_with_context(call_stats::StatsContext::new(self.call_stats.clone(), call_stats::CONSUMER))?;
-        let admin: AdminClient<_> =
-            cc.create_with_context(call_stats::StatsContext::new(self.call_stats.clone(), call_stats::ADMIN))?;
-        self.swap_clients(consumer, admin);
+        self.swap_clients(consumer);
         Ok(())
     }
 
@@ -393,9 +372,7 @@ impl ClusterHandle {
         let consumer: BaseConsumer<call_stats::StatsContext> =
             cc.create_with_context(call_stats::StatsContext::new(self.call_stats.clone(), call_stats::CONSUMER)).ok()?;
         let brokers = consumer.fetch_metadata(None, HEALTH_TIMEOUT).ok()?.brokers().len();
-        let admin: AdminClient<call_stats::StatsContext> =
-            cc.create_with_context(call_stats::StatsContext::new(self.call_stats.clone(), call_stats::ADMIN)).ok()?;
-        self.swap_clients(consumer, admin);
+        self.swap_clients(consumer);
         self.health_failures.store(0, Ordering::SeqCst);
         tracing::warn!(cluster = %self.name, "stale kafka connection replaced with a fresh one");
         Some(brokers)

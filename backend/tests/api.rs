@@ -101,6 +101,9 @@ async fn topic_detail_shows_partitions_offsets_and_configs() {
     assert!(!parts[0]["isr"].as_array().unwrap().is_empty());
     let configs = body["configs"].as_array().unwrap();
     assert!(configs.iter().any(|c| c["name"] == "retention.ms"), "expected retention.ms in configs");
+    let retention = configs.iter().find(|c| c["name"] == "retention.ms").unwrap();
+    assert!(retention["value"].is_string(), "a config carries its value: {retention}");
+    assert!(retention["is_default"].is_boolean(), "and whether it is the broker default: {retention}");
 }
 
 /// Regression: `describe_configs` inside `topic_detail` must carry the same
@@ -272,18 +275,22 @@ async fn a_group_page_asks_its_coordinator_and_never_enumerates_the_brokers() {
     assert_eq!(status, 200);
     let delta = calls_since(&state, &before).await;
 
-    // The describe itself goes out on the admin client, whose tally librdkafka
-    // discards (see `call_stats`); what matters here is the absence — the page
-    // used to reach this data by listing every broker's groups first.
     assert_eq!(
         delta.get("ListGroups").copied().unwrap_or(0),
         0,
         "no per-broker group-list fan-out for one group's page: {delta:?}"
     );
-    assert_eq!(
-        delta.get("DescribeGroups").copied().unwrap_or(0),
-        0,
-        "nor the classic describe it used to follow with: {delta:?}"
+    // Every call Arne makes is on one observable client, so the describe it
+    // DID send is counted too — the page's whole cost, not half of it.
+    assert!(
+        delta.get("ConsumerGroupDescribe").copied().unwrap_or(0)
+            + delta.get("DescribeGroups").copied().unwrap_or(0)
+            >= 1,
+        "the coordinator describe is accounted for: {delta:?}"
+    );
+    assert!(
+        delta.get("OffsetFetch").copied().unwrap_or(0) >= 1,
+        "and so are the committed offsets behind its lag: {delta:?}"
     );
 
     // Positive control: an absence proves nothing if the instrument reads

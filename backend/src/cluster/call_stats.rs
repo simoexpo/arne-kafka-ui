@@ -18,25 +18,25 @@
 //! reading therefore accumulates blobs — so set it while diagnosing, not for
 //! ever. It is off by default for that reason.
 //!
-//! LIMIT, and it is a real one: only the resident CONSUMER is observable.
-//! rust-rdkafka enables the stats event on a `BaseConsumer`'s queue but builds
-//! its `AdminClient` with no event mask and registers no stats callback, so
-//! that client's tally is discarded inside librdkafka before anything can read
-//! it. What this reports therefore covers metadata, group-list, describe and
-//! offset traffic from the consumer — where every fan-out this project has had
-//! to hunt lived — and NOT the admin-client calls in `ffi` (DescribeCluster,
-//! ListOffsets, ListConsumerGroups, DescribeConsumerGroups,
-//! ListConsumerGroupOffsets), nor the short-lived consumers that
-//! `message::fetch`/`tail` build per request.
+//! This is the whole picture for a cluster's resident client, because there is
+//! only one: every admin call goes out on it through `ffi::AdminCall` rather
+//! than through a second `AdminClient`, whose tally rust-rdkafka cannot
+//! deliver (it gives that client no event mask and no stats callback, so
+//! librdkafka discards its stats before anything can read them).
+//!
+//! What it does NOT count: the short-lived consumers `message::fetch`/`tail`
+//! build per request and destroy again. Their traffic is bounded by one
+//! request each and dies with them, so there is no cumulative tally to keep.
 
 use rdkafka::Statistics;
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
-/// Which resident client a tally came from. Each librdkafka instance counts
-/// only its own requests, so tallies are kept per role and summed on read.
+/// Which client a tally came from. Kept per role and summed on read, so a
+/// second resident client would be accounted for without changing a reader.
 pub const CONSUMER: &str = "consumer";
+#[cfg(test)]
 pub const ADMIN: &str = "admin";
 
 #[derive(Debug, Clone, Default)]
