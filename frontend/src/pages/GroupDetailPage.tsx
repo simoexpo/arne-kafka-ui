@@ -46,32 +46,17 @@ export function GroupDetailView({ cluster, group }: { cluster: string; group: st
         <Panel title="Group" error={detail.error} loading={detail.isPending} hasData={detail.data !== undefined}>
           {detail.data && (
             <>
-              <dl className="flex justify-between gap-3 text-sm">
+              {/* One column template for both rows, so a figure always sits
+                  under the one above it. */}
+              <dl className="grid grid-cols-3 gap-3 text-sm">
                 <Stat label="topics" value={String(topics)} />
                 <Stat label="partitions" value={String(partitionCount)} />
                 <TotalLagStat rows={detail.data.partitions} unreadable={detail.data.unreadable_partitions} />
               </dl>
-              <dl className="mt-4 flex justify-between gap-3 text-sm">
-                <Stat
-                  label="assignment strategy"
-                  value={assignorClass(detail.data.assignment_strategy)}
-                  title={
-                    detail.data.assignment_strategy
-                      ? assignorClass(detail.data.assignment_strategy)
-                      : 'no members, so no assignor has been negotiated'
-                  }
-                />
+              <dl className="mt-4 grid grid-cols-3 gap-3 text-sm">
+                <Stat label="assignment strategy" value={assignorClass(detail.data.assignment_strategy)} />
                 <Stat label="status" value={detail.data.state} />
-                <Stat
-                  label="protocol"
-                  className="text-right"
-                  value={detail.data.group_type || '—'}
-                  title={
-                    detail.data.group_type
-                      ? 'the rebalance protocol this group speaks'
-                      : 'the broker did not say which rebalance protocol this group uses'
-                  }
-                />
+                <Stat label="protocol" value={detail.data.group_type || '—'} />
               </dl>
             </>
           )}

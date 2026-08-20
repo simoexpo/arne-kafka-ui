@@ -67,17 +67,21 @@ describe('GroupDetailView', () => {
     expect(await screen.findByTestId('stat-assignment strategy')).toHaveTextContent('CooperativeSticky')
   })
 
-  it('spreads both rows of figures across the card', async () => {
+  // Owner ruling 2026-08-20: both rows share one column template, so each
+  // figure sits under the one above it — no per-row content sizing.
+  it('lays both rows on the same columns', async () => {
     vi.mocked(client.getGroupDetail).mockResolvedValue(detail())
     renderWithQuery(<GroupDetailView cluster="prod" group="billing" />)
     const first = (await screen.findByTestId('stat-topics')).parentElement!
     const second = screen.getByTestId('stat-assignment strategy').parentElement!
-    expect(first.className).toMatch(/justify-between/)
-    expect(second.className).toMatch(/justify-between/)
     expect(first).not.toBe(second)
+    expect(first.className).toContain('grid-cols-3')
+    expect(second.className).toContain('grid-cols-3')
     // what it consumes on top, how it behaves below
     expect(first.lastElementChild).toBe(screen.getByTestId('stat-total lag'))
     expect(second.lastElementChild).toBe(screen.getByTestId('stat-protocol'))
+    // nothing is pushed to an edge any more
+    expect(second.lastElementChild!.className).not.toMatch(/text-right/)
   })
 
   // An unknown protocol is passed through, never mapped to a wrong class: a
