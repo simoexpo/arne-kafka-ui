@@ -122,6 +122,19 @@ mod tests {
         assert!(cache.get(&"old").is_none());
     }
 
+    /// A keyed hit shares its payload too, when the caller parameterises the
+    /// cache with an `Arc` — which the big values do and the eight-byte
+    /// watermarks deliberately do not.
+    #[test]
+    fn a_keyed_hit_shares_the_payload_when_the_value_is_shared() {
+        use std::sync::Arc;
+        let cache: KeyedCache<&str, Arc<Vec<u32>>> = KeyedCache::new(600_000);
+        cache.insert("k", Arc::new(vec![1, 2, 3]), 0);
+        let a = cache.get(&"k").unwrap().value;
+        let b = cache.get(&"k").unwrap().value;
+        assert!(Arc::ptr_eq(&a, &b), "two reads, one allocation");
+    }
+
     /// Asking a question of the value must not copy it: cloning a group's
     /// whole row set to test a boolean is waste that scales with the cluster.
     #[test]

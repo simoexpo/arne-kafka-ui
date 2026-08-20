@@ -27,7 +27,7 @@ pub async fn list(State(state): State<AppState>) -> Json<Value> {
 pub async fn overview(
     State(state): State<AppState>,
     Path(cluster): Path<String>,
-) -> Result<Json<admin::Overview>, ApiError> {
+) -> Result<Json<std::sync::Arc<admin::Overview>>, ApiError> {
     let handle = state.registry.get(&cluster)?;
     Ok(Json(admin::overview(handle).await?))
 }

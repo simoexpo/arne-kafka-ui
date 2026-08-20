@@ -140,6 +140,22 @@ mod tests {
         assert_eq!(calls.load(Ordering::SeqCst), 1, "one refresh served all eight");
     }
 
+    /// A cache HIT must hand out the SAME payload, not a copy of it: a
+    /// 10k-topic list deep-copied per request would make a hit scale with
+    /// cluster size, which is the cost the cache exists to remove (owner
+    /// ruling 2026-08-20).
+    #[test]
+    fn a_hit_shares_the_payload_instead_of_copying_it() {
+        use std::sync::Arc;
+        let cache: SnapshotCache<Arc<Vec<u32>>> = SnapshotCache::new();
+        let sf = flight();
+        let build = || Ok::<_, ApiError>(Arc::new(vec![1, 2, 3]));
+        let first = cached_or_refresh(&cache, &sf, "k", 10_000, build).unwrap();
+        let second = cached_or_refresh(&cache, &sf, "k", 10_000, build).unwrap();
+        assert!(Arc::ptr_eq(&first, &second), "both readers hold the same allocation");
+        assert_eq!(Arc::strong_count(&first), 3, "cache plus two readers, one payload");
+    }
+
     /// A failed refresh must reach the client rather than being hidden behind
     /// the previous value: the UI shows the error next to its own last copy.
     #[test]

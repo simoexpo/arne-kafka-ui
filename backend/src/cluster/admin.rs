@@ -42,14 +42,14 @@ pub struct TopicList {
 /// page's 30s poll, so a lone tab still refreshes every poll).
 pub const TOPICS_TTL_MS: i64 = 25_000;
 
-pub async fn list_topics(handle: Arc<ClusterHandle>) -> Result<TopicList, ApiError> {
+pub async fn list_topics(handle: Arc<ClusterHandle>) -> Result<Arc<TopicList>, ApiError> {
     tokio::task::spawn_blocking(move || {
         snapshot::cached_or_refresh(
             &handle.topics_snapshot,
             &handle.snapshot_flight,
             "topics",
             TOPICS_TTL_MS,
-            || list_topics_blocking(&handle),
+            || list_topics_blocking(&handle).map(Arc::new),
         )
     })
     .await
@@ -105,7 +105,7 @@ pub struct TopicDetail {
 /// 2026-08-20): the backend answers from memory and reaches the broker only
 /// when it has nothing fresh, so broker load follows our refresh policy
 /// rather than how many people have Arne open.
-pub async fn topic_detail(handle: Arc<ClusterHandle>, topic: String) -> Result<TopicDetail, ApiError> {
+pub async fn topic_detail(handle: Arc<ClusterHandle>, topic: String) -> Result<Arc<TopicDetail>, ApiError> {
     if let Some(fresh) = handle.topic_detail_cache.fresh(&topic, super::DETAIL_TTL_MS, now_ms()) {
         return Ok(fresh);
     }
@@ -126,7 +126,7 @@ pub async fn topic_detail(handle: Arc<ClusterHandle>, topic: String) -> Result<T
     if let (None, Some(value)) = (&flight, handle.topic_detail_cache.get(&topic).map(|e| e.value)) {
         return Ok(value);
     }
-    let fresh = topic_detail_uncached(handle.clone(), topic.clone()).await?;
+    let fresh = Arc::new(topic_detail_uncached(handle.clone(), topic.clone()).await?);
     handle.topic_detail_cache.insert(topic, fresh.clone(), now_ms());
     drop(flight);
     Ok(fresh)
@@ -417,7 +417,7 @@ pub fn group_lag_cached(
     group: &str,
     ttl_ms: Option<i64>,
     now: i64,
-) -> Result<Stamped<LagSnapshot>, ApiError> {
+) -> Result<Stamped<Arc<LagSnapshot>>, ApiError> {
     let cached = handle.group_lag.get(&group.to_string());
     // `None` means this group must not be read at all — only served if we
     // happen to know it already.
@@ -483,7 +483,7 @@ fn is_coordinator_hiccup(message: &str) -> bool {
 /// read, and `committed > end` cannot happen in Kafka, so showing it would be
 /// visibly incoherent. Reading heads just after the commits errs the only
 /// harmless way — by at most the microseconds between the two calls.
-fn sample_group_lag(handle: &ClusterHandle, group: &str) -> Result<Stamped<LagSnapshot>, ApiError> {
+fn sample_group_lag(handle: &ClusterHandle, group: &str) -> Result<Stamped<Arc<LagSnapshot>>, ApiError> {
     let commits = fetch_group_commits(handle, group)?;
     let wanted = partitions_of(&commits, None);
     let mut heads = Watermarks::always_fresh(handle, "lag");
@@ -493,6 +493,7 @@ fn sample_group_lag(handle: &ClusterHandle, group: &str) -> Result<Stamped<LagSn
     // retries, and an entry born older than its own TTL would never serve a
     // hit — every poll would re-read every group.
     let sampled_at = now_ms();
+    let snapshot = Arc::new(snapshot);
     handle.group_lag.insert(group.to_string(), snapshot.clone(), sampled_at);
     Ok(Stamped { value: snapshot, sampled_at })
 }
@@ -551,13 +552,13 @@ pub struct GroupRoster {
 /// Public as a test hook — sharing must be asserted with an explicit window,
 /// not by racing requests against a production TTL.
 #[doc(hidden)]
-pub fn group_roster_cached(handle: &ClusterHandle, ttl_ms: i64) -> Result<GroupRoster, ApiError> {
+pub fn group_roster_cached(handle: &ClusterHandle, ttl_ms: i64) -> Result<Arc<GroupRoster>, ApiError> {
     snapshot::cached_or_refresh(
         &handle.groups_snapshot,
         &handle.snapshot_flight,
         "groups",
         ttl_ms,
-        || fetch_group_roster(handle),
+        || fetch_group_roster(handle).map(Arc::new),
     )
 }
 
@@ -581,10 +582,10 @@ fn fetch_group_roster(handle: &ClusterHandle) -> Result<GroupRoster, ApiError> {
     Ok(GroupRoster { groups, as_of: now_ms() })
 }
 
-pub async fn list_groups(handle: Arc<ClusterHandle>) -> Result<GroupList, ApiError> {
+pub async fn list_groups(handle: Arc<ClusterHandle>) -> Result<Arc<GroupList>, ApiError> {
     tokio::task::spawn_blocking(move || {
         let roster = group_roster_cached(&handle, GROUPS_TTL_MS)?;
-        Ok(GroupList {
+        Ok(Arc::new(GroupList {
             groups: roster.groups.iter().map(|g| GroupSummary {
                 group_id: g.group_id.clone(),
                 state: g.state.clone(),
@@ -593,7 +594,7 @@ pub async fn list_groups(handle: Arc<ClusterHandle>) -> Result<GroupList, ApiErr
             }).collect(),
             // The roster's own sample time, not this request's.
             as_of: roster.as_of,
-        })
+        }))
     })
     .await
     .map_err(ApiError::task_join)?
@@ -656,7 +657,7 @@ pub const LAG_WATERMARK_TTL_MS: i64 = 2_000;
 /// commits are read once for every view, so every read carries this label.
 const CLUSTER_WIDE: &str = "*";
 
-pub async fn group_detail(handle: Arc<ClusterHandle>, group: String) -> Result<GroupDetail, ApiError> {
+pub async fn group_detail(handle: Arc<ClusterHandle>, group: String) -> Result<Arc<GroupDetail>, ApiError> {
     if let Some(fresh) = handle.group_detail_cache.fresh(&group, super::DETAIL_TTL_MS, now_ms()) {
         return Ok(fresh);
     }
@@ -675,7 +676,7 @@ pub async fn group_detail(handle: Arc<ClusterHandle>, group: String) -> Result<G
     if let (None, Some(value)) = (&flight, handle.group_detail_cache.get(&group).map(|e| e.value)) {
         return Ok(value);
     }
-    let fresh = group_detail_uncached(handle.clone(), group.clone()).await?;
+    let fresh = Arc::new(group_detail_uncached(handle.clone(), group.clone()).await?);
     handle.group_detail_cache.insert(group, fresh.clone(), now_ms());
     drop(flight);
     Ok(fresh)
@@ -693,7 +694,8 @@ async fn group_detail_uncached(handle: Arc<ClusterHandle>, group: String) -> Res
         // page after seeing it in the list costs nothing. Errors keep their own
         // ApiError, so a broker timeout still reports as a timeout.
         let entry = group_lag_cached(&handle, &group, Some(super::group_lag_cache::LIVE_TTL_MS), now_ms())?;
-        let (partitions, pair_at) = (entry.value.rows, entry.sampled_at);
+        // The snapshot is shared, so this view copies just the rows it renders.
+        let (partitions, pair_at) = (entry.value.rows.clone(), entry.sampled_at);
         // A group with no broker-side entry AND no committed offsets does not exist.
         let info = match (info, partitions.is_empty()) {
             (Some(i), _) => Some(i),
@@ -911,14 +913,14 @@ fn top_topics_by_partitions<'a>(topics: impl IntoIterator<Item = (&'a str, usize
 /// Just under the overview's 10s poll.
 pub const OVERVIEW_TTL_MS: i64 = 8_000;
 
-pub async fn overview(handle: Arc<ClusterHandle>) -> Result<Overview, ApiError> {
+pub async fn overview(handle: Arc<ClusterHandle>) -> Result<Arc<Overview>, ApiError> {
     tokio::task::spawn_blocking(move || {
         snapshot::cached_or_refresh(
             &handle.overview_snapshot,
             &handle.snapshot_flight,
             "overview",
             OVERVIEW_TTL_MS,
-            || overview_blocking(&handle),
+            || overview_blocking(&handle).map(Arc::new),
         )
     })
     .await

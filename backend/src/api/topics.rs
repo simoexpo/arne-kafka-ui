@@ -9,7 +9,7 @@ use serde_json::json;
 pub async fn list(
     State(state): State<AppState>,
     Path(cluster): Path<String>,
-) -> Result<Json<admin::TopicList>, ApiError> {
+) -> Result<Json<std::sync::Arc<admin::TopicList>>, ApiError> {
     let handle = state.registry.get(&cluster)?;
     Ok(Json(admin::list_topics(handle).await?))
 }
@@ -17,7 +17,7 @@ pub async fn list(
 pub async fn detail(
     State(state): State<AppState>,
     Path((cluster, topic)): Path<(String, String)>,
-) -> Result<Json<admin::TopicDetail>, ApiError> {
+) -> Result<Json<std::sync::Arc<admin::TopicDetail>>, ApiError> {
     let handle = state.registry.get(&cluster)?;
     Ok(Json(admin::topic_detail(handle, topic).await?))
 }

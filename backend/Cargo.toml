@@ -20,7 +20,9 @@ rdkafka = { version = "0.39.0", features = ["cmake-build", "ssl-vendored"] }
 rdkafka-sys = { version = "4.10", features = ["cmake-build", "ssl-vendored"] }
 reqwest = { version = "0.13.4", features = ["json"] }
 rust-embed = "8.12.0"
-serde = { version = "1.0.229", features = ["derive"] }
+# "rc" so a cached payload can be served straight out of an Arc: a cache HIT
+# must not deep-copy a 10k-element list on every request.
+serde = { version = "1.0.229", features = ["derive", "rc"] }
 serde_json = "1.0.151"
 serde_yaml = "0.9.34"
 thiserror = "2.0.20"

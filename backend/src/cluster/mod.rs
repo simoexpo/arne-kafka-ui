@@ -91,24 +91,27 @@ pub struct ClusterHandle {
     /// stored value is a commits/heads PAIR sampled together, so a cached row
     /// is old but never wrong. Freshness is the reader's policy — see
     /// `group_lag_cache::commits_ttl`.
-    pub group_lag: keyed_cache::KeyedCache<String, group_lag_cache::LagSnapshot>,
+    pub group_lag: keyed_cache::KeyedCache<String, Arc<group_lag_cache::LagSnapshot>>,
     pub commits_flight: single_flight::SingleFlight<String>,
+    /// Deliberately NOT behind an `Arc`, unlike the caches above: the value is
+    /// eight bytes, so a pointer plus an allocation would cost more than the
+    /// copy it saves.
     /// Every partition's high watermark, shared by the four call sites that
     /// need one (partitions tab, messages window, throughput sampling, lag).
     /// Each reader brings its own freshness policy — see `admin::Watermarks`.
     pub watermarks: keyed_cache::KeyedCache<(String, i32), i64>,
     /// Whole-response snapshots shared by every tab for a few seconds, so tab
     /// count stops multiplying broker calls (owner design 2026-08-19).
-    pub topics_snapshot: snapshot::SnapshotCache<admin::TopicList>,
-    pub overview_snapshot: snapshot::SnapshotCache<admin::Overview>,
-    pub groups_snapshot: snapshot::SnapshotCache<admin::GroupRoster>,
+    pub topics_snapshot: snapshot::SnapshotCache<Arc<admin::TopicList>>,
+    pub overview_snapshot: snapshot::SnapshotCache<Arc<admin::Overview>>,
+    pub groups_snapshot: snapshot::SnapshotCache<Arc<admin::GroupRoster>>,
     pub health_snapshot: snapshot::SnapshotCache<ClusterHealth>,
     pub snapshot_flight: single_flight::SingleFlight<&'static str>,
     /// Per-entity answers: one topic's partitions+config, one group's detail.
     /// Keyed, because a single slot would serve one topic's data under
     /// another's name (owner ruling 2026-08-20).
-    pub topic_detail_cache: keyed_cache::KeyedCache<String, admin::TopicDetail>,
-    pub group_detail_cache: keyed_cache::KeyedCache<String, admin::GroupDetail>,
+    pub topic_detail_cache: keyed_cache::KeyedCache<String, Arc<admin::TopicDetail>>,
+    pub group_detail_cache: keyed_cache::KeyedCache<String, Arc<admin::GroupDetail>>,
     pub detail_flight: Arc<single_flight::SingleFlight<(&'static str, String)>>,
     pub schema_registry: Option<Arc<SchemaRegistry>>,
     consumer: RwLock<Arc<BaseConsumer>>,
