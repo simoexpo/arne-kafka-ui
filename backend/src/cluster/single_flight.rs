@@ -58,6 +58,47 @@ impl<K: Eq + Hash + Clone> SingleFlight<K> {
     }
 }
 
+impl<K: Eq + Hash + Clone> SingleFlight<K> {
+    /// Like `begin_or_wait`, but the guard owns its registry instead of
+    /// borrowing it — so it can be held across an `await` while the refresh
+    /// runs. Acquiring inside a `spawn_blocking` and dropping the guard when
+    /// that closure returns would release the key BEFORE the work starts,
+    /// which protects nothing.
+    pub fn begin_or_wait_owned(
+        self: &std::sync::Arc<Self>,
+        key: K,
+        wait: Duration,
+    ) -> Option<OwnedFlight<K>> {
+        let mut in_flight = self.in_flight.lock().unwrap_or_else(|e| e.into_inner());
+        if in_flight.insert(key.clone()) {
+            return Some(OwnedFlight { owner: self.clone(), key: Some(key) });
+        }
+        let _ = self
+            .finished
+            .wait_timeout_while(in_flight, wait, |flights| flights.contains(&key))
+            .unwrap_or_else(|e| e.into_inner());
+        None
+    }
+}
+
+/// Same contract as `Flight`, holding its registry by `Arc` so it can outlive
+/// the scope that acquired it.
+pub struct OwnedFlight<K: Eq + Hash + Clone> {
+    owner: std::sync::Arc<SingleFlight<K>>,
+    key: Option<K>,
+}
+
+impl<K: Eq + Hash + Clone> Drop for OwnedFlight<K> {
+    fn drop(&mut self) {
+        if let Some(key) = self.key.take() {
+            let mut in_flight = self.owner.in_flight.lock().unwrap_or_else(|e| e.into_inner());
+            in_flight.remove(&key);
+            drop(in_flight);
+            self.owner.finished.notify_all();
+        }
+    }
+}
+
 pub struct Flight<'a, K: Eq + Hash + Clone> {
     owner: &'a SingleFlight<K>,
     key: Option<K>,
@@ -159,6 +200,21 @@ mod tests {
         let waited = started.elapsed();
         assert!(waited >= Duration::from_millis(100), "it did wait: {waited:?}");
         assert!(waited < Duration::from_secs(1), "but not forever: {waited:?}");
+    }
+
+    /// The owned guard must behave exactly like the borrowed one — it exists
+    /// so a refresh can hold the key across an await, which is where the
+    /// earlier wiring bug lived (guard dropped before the work began).
+    #[test]
+    fn an_owned_guard_holds_and_releases_the_same_way() {
+        let sf: Arc<SingleFlight<String>> = Arc::new(SingleFlight::new());
+        let held = sf.begin_or_wait_owned("t".into(), MAX_WAIT).expect("owner");
+        assert!(
+            sf.begin_or_wait_owned("t".into(), Duration::from_millis(60)).is_none(),
+            "the key is held while the guard lives"
+        );
+        drop(held);
+        assert!(sf.begin_or_wait_owned("t".into(), MAX_WAIT).is_some(), "released on drop");
     }
 
     /// A panicking refresher must release its key — otherwise that entry

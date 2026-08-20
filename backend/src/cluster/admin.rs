@@ -74,7 +74,7 @@ fn list_topics_blocking(handle: &ClusterHandle) -> Result<TopicList, ApiError> {
     }
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Clone)]
 pub struct PartitionInfo {
     pub id: i32,
     pub leader: i32,
@@ -84,14 +84,14 @@ pub struct PartitionInfo {
     pub end_offset: i64,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Clone)]
 pub struct ConfigEntryOut {
     pub name: String,
     pub value: Option<String>,
     pub is_default: bool,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Clone)]
 pub struct TopicDetail {
     pub name: String,
     pub partitions: Vec<PartitionInfo>,
@@ -99,7 +99,38 @@ pub struct TopicDetail {
     pub as_of: i64,
 }
 
+/// Cached per topic, shared by every tab looking at that topic (owner ruling
+/// 2026-08-20): the backend answers from memory and reaches the broker only
+/// when it has nothing fresh, so broker load follows our refresh policy
+/// rather than how many people have Arne open.
 pub async fn topic_detail(handle: Arc<ClusterHandle>, topic: String) -> Result<TopicDetail, ApiError> {
+    if let Some(fresh) = handle.topic_detail_cache.fresh(&topic, super::DETAIL_TTL_MS, now_ms()) {
+        return Ok(fresh);
+    }
+    // The guard is HELD across the fetch below: acquiring it and letting it
+    // drop with the acquiring closure would release the key before any work
+    // began.
+    let flight = {
+        let flights = handle.detail_flight.clone();
+        let topic = topic.clone();
+        tokio::task::spawn_blocking(move || flights.begin_or_wait_owned(("topic", topic), single_flight::MAX_WAIT))
+            .await
+            .map_err(ApiError::task_join)?
+    };
+    // Another request just fetched this one (or is still fetching): read what
+    // it produced rather than asking the broker again.
+    // Another request just fetched this one (or is still fetching): read what
+    // it produced rather than asking the broker again.
+    if let (None, Some(value)) = (&flight, handle.topic_detail_cache.get(&topic).map(|e| e.value)) {
+        return Ok(value);
+    }
+    let fresh = topic_detail_uncached(handle.clone(), topic.clone()).await?;
+    handle.topic_detail_cache.insert(topic, fresh.clone(), now_ms());
+    drop(flight);
+    Ok(fresh)
+}
+
+async fn topic_detail_uncached(handle: Arc<ClusterHandle>, topic: String) -> Result<TopicDetail, ApiError> {
     // configs via AdminClient (async), partitions/offsets via blocking consumer
     let cfg_handle = handle.clone();
     let cfg_topic = topic.clone();
@@ -189,10 +220,10 @@ pub struct GroupLagBatch {
 #[derive(Debug, Serialize, Clone)]
 pub struct GroupList { pub groups: Vec<GroupSummary>, pub as_of: i64 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Clone)]
 pub struct MemberInfo { pub member_id: String, pub client_id: String, pub client_host: String }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Clone)]
 pub struct GroupDetail {
     pub group_id: String,
     pub state: String,
@@ -521,6 +552,31 @@ pub async fn groups_lag(handle: Arc<ClusterHandle>, groups: Vec<String>) -> Resu
 const CLUSTER_WIDE: &str = "*";
 
 pub async fn group_detail(handle: Arc<ClusterHandle>, group: String) -> Result<GroupDetail, ApiError> {
+    if let Some(fresh) = handle.group_detail_cache.fresh(&group, super::DETAIL_TTL_MS, now_ms()) {
+        return Ok(fresh);
+    }
+    // The guard is HELD across the fetch below: acquiring it and letting it
+    // drop with the acquiring closure would release the key before any work
+    // began.
+    let flight = {
+        let flights = handle.detail_flight.clone();
+        let group = group.clone();
+        tokio::task::spawn_blocking(move || flights.begin_or_wait_owned(("group", group), single_flight::MAX_WAIT))
+            .await
+            .map_err(ApiError::task_join)?
+    };
+    // Another request just fetched this one (or is still fetching): read what
+    // it produced rather than asking the broker again.
+    if let (None, Some(value)) = (&flight, handle.group_detail_cache.get(&group).map(|e| e.value)) {
+        return Ok(value);
+    }
+    let fresh = group_detail_uncached(handle.clone(), group.clone()).await?;
+    handle.group_detail_cache.insert(group, fresh.clone(), now_ms());
+    drop(flight);
+    Ok(fresh)
+}
+
+async fn group_detail_uncached(handle: Arc<ClusterHandle>, group: String) -> Result<GroupDetail, ApiError> {
     tokio::task::spawn_blocking(move || {
         let gl = handle.consumer()
             .fetch_group_list(Some(&group), ADMIN_TIMEOUT)

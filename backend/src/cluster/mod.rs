@@ -2,6 +2,7 @@ pub mod admin;
 pub mod assignment;
 pub mod ffi;
 pub mod group_lag_cache;
+pub mod keyed_cache;
 pub mod registry;
 pub mod sampler;
 pub mod single_flight;
@@ -21,6 +22,11 @@ use std::time::Duration;
 
 pub const ADMIN_TIMEOUT: Duration = Duration::from_secs(10);
 pub const HEALTH_TIMEOUT: Duration = Duration::from_secs(2);
+/// A detail page nobody has opened for this long is forgotten.
+pub const DETAIL_HORIZON_MS: i64 = 600_000;
+/// Just under the detail pages' 10s poll.
+pub const DETAIL_TTL_MS: i64 = 8_000;
+
 /// Deliberately SHORT next to the other snapshots: health is the cheapest
 /// call we make (one DescribeCluster) and the one users most need current, so
 /// this window only exists to collapse simultaneous polls from several tabs —
@@ -84,6 +90,12 @@ pub struct ClusterHandle {
     pub groups_snapshot: snapshot::SnapshotCache<admin::GroupList>,
     pub health_snapshot: snapshot::SnapshotCache<ClusterHealth>,
     pub snapshot_flight: single_flight::SingleFlight<&'static str>,
+    /// Per-entity answers: one topic's partitions+config, one group's detail.
+    /// Keyed, because a single slot would serve one topic's data under
+    /// another's name (owner ruling 2026-08-20).
+    pub topic_detail_cache: keyed_cache::KeyedCache<String, admin::TopicDetail>,
+    pub group_detail_cache: keyed_cache::KeyedCache<String, admin::GroupDetail>,
+    pub detail_flight: Arc<single_flight::SingleFlight<(&'static str, String)>>,
     pub schema_registry: Option<Arc<SchemaRegistry>>,
     consumer: RwLock<Arc<BaseConsumer>>,
     admin: RwLock<Arc<AdminClient<DefaultClientContext>>>,
@@ -126,6 +138,9 @@ impl ClusterHandle {
             groups_snapshot: snapshot::SnapshotCache::new(),
             health_snapshot: snapshot::SnapshotCache::new(),
             snapshot_flight: single_flight::SingleFlight::new(),
+            topic_detail_cache: keyed_cache::KeyedCache::new(DETAIL_HORIZON_MS),
+            group_detail_cache: keyed_cache::KeyedCache::new(DETAIL_HORIZON_MS),
+            detail_flight: Arc::new(single_flight::SingleFlight::new()),
             schema_registry,
             consumer: RwLock::new(Arc::new(consumer)),
             admin: RwLock::new(Arc::new(admin)),

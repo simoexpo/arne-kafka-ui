@@ -12,8 +12,7 @@
 //! member-less new committer (documented, at most `IDLE_TTL_MS` late).
 
 use super::admin::PartitionLag;
-use std::collections::HashMap;
-use std::sync::RwLock;
+use super::keyed_cache::KeyedCache;
 
 /// Deliberately BELOW the consumers tab's 10s poll interval: an entry
 /// refreshed on one poll must be due again on the next, or a poll would
@@ -71,14 +70,17 @@ pub fn classify(member_topics: &[Option<Vec<String>>], topic: &str) -> Classific
     }
 }
 
+/// Lag rows for one `(scope, group)`, where scope is a topic name or `"*"`
+/// for the cluster-wide view the consumers list shows.
+pub type LagKey = (String, String);
+
 #[derive(Clone)]
 pub struct CachedEntry {
     pub partitions: Vec<PartitionLag>,
     pub sampled_at: i64,
 }
 
-/// The only two facts a due-check needs — read under the cache lock without
-/// cloning the entry's partition rows.
+/// The two facts a due-check needs, read without cloning the rows.
 #[derive(Clone, Copy)]
 pub struct Freshness {
     pub sampled_at: i64,
@@ -103,48 +105,55 @@ pub fn needs_refresh(class: &Classification, entry: Option<Freshness>, now_ms: i
     now_ms - e.sampled_at >= ttl
 }
 
-#[derive(Default)]
+/// Lag storage: a `KeyedCache` with the tier policy above layered on top.
+/// The generic cache holds "one expiring value per key"; which TTL applies to
+/// which row is domain policy and stays here.
 pub struct GroupLagCache {
-    inner: RwLock<HashMap<(String, String), CachedEntry>>,
+    inner: KeyedCache<LagKey, Vec<PartitionLag>>,
+}
+
+impl Default for GroupLagCache {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl GroupLagCache {
     pub fn new() -> Self {
-        Self::default()
+        Self { inner: KeyedCache::new(EVICT_AGE_MS) }
     }
 
-    pub fn freshness(&self, topic: &str, group: &str) -> Option<Freshness> {
+    pub fn freshness(&self, scope: &str, group: &str) -> Option<Freshness> {
+        self.inner.get(&key(scope, group)).map(|e| Freshness {
+            sampled_at: e.sampled_at,
+            has_rows: !e.value.is_empty(),
+        })
+    }
+
+    pub fn get(&self, scope: &str, group: &str) -> Option<CachedEntry> {
         self.inner
-            .read()
-            .unwrap()
-            .get(&(topic.to_string(), group.to_string()))
-            .map(|e| Freshness { sampled_at: e.sampled_at, has_rows: !e.partitions.is_empty() })
+            .get(&key(scope, group))
+            .map(|e| CachedEntry { partitions: e.value, sampled_at: e.sampled_at })
     }
 
-    pub fn get(&self, topic: &str, group: &str) -> Option<CachedEntry> {
-        self.inner.read().unwrap().get(&(topic.to_string(), group.to_string())).cloned()
+    pub fn insert(&self, scope: &str, group: &str, entry: CachedEntry) {
+        self.inner.insert(key(scope, group), entry.partitions, entry.sampled_at);
     }
 
-    pub fn insert(&self, topic: &str, group: &str, entry: CachedEntry) {
-        self.inner.write().unwrap().insert((topic.to_string(), group.to_string()), entry);
-    }
-
-    /// Drop `topic`'s entries whose group is gone from the caller's group
-    /// list, plus any entry (any topic) past the global age horizon.
-    ///
-    /// `as_of` is the caller's group-list snapshot time: an entry sampled at
-    /// or after it was written by a request holding a newer view of the cluster,
-    /// so it survives even when this caller's older keep-set omits it —
-    /// otherwise two concurrent polls would delete each other's fresh work
-    /// and re-fetch it.
-    pub fn evict(&self, topic: &str, keep_groups: &dyn Fn(&str) -> bool, as_of: i64) {
-        self.inner.write().unwrap().retain(|(t, g), e| {
-            if as_of - e.sampled_at >= EVICT_AGE_MS {
-                return false;
-            }
-            t != topic || e.sampled_at >= as_of || keep_groups(g)
+    /// Drop `scope`'s entries whose group is gone from the caller's group
+    /// list. `as_of` is that caller's snapshot time: an entry sampled at or
+    /// after it belongs to a request with a newer view of the cluster, so it
+    /// survives — otherwise two concurrent polls would delete each other's
+    /// fresh work and re-fetch it.
+    pub fn evict(&self, scope: &str, keep_groups: &dyn Fn(&str) -> bool, as_of: i64) {
+        self.inner.retain(as_of, |(s, g), sampled_at| {
+            s != scope || sampled_at >= as_of || keep_groups(g)
         });
     }
+}
+
+fn key(scope: &str, group: &str) -> LagKey {
+    (scope.to_string(), group.to_string())
 }
 
 #[cfg(test)]

@@ -606,6 +606,49 @@ async fn groups_list_is_identity_only_and_lag_is_requested_per_group() {
     assert_eq!(a["total_lag"], 3, "committed 2 of 5: {body}");
 }
 
+/// Owner ruling 2026-08-20: the backend must answer from cache and reach the
+/// broker only when it has nothing fresh — per ENTITY, which is why the cache
+/// is keyed. A single slot would serve one topic's partitions under another's
+/// name, and that must be impossible.
+#[tokio::test]
+async fn detail_pages_are_cached_per_entity_and_never_cross_over() {
+    let bootstrap = start_kafka().await;
+    create_topic(&bootstrap, "dc-one", 1).await;
+    create_topic(&bootstrap, "dc-two", 3).await;
+    produce(&bootstrap, "dc-one", 4).await;
+    consume_and_commit(&bootstrap, "dc-one", "dc-group", 4).await;
+    let state = state_for(&bootstrap, vec![]);
+
+    // two entities interleaved: each answer must be its own
+    let (_, one) = get_json(app(state.clone()), "/api/clusters/test/topics/dc-one").await;
+    let (_, two) = get_json(app(state.clone()), "/api/clusters/test/topics/dc-two").await;
+    let (_, one_again) = get_json(app(state.clone()), "/api/clusters/test/topics/dc-one").await;
+    assert_eq!(one["name"], "dc-one");
+    assert_eq!(two["name"], "dc-two");
+    assert_eq!(one["partitions"].as_array().unwrap().len(), 1);
+    assert_eq!(two["partitions"].as_array().unwrap().len(), 3);
+    assert_eq!(one_again["name"], "dc-one", "the other topic did not overwrite this one");
+    assert_eq!(
+        one_again["as_of"], one["as_of"],
+        "a second look inside the window is served from cache: {one_again}"
+    );
+
+    // concurrent readers of one entity share a single fetch
+    let mut set = tokio::task::JoinSet::new();
+    for _ in 0..6 {
+        let state = state.clone();
+        set.spawn(async move { get_json(app(state), "/api/clusters/test/groups/dc-group").await });
+    }
+    let mut stamps = std::collections::HashSet::new();
+    while let Some(res) = set.join_next().await {
+        let (status, body) = res.unwrap();
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(body["group_id"], "dc-group");
+        stamps.insert(body["as_of"].as_i64().unwrap());
+    }
+    assert_eq!(stamps.len(), 1, "six readers, one shared answer (got {stamps:?})");
+}
+
 #[tokio::test]
 async fn overview_reports_brokers_and_counts() {
     let bootstrap = start_kafka().await;

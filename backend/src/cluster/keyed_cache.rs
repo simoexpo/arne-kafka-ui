@@ -1,0 +1,133 @@
+//! One expiring value per key, per cluster. The backend answers from here and
+//! reaches the broker only when it has nothing fresh — so broker load follows
+//! our refresh policy, never the number of people using Arne (owner ruling
+//! 2026-08-20).
+//!
+//! The cache stores WHEN each value was sampled and nothing more: how long a
+//! value stays usable is the caller's policy, because it differs per endpoint
+//! (a topic's partitions and a consumer group's lag age differently, and lag
+//! itself has two tiers). Values also carry their own `as_of` on the wire, so
+//! a shared answer states its age instead of pretending to be new.
+//!
+//! Not for time series: `SamplerStore` keeps a sequence per topic and prunes
+//! samples *inside* it, which is a different shape and stays separate.
+
+use std::collections::HashMap;
+use std::hash::Hash;
+use std::sync::RwLock;
+
+#[derive(Clone)]
+pub struct Stamped<V> {
+    pub value: V,
+    pub sampled_at: i64,
+}
+
+pub struct KeyedCache<K, V> {
+    inner: RwLock<HashMap<K, Stamped<V>>>,
+    /// Entries nobody has looked at for this long are dropped even if their
+    /// key still exists on the cluster: browsing many topics must not grow
+    /// memory without bound.
+    horizon_ms: i64,
+}
+
+impl<K: Eq + Hash + Clone, V: Clone> KeyedCache<K, V> {
+    pub fn new(horizon_ms: i64) -> Self {
+        Self { inner: RwLock::new(HashMap::new()), horizon_ms }
+    }
+
+    /// When this key was last sampled — a freshness probe that never clones
+    /// the value.
+    pub fn sampled_at(&self, key: &K) -> Option<i64> {
+        self.inner.read().unwrap_or_else(|e| e.into_inner()).get(key).map(|e| e.sampled_at)
+    }
+
+    pub fn get(&self, key: &K) -> Option<Stamped<V>> {
+        self.inner.read().unwrap_or_else(|e| e.into_inner()).get(key).cloned()
+    }
+
+    /// The value only if it is younger than `ttl_ms`.
+    pub fn fresh(&self, key: &K, ttl_ms: i64, now: i64) -> Option<V> {
+        self.get(key).filter(|e| now - e.sampled_at < ttl_ms).map(|e| e.value)
+    }
+
+    pub fn insert(&self, key: K, value: V, now: i64) {
+        let mut map = self.inner.write().unwrap_or_else(|e| e.into_inner());
+        map.retain(|_, e| now - e.sampled_at < self.horizon_ms);
+        map.insert(key, Stamped { value, sampled_at: now });
+    }
+
+    /// Drop entries the caller no longer wants, plus anything past the
+    /// horizon. `keep` sees the key and when it was sampled, so a caller can
+    /// spare entries written after its own snapshot — two concurrent requests
+    /// must not delete each other's fresh work.
+    pub fn retain(&self, now: i64, keep: impl Fn(&K, i64) -> bool) {
+        self.inner
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|k, e| now - e.sampled_at < self.horizon_ms && keep(k, e.sampled_at));
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.inner.read().unwrap().len()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn values_round_trip_per_key() {
+        let cache: KeyedCache<String, i32> = KeyedCache::new(600_000);
+        cache.insert("a".into(), 1, 1_000);
+        cache.insert("b".into(), 2, 1_000);
+        assert_eq!(cache.get(&"a".to_string()).unwrap().value, 1);
+        assert_eq!(cache.get(&"b".to_string()).unwrap().value, 2);
+        assert!(cache.get(&"c".to_string()).is_none());
+    }
+
+    /// The hazard that makes a keyed cache necessary: one slot would serve
+    /// topic B's data under topic A's name.
+    #[test]
+    fn one_key_never_answers_for_another() {
+        let cache: KeyedCache<String, &str> = KeyedCache::new(600_000);
+        cache.insert("orders".into(), "orders-data", 1_000);
+        cache.insert("users".into(), "users-data", 1_000);
+        assert_eq!(cache.fresh(&"orders".to_string(), 10_000, 1_500), Some("orders-data"));
+        assert_eq!(cache.fresh(&"users".to_string(), 10_000, 1_500), Some("users-data"));
+    }
+
+    #[test]
+    fn freshness_is_the_callers_policy() {
+        let cache: KeyedCache<&str, i32> = KeyedCache::new(600_000);
+        cache.insert("k", 7, 0);
+        assert_eq!(cache.fresh(&"k", 5_000, 4_999), Some(7));
+        assert_eq!(cache.fresh(&"k", 5_000, 5_000), None, "expired under a 5s policy");
+        assert_eq!(cache.fresh(&"k", 60_000, 5_000), Some(7), "still fine under a 60s one");
+        assert_eq!(cache.sampled_at(&"k"), Some(0), "the probe never needs the value");
+    }
+
+    #[test]
+    fn writes_drop_entries_past_the_horizon() {
+        let cache: KeyedCache<&str, i32> = KeyedCache::new(10_000);
+        cache.insert("old", 1, 0);
+        cache.insert("new", 2, 10_001);
+        assert_eq!(cache.len(), 1, "the stale entry went with the write");
+        assert!(cache.get(&"old").is_none());
+    }
+
+    #[test]
+    fn retain_drops_what_the_caller_rejects_and_spares_newer_writes() {
+        let cache: KeyedCache<&str, i32> = KeyedCache::new(600_000);
+        cache.insert("keep", 1, 1_000);
+        cache.insert("gone", 2, 1_000);
+        cache.insert("newcomer", 3, 5_000);
+        // a caller whose own view was taken at t=2000 knows nothing of the
+        // newcomer, so it must not delete it
+        cache.retain(2_000, |k, sampled_at| *k == "keep" || sampled_at > 2_000);
+        assert!(cache.get(&"keep").is_some());
+        assert!(cache.get(&"gone").is_none());
+        assert!(cache.get(&"newcomer").is_some(), "written after the caller's snapshot");
+    }
+}
