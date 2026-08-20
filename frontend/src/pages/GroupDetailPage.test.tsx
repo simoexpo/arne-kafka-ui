@@ -44,19 +44,21 @@ describe('GroupDetailView', () => {
     expect(items.map((li) => li.textContent?.split(' ')[0])).toEqual(['worker-1', 'worker-2', 'worker-3'])
     const header = screen.getAllByTestId('panel-header').find((h) => h.textContent?.includes('Members'))!
     expect(header).toHaveTextContent('3')
+    // Owner ruling 2026-08-20: the count and nothing else — state and protocol
+    // are group facts and live in the Group card.
+    expect(header).not.toHaveTextContent('Stable')
+    expect(header).not.toHaveTextContent('Classic')
   })
 
-  // Owner ruling 2026-08-20: named by its assignor class, alongside the other
-  // three figures as a plain fourth stat — same style, same row.
-  // Which rebalance protocol a group speaks decides what it can report about
-  // itself, so the page states it rather than leaving the reader to infer.
-  it('states the rebalance protocol beside the group state', async () => {
+  // Owner ruling 2026-08-20: the group's own facts sit together in the Group
+  // card — what it consumes on the first row, how it behaves on the second,
+  // named by assignor class.
+  it('states the strategy, status and protocol on the group card', async () => {
     vi.mocked(client.getGroupDetail).mockResolvedValue(detail({ group_type: 'Consumer' }))
     renderWithQuery(<GroupDetailView cluster="prod" group="billing" />)
-    await screen.findByText('billing-app')
-    const header = screen.getAllByTestId('panel-header').find((h) => h.textContent?.includes('Members'))!
-    expect(header).toHaveTextContent('Consumer')
-    expect(header).toHaveTextContent('Stable')
+    expect(await screen.findByTestId('stat-assignment strategy')).toHaveTextContent('Range')
+    expect(screen.getByTestId('stat-status')).toHaveTextContent('Stable')
+    expect(screen.getByTestId('stat-protocol')).toHaveTextContent('Consumer')
   })
 
   it('names the assignment strategy by its class', async () => {
@@ -65,18 +67,17 @@ describe('GroupDetailView', () => {
     expect(await screen.findByTestId('stat-assignment strategy')).toHaveTextContent('CooperativeSticky')
   })
 
-  // Owner ruling 2026-08-20: it sits against the right edge of the box while
-  // the three figures stay left, so the row reads as numbers-then-strategy.
-  it('spreads the figures across the card with the strategy at the right edge', async () => {
+  it('spreads both rows of figures across the card', async () => {
     vi.mocked(client.getGroupDetail).mockResolvedValue(detail())
     renderWithQuery(<GroupDetailView cluster="prod" group="billing" />)
-    const strategy = await screen.findByTestId('stat-assignment strategy')
-    const row = screen.getByTestId('stat-topics').parentElement!
-    expect(row.className).toMatch(/justify-between/)
-    expect(row.lastElementChild).toBe(strategy)
-    // a short value still hugs the right edge under its longer label
-    expect(strategy.className).toMatch(/text-right/)
-    expect(screen.getByTestId('stat-topics').className).not.toMatch(/text-right/)
+    const first = (await screen.findByTestId('stat-topics')).parentElement!
+    const second = screen.getByTestId('stat-assignment strategy').parentElement!
+    expect(first.className).toMatch(/justify-between/)
+    expect(second.className).toMatch(/justify-between/)
+    expect(first).not.toBe(second)
+    // what it consumes on top, how it behaves below
+    expect(first.lastElementChild).toBe(screen.getByTestId('stat-total lag'))
+    expect(second.lastElementChild).toBe(screen.getByTestId('stat-protocol'))
   })
 
   // An unknown protocol is passed through, never mapped to a wrong class: a
@@ -212,7 +213,7 @@ describe('GroupDetailView', () => {
     expect(screen.getByTestId('stat-partitions')).toHaveTextContent('5')
   })
 
-  it('the group id is copyable and the state sits with the members, not in the title', async () => {
+  it('the group id is copyable and the state is out of the title', async () => {
     const writeText = vi.fn().mockResolvedValue(undefined)
     Object.assign(navigator, { clipboard: { writeText } })
     vi.mocked(client.getGroupDetail).mockResolvedValue(detail())
@@ -223,9 +224,8 @@ describe('GroupDetailView', () => {
     expect(heading.parentElement).not.toHaveTextContent('Stable')
     await userEvent.click(screen.getByRole('button', { name: 'copy billing' }))
     expect(writeText).toHaveBeenCalledWith('billing')
-    // the state is disclosed beside the members it describes
-    const members = screen.getAllByTestId('panel-header').find((h) => h.textContent?.includes('Members'))!
-    expect(members).toHaveTextContent('Stable')
+    // the state is disclosed as one of the group's own figures
+    expect(screen.getByTestId('stat-status')).toHaveTextContent('Stable')
   })
 
   it('renders 404 error inline', async () => {

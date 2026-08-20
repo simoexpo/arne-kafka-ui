@@ -45,32 +45,47 @@ export function GroupDetailView({ cluster, group }: { cluster: string; group: st
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
         <Panel title="Group" error={detail.error} loading={detail.isPending} hasData={detail.data !== undefined}>
           {detail.data && (
-            <dl className="flex justify-between gap-3 text-sm">
-              <Stat label="topics" value={String(topics)} />
-              <Stat label="partitions" value={String(partitionCount)} />
-              <TotalLagStat rows={detail.data.partitions} unreadable={detail.data.unreadable_partitions} />
-              <Stat
-                label="assignment strategy"
-                className="text-right"
-                value={assignorClass(detail.data.assignment_strategy)}
-                title={
-                  detail.data.assignment_strategy
-                    ? assignorClass(detail.data.assignment_strategy)
-                    : 'no members, so no assignor has been negotiated'
-                }
-              />
-            </dl>
+            <>
+              <dl className="flex justify-between gap-3 text-sm">
+                <Stat label="topics" value={String(topics)} />
+                <Stat label="partitions" value={String(partitionCount)} />
+                <TotalLagStat rows={detail.data.partitions} unreadable={detail.data.unreadable_partitions} />
+              </dl>
+              <dl className="mt-4 flex justify-between gap-3 text-sm">
+                <Stat
+                  label="assignment strategy"
+                  value={assignorClass(detail.data.assignment_strategy)}
+                  title={
+                    detail.data.assignment_strategy
+                      ? assignorClass(detail.data.assignment_strategy)
+                      : 'no members, so no assignor has been negotiated'
+                  }
+                />
+                <Stat label="status" value={detail.data.state} />
+                <Stat
+                  label="protocol"
+                  className="text-right"
+                  value={detail.data.group_type || '—'}
+                  title={
+                    detail.data.group_type
+                      ? 'the rebalance protocol this group speaks'
+                      : 'the broker did not say which rebalance protocol this group uses'
+                  }
+                />
+              </dl>
+            </>
           )}
         </Panel>
         <Panel
           title="Members"
           // The state describes the membership situation, so it belongs beside
           // the members rather than in the page title.
+          // Just the count: state and protocol describe the group, not its
+          // roster, and live in the Group card.
           action={
             detail.data && (
               <span className="text-xs text-zinc-500">
-                {detail.data.members.length} member{detail.data.members.length === 1 ? '' : 's'} · {detail.data.state}
-                {detail.data.group_type && ` · ${detail.data.group_type}`}
+                {detail.data.members.length} member{detail.data.members.length === 1 ? '' : 's'}
               </span>
             )
           }
