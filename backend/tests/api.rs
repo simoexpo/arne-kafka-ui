@@ -214,7 +214,7 @@ async fn topic_consumers_shares_metadata_and_watermarks_across_groups() {
     assert!(groups.iter().any(|g| g["group_id"] == "fanin-group-b"));
 
     assert_eq!(group_metadata_fetch_count(Some(topic)), 1, "metadata must be fetched once per request, shared across every group");
-    assert_eq!(group_watermark_fetch_count(topic), 1, "watermarks must be cached per (topic, partition) across the group loop, not refetched per group");
+    assert_eq!(group_watermark_fetch_count("lag", topic), 1, "watermarks must be cached per (topic, partition) across the group loop, not refetched per group");
 }
 
 /// Owner ruling 2026-08-19: a live group whose members are all assigned to
@@ -663,41 +663,50 @@ async fn detail_pages_are_cached_per_entity_and_never_cross_over() {
 
 /// Owner ruling 2026-08-20: watermarks live in ONE cache on the handle, so
 /// the four call sites that need them stop refetching the same partitions.
-/// Two different groups reading one topic must not each pay for its heads.
+///
+/// Asserted against the cache directly with an explicit window, NOT by racing
+/// two HTTP requests against the 2s production TTL — that window is smaller
+/// than a coordinator round trip plus its retries, so a loaded machine would
+/// fail a correct implementation.
 #[tokio::test]
 async fn watermarks_are_shared_across_requests_not_refetched() {
-    use arne::cluster::admin::group_watermark_fetch_count;
+    use arne::cluster::admin::{group_watermark_fetch_count, Watermarks};
 
     let bootstrap = start_kafka().await;
-    // one partition on purpose: both groups then commit on the SAME partition,
-    // so the second request needs exactly the head the first already fetched
+    // ONE partition, so the group necessarily commits on it and the reader
+    // below asks for exactly the head the lag request warmed
     create_topic(&bootstrap, "wm-topic", 1).await;
     produce(&bootstrap, "wm-topic", 6).await;
     consume_and_commit(&bootstrap, "wm-topic", "wm-group-a", 3).await;
-    consume_and_commit(&bootstrap, "wm-topic", "wm-group-b", 6).await;
     let state = state_for(&bootstrap, vec![]);
 
-    // first group: its heads must be fetched
-    let before = group_watermark_fetch_count("wm-topic");
+    // a lag request fills the shared cache for the partitions it touched
+    let before = group_watermark_fetch_count("lag", "wm-topic");
     let (status, body) = get_json(app(state.clone()), "/api/clusters/test/group-lag?groups=wm-group-a").await;
     assert_eq!(status, 200);
-    // the exact split across two partitions is not deterministic; what matters
-    // here is that a real lag was computed at all
     assert!(body["groups"][0]["total_lag"].is_i64(), "a lag was computed: {body}");
-    let after_first = group_watermark_fetch_count("wm-topic");
+    let after_first = group_watermark_fetch_count("lag", "wm-topic");
     assert!(after_first > before, "the first request had to read the heads");
 
-    // second group, same topic, different cache entry for its own lag — but
-    // the partitions' heads are already known
-    let (status, body) = get_json(app(state.clone()), "/api/clusters/test/group-lag?groups=wm-group-b").await;
-    assert_eq!(status, 200);
-    assert!(body["groups"][0]["total_lag"].is_i64(), "a lag was computed for the second group too: {body}");
-    assert_eq!(
-        group_watermark_fetch_count("wm-topic"), after_first,
-        "the second group reused the shared watermarks instead of refetching them"
-    );
+    // a later reader with a generous window finds them already there
+    let handle = state.registry.get("test").unwrap();
+    let wanted: Vec<(String, i32)> = vec![("wm-topic".to_string(), 0)];
+    let (found, fetches) = tokio::task::spawn_blocking({
+        let handle = handle.clone();
+        let wanted = wanted.clone();
+        move || {
+            let mut heads = Watermarks::new(&handle, 60_000);
+            heads.ensure(&wanted).expect("heads");
+            let found: Vec<Option<i64>> = wanted.iter().map(|(t, p)| heads.get(t, *p)).collect();
+            (found, group_watermark_fetch_count("lag", "wm-topic"))
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(fetches, after_first, "nothing was refetched: the heads came from the shared cache");
+    assert!(found.iter().all(|v| v.is_some()), "and they were actually served: {found:?}");
 
-    // A batch must disclose the age of what it SERVED, not the moment it was
+    // A batch discloses the age of what it SERVED, not the moment it was
     // asked: asking again inside the window returns the same stamp, because it
     // is the same sample (owner ruling 2026-08-20).
     let (_, first) = get_json(app(state.clone()), "/api/clusters/test/group-lag?groups=wm-group-a").await;

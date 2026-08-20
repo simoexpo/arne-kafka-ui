@@ -117,7 +117,7 @@ pub fn sample_topic_blocking(handle: &ClusterHandle, topic: &str) -> Result<i64,
     // a FRESH read — a cached watermark would flatten the delta or stretch it
     // over the wrong window. It still fills the shared cache for readers that
     // can accept an age.
-    let mut heads = super::admin::Watermarks::always_fresh(handle);
+    let mut heads = super::admin::Watermarks::always_fresh(handle, "sampler");
     heads.ensure(&wanted)?;
     // All-or-nothing: a partition missing from the answer would make the total
     // silently omit its messages, so the sample is abandoned, not reported wrong.

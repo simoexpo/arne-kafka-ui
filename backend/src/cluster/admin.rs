@@ -170,8 +170,8 @@ async fn topic_detail_uncached(handle: Arc<ClusterHandle>, topic: String) -> Res
         // High watermarks come from the shared cache at this page's own
         // cadence; low watermarks move only with retention, so they are not
         // worth caching separately.
-        let mut heads = Watermarks::new(&part_handle, super::DETAIL_TTL_MS);
-        heads.ensure(&wanted)?;
+        let mut heads = Watermarks::labelled(&part_handle, super::DETAIL_TTL_MS, "detail");
+        let heads_at = heads.ensure(&wanted)?;
         let ends: std::collections::HashMap<i32, i64> = wanted
             .iter()
             .filter_map(|(t, p)| heads.get(t, *p).map(|hi| (*p, hi)))
@@ -182,14 +182,15 @@ async fn topic_detail_uncached(handle: Arc<ClusterHandle>, topic: String) -> Res
             start_offset: starts.get(&p.id()).copied().unwrap_or(-1),
             end_offset: ends.get(&p.id()).copied().unwrap_or(-1),
         }).collect();
-        Ok::<_, ApiError>(partitions)
+        Ok::<_, ApiError>((partitions, heads_at))
     });
 
     let (configs, partitions) = tokio::join!(configs_fut, partitions_fut);
     // partition errors (incl. topic_not_found) take precedence over config errors
-    let partitions = partitions.map_err(ApiError::task_join)??;
+    let (partitions, heads_at) = partitions.map_err(ApiError::task_join)??;
     let configs = configs?;
-    Ok(TopicDetail { name: topic, partitions, configs, as_of: now_ms() })
+    // No fresher than the heads it shows.
+    Ok(TopicDetail { name: topic, partitions, configs, as_of: heads_at.min(now_ms()) })
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -261,15 +262,17 @@ pub fn group_metadata_fetch_count(topic_filter: Option<&str>) -> u64 {
         .unwrap_or(0)
 }
 
-/// Per-topic count of real (cache-miss) `fetch_watermarks` calls made while
-/// resolving group lag. Read only by tests: proves a partition read by
-/// several groups in the same request is watermarked once, not once per
-/// group. Compiles unconditionally — see `GROUP_METADATA_FETCHES`.
-static GROUP_WATERMARK_FETCHES: OnceLock<Mutex<HashMap<String, u64>>> = OnceLock::new();
+/// Per-`(caller, topic)` count of real (cache-miss) watermark batches. Keyed
+/// by CALLER because four different paths now fill the shared watermark cache
+/// (lag, the partitions tab, the messages window, throughput sampling) — an
+/// unlabelled counter would let a test that opens the messages tab silently
+/// break a lag assertion on the same topic. Read only by tests. Compiles
+/// unconditionally — see `GROUP_METADATA_FETCHES`.
+static GROUP_WATERMARK_FETCHES: OnceLock<Mutex<HashMap<(String, String), u64>>> = OnceLock::new();
 
-fn record_group_watermark_fetch(topic: &str) {
+fn record_group_watermark_fetch(label: &str, topic: &str) {
     let calls = GROUP_WATERMARK_FETCHES.get_or_init(|| Mutex::new(HashMap::new()));
-    *calls.lock().unwrap().entry(topic.to_string()).or_insert(0) += 1;
+    *calls.lock().unwrap().entry((label.to_string(), topic.to_string())).or_insert(0) += 1;
 }
 
 /// Per-`(scope, group)` count of group-offset INSPECTIONS — one bump per
@@ -308,8 +311,10 @@ pub fn group_offset_fetch_count(scope: &str, group: &str) -> u64 {
         .unwrap_or(0)
 }
 
-pub fn group_watermark_fetch_count(topic: &str) -> u64 {
-    GROUP_WATERMARK_FETCHES.get().and_then(|m| m.lock().unwrap().get(topic).copied()).unwrap_or(0)
+pub fn group_watermark_fetch_count(caller: &str, topic: &str) -> u64 {
+    GROUP_WATERMARK_FETCHES.get()
+        .and_then(|m| m.lock().unwrap().get(&(caller.to_string(), topic.to_string())).copied())
+        .unwrap_or(0)
 }
 
 /// Every partition of `topic_filter` (or the whole cluster, when `None`) —
@@ -347,19 +352,31 @@ fn group_lag_topic_partitions(handle: &ClusterHandle, topic_filter: Option<&str>
 pub struct Watermarks<'a> {
     handle: &'a ClusterHandle,
     ttl_ms: i64,
+    label: &'static str,
+    /// Only what THIS request validated: a shared-cache entry that passed the
+    /// caller's TTL, or a value just fetched. Reading the shared cache
+    /// directly would hand back a value whose refresh FAILED — per-partition
+    /// errors are reported per entry, not per batch — and callers rely on a
+    /// failed partition being ABSENT so they can skip it instead of scanning,
+    /// summing or displaying a stale head.
+    validated: HashMap<(String, i32), i64>,
 }
 
 impl<'a> Watermarks<'a> {
     pub fn new(handle: &'a ClusterHandle, ttl_ms: i64) -> Self {
-        Self { handle, ttl_ms }
+        Self::labelled(handle, ttl_ms, "lag")
+    }
+
+    pub fn labelled(handle: &'a ClusterHandle, ttl_ms: i64, label: &'static str) -> Self {
+        Self { handle, ttl_ms, label, validated: HashMap::new() }
     }
 
     /// A caller that must see the current head (a bounded scan deciding
     /// whether a partition is exhausted, a rate sample measuring a delta)
     /// cannot accept ANY age: a stale watermark would change its behaviour,
     /// not just its display.
-    pub fn always_fresh(handle: &'a ClusterHandle) -> Self {
-        Self::new(handle, 0)
+    pub fn always_fresh(handle: &'a ClusterHandle, label: &'static str) -> Self {
+        Self::labelled(handle, 0, label)
     }
 
     /// Returns when the OLDEST value backing `wanted` was sampled — the
@@ -369,9 +386,10 @@ impl<'a> Watermarks<'a> {
         let mut oldest = None;
         let mut missing = Vec::new();
         for key in wanted {
-            match self.handle.watermarks.sampled_at(key) {
-                Some(at) if self.ttl_ms > 0 && now - at < self.ttl_ms => {
-                    oldest = Some(oldest.map_or(at, |o: i64| o.min(at)));
+            match self.handle.watermarks.get(key) {
+                Some(e) if self.ttl_ms > 0 && now - e.sampled_at < self.ttl_ms => {
+                    self.validated.insert(key.clone(), e.value);
+                    oldest = Some(oldest.map_or(e.sampled_at, |o: i64| o.min(e.sampled_at)));
                 }
                 _ => missing.push(key.clone()),
             }
@@ -380,19 +398,31 @@ impl<'a> Watermarks<'a> {
             return Ok(oldest.unwrap_or(now));
         }
         for topic in missing.iter().map(|(t, _)| t.as_str()).collect::<std::collections::BTreeSet<_>>() {
-            record_group_watermark_fetch(topic);
+            record_group_watermark_fetch(self.label, topic);
         }
         let fetched_at = now_ms();
-        for p in ffi::list_offsets_blocking(self.handle, &missing, ffi::OffsetSpec::Latest, ADMIN_TIMEOUT)? {
-            if p.error.is_none() {
-                self.handle.watermarks.insert((p.topic, p.partition), p.offset, fetched_at);
-            }
+        // A partition whose own entry carried an error is deliberately NOT
+        // recorded: absent means "unknown", which every caller handles.
+        let fetched: Vec<((String, i32), i64)> = ffi::list_offsets_blocking(
+            self.handle,
+            &missing,
+            ffi::OffsetSpec::Latest,
+            ADMIN_TIMEOUT,
+        )?
+        .into_iter()
+        .filter(|p| p.error.is_none())
+        .map(|p| ((p.topic, p.partition), p.offset))
+        .collect();
+        for (key, offset) in &fetched {
+            self.validated.insert(key.clone(), *offset);
         }
+        // One lock, one sweep — not one per partition.
+        self.handle.watermarks.insert_many(fetched, fetched_at);
         Ok(oldest.map_or(fetched_at, |o: i64| o.min(fetched_at)))
     }
 
     pub fn get(&self, topic: &str, partition: i32) -> Option<i64> {
-        self.handle.watermarks.get(&(topic.to_string(), partition)).map(|e| e.value)
+        self.validated.get(&(topic.to_string(), partition)).copied()
     }
 
 }
@@ -417,7 +447,6 @@ pub fn group_lag_blocking(
     watermark_cache: &mut Watermarks<'_>,
 ) -> Result<(Vec<PartitionLag>, i64), ApiError> {
     record_group_offset_fetch(scope, group);
-    let committed_at = now_ms();
     // NotCoordinator/CoordinatorNotAvailable/CoordinatorLoadInProgress are
     // transient by protocol contract: the coordinator is moving or still
     // loading. Retry briefly instead of surfacing a 502 for a healthy cluster.
@@ -434,6 +463,10 @@ pub fn group_lag_blocking(
             }
         }
     };
+    // Stamped on COMPLETION: the call above can spend a second in coordinator
+    // retries, and an entry born older than its own TTL would never serve a
+    // cache hit — every poll would re-inspect every group.
+    let committed_at = now_ms();
     // One batched watermark fetch for everything this group committed on that
     // the request doesn't already know.
     let needed: Vec<(String, i32)> = committed.keys().cloned().collect();

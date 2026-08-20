@@ -90,7 +90,7 @@ pub fn watermarks_blocking(handle: &ClusterHandle, topic: &str) -> Result<Vec<(i
     // head, so this caller cannot accept a cached one — a stale value would
     // change what it does, not merely what it shows. It still populates the
     // shared cache for readers that can.
-    let mut heads = crate::cluster::admin::Watermarks::always_fresh(handle);
+    let mut heads = crate::cluster::admin::Watermarks::always_fresh(handle, "messages");
     heads.ensure(&wanted)?;
     let hi: std::collections::HashMap<i32, i64> = wanted
         .iter()

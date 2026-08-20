@@ -51,9 +51,18 @@ impl<K: Eq + Hash + Clone, V: Clone> KeyedCache<K, V> {
     }
 
     pub fn insert(&self, key: K, value: V, now: i64) {
+        self.insert_many([(key, value)], now);
+    }
+
+    /// One lock and one horizon sweep for the whole batch: inserting a
+    /// thousand partitions one at a time would sweep a map that holds every
+    /// recently-viewed partition, a thousand times.
+    pub fn insert_many(&self, entries: impl IntoIterator<Item = (K, V)>, now: i64) {
         let mut map = self.inner.write().unwrap_or_else(|e| e.into_inner());
         map.retain(|_, e| now - e.sampled_at < self.horizon_ms);
-        map.insert(key, Stamped { value, sampled_at: now });
+        for (key, value) in entries {
+            map.insert(key, Stamped { value, sampled_at: now });
+        }
     }
 
     /// Drop entries the caller no longer wants, plus anything past the
