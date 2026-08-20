@@ -30,6 +30,10 @@ extern "C" fn remove_kafka_container() {
         .output();
 }
 
+/// Matches the dev cluster's broker (`docker-compose.dev.yml`), so tests and
+/// the thing you click through are never a major version apart.
+const KAFKA_IMAGE_TAG: &str = "4.3.1";
+
 pub async fn start_kafka() -> String {
     let (_c, bootstrap) = KAFKA
         .get_or_init(|| async {
@@ -37,6 +41,11 @@ pub async fn start_kafka() -> String {
             // hook ran, the leftover container is adopted (and reset below)
             // instead of colliding on the name — residue is bounded at one.
             let container = Kafka::default()
+                // Pinned to a 4.x broker: the module's default is 3.8, which
+                // has no KIP-848 consumer protocol, so no test could cover the
+                // group views' behaviour on the protocol Kafka now defaults
+                // new clients to.
+                .with_tag(KAFKA_IMAGE_TAG)
                 // The image only defaults `KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR`
                 // to 1 for this single-broker cluster; the transaction
                 // coordinator's own internal topic (`__transaction_state`)
@@ -241,11 +250,31 @@ pub fn spawn_live_consumer_without_commits(bootstrap: &str, topic: &str, group: 
     spawn_live_consumer_inner(bootstrap, topic, group, false)
 }
 
+/// A consumer speaking the KIP-848 protocol, which Kafka 4 defaults new
+/// clients toward. Such a group carries no assignment blob and the legacy
+/// DescribeGroups reports it as `Dead` with no members, so only a
+/// coordinator-side describe can tell the truth about it.
+pub fn spawn_live_next_protocol_consumer(bootstrap: &str, topic: &str, group: &str) -> LiveConsumer {
+    spawn_live_consumer_configured(bootstrap, topic, group, true, &[("group.protocol", "consumer")])
+}
+
 fn spawn_live_consumer_inner(bootstrap: &str, topic: &str, group: &str, commit: bool) -> LiveConsumer {
+    spawn_live_consumer_configured(bootstrap, topic, group, commit, &[])
+}
+
+fn spawn_live_consumer_configured(
+    bootstrap: &str,
+    topic: &str,
+    group: &str,
+    commit: bool,
+    extra: &[(&str, &str)],
+) -> LiveConsumer {
     let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let stop_flag = stop.clone();
     let (label, bootstrap, topic, group) =
         (format!("{topic}/{group}"), bootstrap.to_string(), topic.to_string(), group.to_string());
+    let extra: Vec<(String, String)> =
+        extra.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
     // The thread reports whether it got as far as subscribing, so a setup
     // failure surfaces here instead of leaving the caller to time out waiting
     // for a consumer that never existed.
@@ -256,6 +285,9 @@ fn spawn_live_consumer_inner(bootstrap: &str, topic: &str, group: &str, commit: 
             .set("auto.offset.reset", "earliest")
             .set("enable.auto.commit", if commit { "true" } else { "false" })
             .set("auto.commit.interval.ms", "500");
+        for (k, v) in &extra {
+            cc.set(k, v);
+        }
         let consumer: BaseConsumer = match cc.create() {
             Ok(c) => c,
             Err(e) => {

@@ -140,6 +140,40 @@ async fn unknown_topic_detail_is_404() {
     assert_eq!(body["code"], "topic_not_found");
 }
 
+/// The legacy group-list path reports a KIP-848 group as `Dead` with no
+/// members while it is Stable and consuming — a live group rendered as dead.
+/// The coordinator-side describe is the only thing that tells the truth, so
+/// this pins the case the binding exists for.
+#[tokio::test]
+async fn group_detail_tells_the_truth_about_a_new_protocol_group() {
+    let bootstrap = start_kafka().await;
+    create_topic(&bootstrap, "next-topic", 1).await;
+    produce(&bootstrap, "next-topic", 5).await;
+    let _live = spawn_live_next_protocol_consumer(&bootstrap, "next-topic", "next-group");
+    let state = state_for(&bootstrap, vec![]);
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let body = loop {
+        let (_, body) = get_json(app(state.clone()), "/api/clusters/test/groups/next-group").await;
+        if body["state"] == "Stable" && !body["members"].as_array().is_none_or(|m| m.is_empty()) {
+            break body;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "next-group never reported as a stable consumer: {body}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    };
+
+    assert_eq!(body["group_type"], "Consumer", "the group speaks the KIP-848 protocol: {body}");
+    let member = &body["members"][0];
+    assert!(!member["client_id"].as_str().unwrap_or("").is_empty(), "member has a client id: {body}");
+    // The blob is empty on this protocol: only the coordinator knows this.
+    let assigned = member["assigned"].as_array().expect("assignment stated");
+    assert_eq!(assigned[0]["topic"], "next-topic", "the member owns the topic it consumes: {body}");
+    assert_eq!(assigned[0]["partitions"], serde_json::json!([0]), "owning the only partition: {body}");
+}
+
 #[tokio::test]
 async fn groups_list_and_detail_report_lag() {
     let bootstrap = start_kafka().await;
