@@ -228,6 +228,11 @@ pub struct GroupLagEntry {
     /// whenever `unreadable_partitions` is non-zero.
     pub total_lag: Option<i64>,
     pub unreadable_partitions: usize,
+    /// Present only for groups the cluster-wide list cannot count: a KIP-848
+    /// group's members come from its coordinator, one request per group, so
+    /// they are read for the rows on screen and nowhere else. `null` for every
+    /// other group — the list already knows those.
+    pub member_count: Option<usize>,
     pub error: Option<String>,
 }
 
@@ -533,6 +538,45 @@ fn sample_group_lag(handle: &ClusterHandle, group: &str) -> Result<Stamped<Arc<L
     Ok(Stamped { value: snapshot, sampled_at })
 }
 
+/// One group as its coordinator describes it, shared and age-tiered like the
+/// lag entries beside it. Every view that needs a KIP-848 group's members or
+/// assignments comes through here, so a group visible in the list, in a
+/// topic's activity tab and on its own page costs one describe, not three.
+pub fn group_description_cached(
+    handle: &ClusterHandle,
+    group: &str,
+    ttl_ms: i64,
+    now: i64,
+) -> Result<Stamped<Arc<super::ffi::GroupDescription>>, ApiError> {
+    if let Some(entry) = handle.group_description.get(&group.to_string())
+        .filter(|e| now - e.sampled_at < ttl_ms)
+    {
+        return Ok(entry);
+    }
+    match handle.describe_flight.begin_or_wait(group.to_string(), single_flight::MAX_WAIT) {
+        // Another request is describing this group: take its answer rather
+        // than asking the coordinator the same question twice. Still running
+        // after the wait — do it ourselves; liveness beats deduplication.
+        None => match handle.group_description.get(&group.to_string()) {
+            Some(entry) => Ok(entry),
+            None => describe_group(handle, group),
+        },
+        Some(_flight) => describe_group(handle, group),
+    }
+}
+
+fn describe_group(
+    handle: &ClusterHandle,
+    group: &str,
+) -> Result<Stamped<Arc<super::ffi::GroupDescription>>, ApiError> {
+    let described = super::ffi::describe_consumer_group_blocking(handle, group, ADMIN_TIMEOUT)?
+        .ok_or_else(|| ApiError::group_not_found(&handle.name, group))?;
+    let sampled_at = now_ms();
+    let described = Arc::new(described);
+    handle.group_description.insert(group.to_string(), described.clone(), sampled_at);
+    Ok(Stamped { value: described, sampled_at })
+}
+
 /// A group whose protocol type is anything other than a consumer group's uses
 /// Kafka's membership machinery for coordination only (Schema Registry's "sr",
 /// Connect's "connect") and never commits offsets worth showing. An EMPTY
@@ -608,7 +652,11 @@ fn fetch_group_roster(handle: &ClusterHandle) -> Result<GroupRoster, ApiError> {
     //  - the legacy list carries members and their assignments, batched per
     //    broker, but its DescribeGroups half is blind to KIP-848 groups and
     //    calls them `Dead` with nobody in them.
-    let listings = super::ffi::list_consumer_groups_blocking(handle, ADMIN_TIMEOUT)?;
+    // The listing ENRICHES, it does not gate: if it fails, the list and every
+    // topic's activity tab still answer from the legacy call — degraded to the
+    // classic view of state, never blank (a broken part must not take the page
+    // down). Its own failure is not silent to us: `describe` still reports.
+    let listings = super::ffi::list_consumer_groups_blocking(handle, ADMIN_TIMEOUT).unwrap_or_default();
     let listed: std::collections::HashMap<&str, &super::ffi::GroupListing> =
         listings.iter().map(|l| (l.group_id.as_str(), l)).collect();
     let gl = handle.consumer()
@@ -617,23 +665,16 @@ fn fetch_group_roster(handle: &ClusterHandle) -> Result<GroupRoster, ApiError> {
     let mut groups: Vec<GroupMembership> = gl.groups().iter()
         .filter(|g| is_consumer_group_protocol(g.protocol_type()))
         .map(|g| {
-            let listing = listed.get(g.name());
-            let group_type = listing.map(|l| l.group_type.clone()).unwrap_or_default();
-            // Only the classic protocol puts members in the describe response.
-            // Anything else — including a broker too old to name the protocol —
-            // has no trustworthy count here, so it states none.
-            let describes_members = group_type == CLASSIC_PROTOCOL;
+            let (state, group_type) = resolved_state_and_type(listed.get(g.name()).copied(), g.state());
+            // A KIP-848 group's members are absent from the legacy describe,
+            // so its count here is a phantom zero and must not be stated.
+            let countable_here = !needs_coordinator_describe(&group_type);
             GroupMembership {
                 group_id: g.name().to_string(),
-                // The listing's state is right for both protocols; the legacy
-                // one is only a fallback for brokers that predate v4 listings.
-                state: listing
-                    .map(|l| l.state.clone())
-                    .filter(|s| s != UNKNOWN_STATE)
-                    .unwrap_or_else(|| g.state().to_string()),
+                state,
                 protocol_type: g.protocol_type().to_string(),
                 group_type,
-                member_count: describes_members.then(|| g.members().len()),
+                member_count: countable_here.then(|| g.members().len()),
                 member_topics: g.members().iter()
                     .map(|m| m.assignment().and_then(super::assignment::assigned_topics))
                     .collect(),
@@ -644,11 +685,36 @@ fn fetch_group_roster(handle: &ClusterHandle) -> Result<GroupRoster, ApiError> {
     Ok(GroupRoster { groups, as_of: now_ms() })
 }
 
-/// librdkafka's name for the classic rebalance protocol, and for a state it
-/// could not map — the KIP-848 protocol has states (`Assigning`,
-/// `Reconciling`) that librdkafka's enum has no room for yet.
-const CLASSIC_PROTOCOL: &str = "Classic";
+/// librdkafka's name for the KIP-848 rebalance protocol, and for a state it
+/// could not map — that protocol has states (`Assigning`, `Reconciling`) which
+/// librdkafka's enum has no room for yet.
+const CONSUMER_PROTOCOL: &str = "Consumer";
 const UNKNOWN_STATE: &str = "Unknown";
+
+/// What to believe about one group's state and protocol. The listing knows
+/// both for the classic and the KIP-848 protocol; the legacy describe is the
+/// fallback for a broker too old to answer the listing, for a listing that
+/// failed, and for the states librdkafka cannot yet name.
+fn resolved_state_and_type(
+    listing: Option<&super::ffi::GroupListing>,
+    legacy_state: &str,
+) -> (String, String) {
+    let state = listing
+        .map(|l| l.state.clone())
+        .filter(|s| s != UNKNOWN_STATE)
+        .unwrap_or_else(|| legacy_state.to_string());
+    (state, listing.map(|l| l.group_type.clone()).unwrap_or_default())
+}
+
+/// Whether this group's members have to be read from its coordinator, one
+/// request per group. True ONLY for a group known to speak the KIP-848
+/// protocol, whose members and assignments the batched legacy describe cannot
+/// see. A classic group — or any group on a broker too old to name the
+/// protocol, where that describe is all there is and works — must never take
+/// this path: it would be a request per group for data we already hold.
+fn needs_coordinator_describe(group_type: &str) -> bool {
+    group_type == CONSUMER_PROTOCOL
+}
 
 pub async fn list_groups(handle: Arc<ClusterHandle>) -> Result<Arc<GroupList>, ApiError> {
     tokio::task::spawn_blocking(move || {
@@ -676,12 +742,27 @@ pub async fn groups_lag(handle: Arc<ClusterHandle>, groups: Vec<String>) -> Resu
     tokio::task::spawn_blocking(move || {
         use super::group_lag_cache::LIVE_TTL_MS;
         let now = now_ms();
+        // Which of these the cluster-wide list could not count. Read from the
+        // shared roster, so this costs nothing.
+        let uncountable: std::collections::HashSet<String> = group_roster_cached(&handle, GROUPS_TTL_MS)
+            .map(|r| r.groups.iter()
+                .filter(|g| g.member_count.is_none())
+                .map(|g| g.group_id.clone())
+                .collect())
+            .unwrap_or_default();
         let mut out = Vec::with_capacity(groups.len());
         // The batch is only as fresh as the oldest entry it serves — a cached
         // row must not be presented under a "just now" stamp.
         let mut oldest_served: Option<i64> = None;
         for group in groups {
             // Every row here is displayed, so this view always wants the fast tier.
+            // One describe for a row whose members the list could not count.
+            // A failure here is not this row's headline — the lag still shows.
+            let member_count = uncountable.contains(&group).then(|| {
+                group_description_cached(&handle, &group, LIVE_TTL_MS, now)
+                    .ok()
+                    .map(|d| d.value.members.len())
+            }).flatten();
             match group_lag_cached(&handle, &group, Some(LIVE_TTL_MS), now) {
                 Ok(entry) => {
                     oldest_served = Some(oldest_served.map_or(entry.sampled_at, |o: i64| o.min(entry.sampled_at)));
@@ -689,6 +770,7 @@ pub async fn groups_lag(handle: Arc<ClusterHandle>, groups: Vec<String>) -> Resu
                         group_id: group,
                         total_lag: entry.value.statable_total(),
                         unreadable_partitions: entry.value.unknown.len(),
+                        member_count,
                         error: None,
                     });
                 }
@@ -696,6 +778,7 @@ pub async fn groups_lag(handle: Arc<ClusterHandle>, groups: Vec<String>) -> Resu
                     group_id: group,
                     total_lag: None,
                     unreadable_partitions: 0,
+                    member_count,
                     error: Some(lag_error_reason(&e)),
                 }),
             }
@@ -745,7 +828,13 @@ pub async fn group_detail(handle: Arc<ClusterHandle>, group: String) -> Result<A
 async fn group_detail_uncached(handle: Arc<ClusterHandle>, group: String) -> Result<GroupDetail, ApiError> {
     tokio::task::spawn_blocking(move || {
         // The coordinator, not every broker: see `describe_consumer_group_blocking`.
-        let described = super::ffi::describe_consumer_group_blocking(&handle, &group, ADMIN_TIMEOUT)?;
+        // Shared with the list and the activity tab, so opening a group's page
+        // after seeing it there costs nothing.
+        let described = match group_description_cached(&handle, &group, super::DETAIL_TTL_MS, now_ms()) {
+            Ok(d) => Some(d.value),
+            Err(e) if e.code == "group_not_found" => None,
+            Err(e) => return Err(e),
+        };
         // A group the coordinator calls Dead is gone; its offsets may linger.
         let described = described.filter(|d| d.state != "Dead");
         // The same shared entry the consumers list uses, so opening a group's
@@ -766,11 +855,11 @@ async fn group_detail_uncached(handle: Arc<ClusterHandle>, group: String) -> Res
             state: described.as_ref().map(|d| d.state.clone()).unwrap_or_else(|| "Empty".into()),
             group_type: described.as_ref().map(|d| d.group_type.clone()).unwrap_or_default(),
             assignment_strategy: described.as_ref().map(|d| d.assignor.clone()).unwrap_or_default(),
-            members: described.map(|d| d.members.into_iter().map(|m| MemberInfo {
-                member_id: m.member_id,
-                client_id: m.client_id,
-                client_host: m.host,
-                assigned: m.assigned.map(group_by_topic),
+            members: described.map(|d| d.members.iter().map(|m| MemberInfo {
+                member_id: m.member_id.clone(),
+                client_id: m.client_id.clone(),
+                client_host: m.host.clone(),
+                assigned: m.assigned.as_ref().map(|a| group_by_topic(a.clone())),
             }).collect()).unwrap_or_default(),
             partitions,
             unreadable_partitions,
@@ -912,10 +1001,6 @@ pub async fn topic_consumers(handle: Arc<ClusterHandle>, topic: String) -> Resul
         let mut unchecked = Vec::new();
         let mut oldest_served: Option<i64> = None;
         for g in &roster.groups {
-            let class = classify(&g.member_topics, &topic);
-            if class == Classification::MovedAway {
-                continue;
-            }
             // The tier is a property of THIS read: a group that shows nothing
             // on this topic is worth re-reading once a minute, even though the
             // same shared entry may be serving another view at 8s.
@@ -925,6 +1010,30 @@ pub async fn topic_consumers(handle: Arc<ClusterHandle>, topic: String) -> Resul
                 .group_lag
                 .with(&g.group_id, |snapshot| snapshot.covers(&topic))
                 .unwrap_or(false);
+            let describe_ttl = if shows_rows_here {
+                super::group_lag_cache::LIVE_TTL_MS
+            } else {
+                super::group_lag_cache::IDLE_TTL_MS
+            };
+            // A KIP-848 group ships no assignment blob, so the roster cannot
+            // say where it is. Asking its coordinator costs the same one
+            // request the fail-open OffsetFetch would have cost, and answers
+            // the question instead of guessing.
+            let assignments = match needs_coordinator_describe(&g.group_type) {
+                false => g.member_topics.clone(),
+                true => match group_description_cached(&handle, &g.group_id, describe_ttl, now) {
+                    Ok(d) => d.value.members.iter()
+                        .map(|m| m.assigned.as_ref().map(|a| a.iter().map(|(t, _)| t.clone()).collect()))
+                        .collect(),
+                    // Undescribable: fall back to the blob, which for this
+                    // protocol is empty and so fails open into an inspection.
+                    Err(_) => g.member_topics.clone(),
+                },
+            };
+            let class = classify(&assignments, &topic);
+            if class == Classification::MovedAway {
+                continue;
+            }
             let ttl = commits_ttl(&class, shows_rows_here);
             let outcome = group_lag_cached(&handle, &g.group_id, ttl, now);
             let pair_at = outcome.as_ref().ok().map(|e| e.sampled_at);
@@ -1094,6 +1203,60 @@ mod tests {
     // Owner ruling 2026-08-20: the same lower-bound rule as every other lag
     // total — the rows we read prove a floor, and the count says the real
     // number is higher.
+    /// The listing is an enrichment, not a dependency: when it is absent —
+    /// it failed, or the broker is too old to answer it — the roster must
+    /// still serve what the legacy call knows rather than blanking the page.
+    #[test]
+    fn a_missing_listing_falls_back_to_what_the_legacy_call_said() {
+        assert_eq!(
+            resolved_state_and_type(None, "Stable"),
+            ("Stable".to_string(), String::new()),
+            "no listing: legacy state stands and no protocol is claimed"
+        );
+    }
+
+    #[test]
+    fn a_listing_overrides_the_legacy_state_and_names_the_protocol() {
+        let listing = super::super::ffi::GroupListing {
+            group_id: "g".into(),
+            state: "Stable".into(),
+            group_type: "Consumer".into(),
+        };
+        assert_eq!(
+            resolved_state_and_type(Some(&listing), "Dead"),
+            ("Stable".to_string(), "Consumer".to_string()),
+            "the coordinator's word beats the classic describe's `Dead`"
+        );
+    }
+
+    /// librdkafka has no enum value for the KIP-848 rebalance states, so a
+    /// group mid-reconciliation arrives as `Unknown`. That is not an answer:
+    /// the legacy state, stale as it may be, says more than nothing.
+    #[test]
+    fn an_unknown_listing_state_keeps_the_legacy_one() {
+        let listing = super::super::ffi::GroupListing {
+            group_id: "g".into(),
+            state: "Unknown".into(),
+            group_type: "Consumer".into(),
+        };
+        assert_eq!(
+            resolved_state_and_type(Some(&listing), "Stable"),
+            ("Stable".to_string(), "Consumer".to_string())
+        );
+    }
+
+    /// Only a group we KNOW speaks the new protocol needs its coordinator
+    /// asked. Everything else — classic, or a broker too old to name the
+    /// protocol — is fully described by the batched legacy call, and asking
+    /// per group there would be one request per group for nothing.
+    #[test]
+    fn only_a_known_new_protocol_group_needs_its_coordinator_asked() {
+        assert!(needs_coordinator_describe("Consumer"));
+        assert!(!needs_coordinator_describe("Classic"));
+        assert!(!needs_coordinator_describe("Unknown"), "a pre-4.0 broker must not cost a describe per group");
+        assert!(!needs_coordinator_describe(""), "nor must a broker that says nothing at all");
+    }
+
     #[test]
     fn a_partial_topic_total_is_stated_as_a_bound_not_withheld() {
         let ins = inspection_of("g", "Stable", &Classification::AssignedToTopic, Ok(vec![lag(3), lag(4)]), 1);

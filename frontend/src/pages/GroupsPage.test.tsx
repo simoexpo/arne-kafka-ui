@@ -92,7 +92,7 @@ describe('GroupsView', () => {
     }))
     vi.mocked(client.getGroups).mockResolvedValue({ groups: many, as_of: Date.now() })
     vi.mocked(client.getGroupLag).mockResolvedValue({
-      groups: [{ group_id: 'g-00', total_lag: 42, unreadable_partitions: 0, error: null }],
+      groups: [{ group_id: 'g-00', total_lag: 42, unreadable_partitions: 0, member_count: null, error: null }],
       as_of: Date.now(),
     })
     await renderWithRouter(<GroupsView cluster="prod" />)
@@ -131,7 +131,7 @@ describe('GroupsView', () => {
       as_of: Date.now(),
     })
     vi.mocked(client.getGroupLag).mockResolvedValue({
-      groups: [{ group_id: 'fresh', total_lag: null, unreadable_partitions: 0, error: null }],
+      groups: [{ group_id: 'fresh', total_lag: null, unreadable_partitions: 0, member_count: null, error: null }],
       as_of: Date.now(),
     })
     await renderWithRouter(<GroupsView cluster="prod" />)
@@ -145,7 +145,7 @@ describe('GroupsView', () => {
       as_of: Date.now(),
     })
     vi.mocked(client.getGroupLag).mockResolvedValue({
-      groups: [{ group_id: 'partial', total_lag: 12_000, unreadable_partitions: 2, error: null }],
+      groups: [{ group_id: 'partial', total_lag: 12_000, unreadable_partitions: 2, member_count: null, error: null }],
       as_of: Date.now(),
     })
     await renderWithRouter(<GroupsView cluster="prod" />)
@@ -176,6 +176,22 @@ describe('GroupsView', () => {
     expect(members).toHaveAttribute('title', expect.stringContaining('KIP-848'))
     expect(rows[1]).toHaveTextContent('Classic')
     expect(rows[1].querySelector('[data-testid="group-members"]')).toHaveTextContent('2')
+  })
+
+  // The count the list cannot take arrives with the visible page's lag, so the
+  // row fills in rather than staying a dash.
+  it('fills an uncountable member count from the visible page batch', async () => {
+    vi.mocked(client.getGroups).mockResolvedValue({
+      groups: [{ group_id: 'next', state: 'Stable', protocol_type: '', group_type: 'Consumer', member_count: null }],
+      as_of: Date.now(),
+    })
+    vi.mocked(client.getGroupLag).mockResolvedValue({
+      groups: [{ group_id: 'next', total_lag: 5, unreadable_partitions: 0, member_count: 3, error: null }],
+      as_of: Date.now(),
+    })
+    await renderWithRouter(<GroupsView cluster="prod" />)
+    await screen.findByText('next')
+    expect(await screen.findByTestId('group-members')).toHaveTextContent('3')
   })
 
   // A broker too old to report the protocol must not be labelled either way.

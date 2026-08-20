@@ -113,6 +113,12 @@ pub struct ClusterHandle {
     pub topic_detail_cache: keyed_cache::KeyedCache<String, Arc<admin::TopicDetail>>,
     pub group_detail_cache: keyed_cache::KeyedCache<String, Arc<admin::GroupDetail>>,
     pub detail_flight: Arc<single_flight::SingleFlight<(&'static str, String)>>,
+    /// One group as its coordinator describes it: state, protocol, members and
+    /// the partitions each owns. Costs a request per group, so it is read for
+    /// the rows on screen only — and shared, so the list, a topic's activity
+    /// tab and the group's own page never ask twice.
+    pub group_description: keyed_cache::KeyedCache<String, Arc<ffi::GroupDescription>>,
+    pub describe_flight: single_flight::SingleFlight<String>,
     pub schema_registry: Option<Arc<SchemaRegistry>>,
     consumer: RwLock<Arc<BaseConsumer>>,
     admin: RwLock<Arc<AdminClient<DefaultClientContext>>>,
@@ -158,6 +164,8 @@ impl ClusterHandle {
             snapshot_flight: single_flight::SingleFlight::new(),
             topic_detail_cache: keyed_cache::KeyedCache::new(DETAIL_HORIZON_MS),
             group_detail_cache: keyed_cache::KeyedCache::new(DETAIL_HORIZON_MS),
+            group_description: keyed_cache::KeyedCache::new(DETAIL_HORIZON_MS),
+            describe_flight: single_flight::SingleFlight::new(),
             detail_flight: Arc::new(single_flight::SingleFlight::new()),
             schema_registry,
             consumer: RwLock::new(Arc::new(consumer)),

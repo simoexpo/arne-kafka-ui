@@ -104,6 +104,9 @@ export interface GroupLagEntry {
   // A lower bound, not a total, when `unreadable_partitions` is non-zero.
   total_lag: number | null
   unreadable_partitions: number
+  // The member count for a group the cluster-wide list cannot count; null for
+  // every other group, which the list already knows.
+  member_count: number | null
   error: string | null
 }
 export interface GroupLagBatch { groups: GroupLagEntry[]; as_of: number }

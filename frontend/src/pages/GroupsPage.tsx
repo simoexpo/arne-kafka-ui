@@ -92,7 +92,7 @@ export function GroupsView({ cluster }: { cluster: string }) {
                 </td>
                 <td>{g.state}</td>
                 <td className="text-zinc-500">{protocolLabel(g)}</td>
-                <MemberCount count={g.member_count} />
+                <MemberCount count={g.member_count ?? lagOf(g.group_id)?.member_count ?? null} />
                 <td>
                   <TotalLag entry={lagOf(g.group_id)} pending={lag.isPending} />
                 </td>
@@ -134,7 +134,8 @@ function protocolLabel(g: { group_type: string; protocol_type: string }): string
   return g.group_type && g.group_type !== 'Unknown' ? g.group_type : g.protocol_type
 }
 
-/// A count this page cannot take is stated as unknown, never as zero: the
+/// A count the cluster-wide list could not take comes from the visible page's
+/// batch instead. Until it arrives it is stated as unknown, never as zero: the
 /// classic describe reports no members for a KIP-848 group however many it has.
 function MemberCount({ count }: { count: number | null }) {
   if (count != null) return <td data-testid="group-members">{count}</td>

@@ -167,6 +167,12 @@ async fn group_detail_tells_the_truth_about_a_new_protocol_group() {
 
     assert_eq!(body["group_type"], "Consumer", "the group speaks the KIP-848 protocol: {body}");
 
+    // The count the list cannot take from the roster is fetched for the rows
+    // on screen only — the same page-scoped batch that carries their lag.
+    let (_, page) = get_json(app(state.clone()), "/api/clusters/test/group-lag?groups=next-group").await;
+    let row = &page["groups"][0];
+    assert_eq!(row["member_count"], 1, "the visible row learns its member count: {page}");
+
     // The LIST must agree with the detail page. The legacy describe reports
     // these groups as Dead with no members, so the list reads its state from
     // the modern listing instead of asserting something it cannot know.
@@ -182,6 +188,72 @@ async fn group_detail_tells_the_truth_about_a_new_protocol_group() {
     let assigned = member["assigned"].as_array().expect("assignment stated");
     assert_eq!(assigned[0]["topic"], "next-topic", "the member owns the topic it consumes: {body}");
     assert_eq!(assigned[0]["partitions"], serde_json::json!([0]), "owning the only partition: {body}");
+}
+
+/// The activity tab classifies groups from their member assignments. A
+/// KIP-848 group carries no assignment blob, so without a coordinator-side
+/// describe it is unclassifiable: the tab has to fail open, OffsetFetch it,
+/// and then shows it as a consumer of a topic it left. This pins both halves —
+/// it must vanish from the old topic, and cost no offset read to establish it.
+#[tokio::test]
+async fn a_new_protocol_group_that_moved_topics_leaves_its_old_tab() {
+    let bootstrap = start_kafka().await;
+    create_topic(&bootstrap, "kn-a", 1).await;
+    create_topic(&bootstrap, "kn-b", 1).await;
+    produce(&bootstrap, "kn-a", 4).await;
+    produce(&bootstrap, "kn-b", 4).await;
+    // history: committed on kn-a, then gone
+    {
+        let _past = spawn_live_next_protocol_consumer(&bootstrap, "kn-a", "kn-mv");
+        let state = state_for(&bootstrap, vec![]);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            let (_, body) = get_json(app(state.clone()), "/api/clusters/test/groups/kn-mv").await;
+            if body["partitions"].as_array().is_some_and(|ps| ps.iter().any(|p| p["topic"] == "kn-a")) {
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline, "kn-mv never committed on kn-a: {body}");
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        }
+    }
+    // present: the same group consumes kn-b only
+    let _live = spawn_live_next_protocol_consumer(&bootstrap, "kn-b", "kn-mv");
+    let state = state_for(&bootstrap, vec![]);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        let (_, body) = get_json(app(state.clone()), "/api/clusters/test/groups/kn-mv").await;
+        let on_b = body["members"].as_array().is_some_and(|ms| ms.iter().any(|m| {
+            m["assigned"].as_array().is_some_and(|a| a.iter().any(|t| t["topic"] == "kn-b"))
+        }));
+        if on_b { break; }
+        assert!(std::time::Instant::now() < deadline, "kn-mv never took kn-b: {body}");
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+
+    use arne::cluster::admin::group_offset_fetch_count;
+    let before = group_offset_fetch_count("*", "kn-mv");
+    let (status, body) = get_json(app(state.clone()), "/api/clusters/test/topics/kn-a/consumers").await;
+    assert_eq!(status, 200);
+    assert!(
+        !body["groups"].as_array().unwrap().iter().any(|g| g["group_id"] == "kn-mv"),
+        "a group assigned elsewhere must not appear on its old topic: {body}"
+    );
+    assert!(
+        body["unchecked"].as_array().unwrap().is_empty(),
+        "and it is not 'unchecked' either — the coordinator said where it is: {body}"
+    );
+    assert_eq!(
+        group_offset_fetch_count("*", "kn-mv"),
+        before,
+        "classifying it must cost no offset read"
+    );
+
+    // and it IS a consumer of the topic it moved to
+    let (_, body) = get_json(app(state), "/api/clusters/test/topics/kn-b/consumers").await;
+    assert!(
+        body["groups"].as_array().unwrap().iter().any(|g| g["group_id"] == "kn-mv"),
+        "it consumes kn-b: {body}"
+    );
 }
 
 #[tokio::test]
