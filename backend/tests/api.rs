@@ -254,6 +254,16 @@ async fn topic_consumers_skips_live_groups_that_moved_to_another_topic() {
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     }
 
+    // Each live member reports the partitions it actually owns, decoded from
+    // the assignment blob the describe response already carries.
+    let (_, body) = get_json(app(state.clone()), "/api/clusters/test/groups/mv-group").await;
+    let members = body["members"].as_array().expect("members on the wire");
+    let owned: Vec<_> = members.iter()
+        .flat_map(|m| m["assigned"].as_array().expect("assignment on the wire").iter())
+        .map(|a| (a["topic"].as_str().unwrap().to_string(), a["partitions"].as_array().unwrap().len()))
+        .collect();
+    assert_eq!(owned, vec![("mv-b".to_string(), 1)], "the live member owns mv-b's only partition: {body}");
+
     // The assignor the group negotiated, straight off the same describe call
     // that yields its members — no extra broker request for it.
     let (_, body) = get_json(app(state.clone()), "/api/clusters/test/groups/mv-group").await;

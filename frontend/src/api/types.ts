@@ -125,7 +125,15 @@ export interface SubjectDetail {
   schema: string
   as_of: number
 }
-export interface MemberInfo { member_id: string; client_id: string; client_host: string }
+export interface MemberAssignment { topic: string; partitions: number[] }
+export interface MemberInfo {
+  member_id: string
+  client_id: string
+  client_host: string
+  // What the coordinator gave this member. `null` — never `[]` — when the
+  // assignment blob did not decode: unknown ownership is not zero ownership.
+  assigned: MemberAssignment[] | null
+}
 export interface GroupDetail {
   group_id: string
   state: string

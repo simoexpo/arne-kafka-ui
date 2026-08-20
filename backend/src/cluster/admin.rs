@@ -235,7 +235,22 @@ pub struct GroupLagBatch {
 pub struct GroupList { pub groups: Vec<GroupSummary>, pub as_of: i64 }
 
 #[derive(Debug, Serialize, Clone)]
-pub struct MemberInfo { pub member_id: String, pub client_id: String, pub client_host: String }
+pub struct MemberInfo {
+    pub member_id: String,
+    pub client_id: String,
+    pub client_host: String,
+    /// What the coordinator actually gave this member, decoded from the
+    /// assignment blob the describe response already carries. `None` — never
+    /// an empty list — when the blob did not decode: a member whose ownership
+    /// is unknown must not read as a member that owns nothing.
+    pub assigned: Option<Vec<MemberAssignment>>,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub struct MemberAssignment {
+    pub topic: String,
+    pub partitions: Vec<i32>,
+}
 
 #[derive(Debug, Serialize, Clone)]
 pub struct GroupDetail {
@@ -712,6 +727,11 @@ async fn group_detail_uncached(handle: Arc<ClusterHandle>, group: String) -> Res
                 member_id: m.id().to_string(),
                 client_id: m.client_id().to_string(),
                 client_host: m.client_host().to_string(),
+                assigned: m.assignment()
+                    .and_then(super::assignment::assigned_partitions)
+                    .map(|topics| topics.into_iter()
+                        .map(|(topic, partitions)| MemberAssignment { topic, partitions })
+                        .collect()),
             }).collect()).unwrap_or_default(),
             partitions,
             unreadable_partitions,

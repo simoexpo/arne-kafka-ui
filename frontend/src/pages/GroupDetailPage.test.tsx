@@ -15,7 +15,7 @@ describe('GroupDetailView', () => {
   const detail = (over: Partial<GroupDetail> = {}): GroupDetail => ({
     group_id: 'billing',
     state: 'Stable',
-    members: [{ member_id: 'm-1', client_id: 'billing-app', client_host: '/10.0.0.5' }],
+    members: [{ member_id: 'm-1', client_id: 'billing-app', client_host: '/10.0.0.5', assigned: [] }],
     partitions: [
       { topic: 'orders', partition: 0, committed_offset: 35, end_offset: 42, lag: 7 },
       { topic: 'orders', partition: 1, committed_offset: 10, end_offset: 12, lag: 2 },
@@ -33,9 +33,9 @@ describe('GroupDetailView', () => {
   it('lists members in a stable order and states how many there are', async () => {
     vi.mocked(client.getGroupDetail).mockResolvedValue(detail({
       members: [
-        { member_id: 'm3', client_id: 'worker-3', client_host: '/10.0.0.3' },
-        { member_id: 'm1', client_id: 'worker-1', client_host: '/10.0.0.1' },
-        { member_id: 'm2', client_id: 'worker-2', client_host: '/10.0.0.2' },
+        { member_id: 'm3', client_id: 'worker-3', client_host: '/10.0.0.3', assigned: [] },
+        { member_id: 'm1', client_id: 'worker-1', client_host: '/10.0.0.1', assigned: [] },
+        { member_id: 'm2', client_id: 'worker-2', client_host: '/10.0.0.2', assigned: [] },
       ],
     }))
     renderWithQuery(<GroupDetailView cluster="prod" group="billing" />)
@@ -81,6 +81,83 @@ describe('GroupDetailView', () => {
     renderWithQuery(<GroupDetailView cluster="prod" group="billing" />)
     expect(await screen.findByText('no active members')).toBeInTheDocument()
     expect(screen.getByTestId('stat-assignment strategy')).toHaveTextContent('—')
+  })
+
+  // The lag table says which partitions are behind; only the assignment says
+  // WHO is behind. Both come from calls the page already makes.
+  it('names the member that owns each partition', async () => {
+    vi.mocked(client.getGroupDetail).mockResolvedValue(detail({
+      members: [
+        { member_id: 'm1', client_id: 'worker-1', client_host: '/10.0.0.1',
+          assigned: [{ topic: 'orders', partitions: [0, 1] }] },
+        { member_id: 'm2', client_id: 'worker-2', client_host: '/10.0.0.2',
+          assigned: [{ topic: 'users', partitions: [0] }] },
+      ],
+    }))
+    renderWithQuery(<GroupDetailView cluster="prod" group="billing" />)
+    const rows = await screen.findAllByTestId('partition-row')
+    expect(rows.map((r) => r.querySelector('[data-testid="partition-owner"]')?.textContent))
+      .toEqual(['worker-1', 'worker-1', 'worker-2'])
+  })
+
+  // Lag on a partition nobody owns is nobody's job to work off — the case
+  // worth spotting during an incident.
+  it('marks a partition that no live member owns', async () => {
+    vi.mocked(client.getGroupDetail).mockResolvedValue(detail({
+      members: [
+        { member_id: 'm1', client_id: 'worker-1', client_host: '/10.0.0.1',
+          assigned: [{ topic: 'orders', partitions: [0] }] },
+      ],
+    }))
+    renderWithQuery(<GroupDetailView cluster="prod" group="billing" />)
+    const rows = await screen.findAllByTestId('partition-row')
+    const owners = rows.map((r) => r.querySelector('[data-testid="partition-owner"]')?.textContent)
+    expect(owners).toEqual(['worker-1', 'unassigned', 'unassigned'])
+  })
+
+  // More members than partitions: the standbys own nothing and the page says
+  // so, instead of looking like ten working consumers.
+  it('marks a member that owns no partition as idle', async () => {
+    vi.mocked(client.getGroupDetail).mockResolvedValue(detail({
+      members: [
+        { member_id: 'm1', client_id: 'worker-1', client_host: '/10.0.0.1',
+          assigned: [{ topic: 'orders', partitions: [0, 1] }] },
+        { member_id: 'm2', client_id: 'worker-2', client_host: '/10.0.0.2', assigned: [] },
+      ],
+    }))
+    renderWithQuery(<GroupDetailView cluster="prod" group="billing" />)
+    const items = await screen.findAllByTestId('group-member')
+    expect(items[0]).not.toHaveTextContent('idle')
+    expect(items[1]).toHaveTextContent('idle')
+  })
+
+  // An undecodable blob is not an empty one: claiming "idle" or "unassigned"
+  // would be inventing knowledge we do not have.
+  it('never calls an undecodable assignment idle or unassigned', async () => {
+    vi.mocked(client.getGroupDetail).mockResolvedValue(detail({
+      members: [
+        { member_id: 'm1', client_id: 'worker-1', client_host: '/10.0.0.1', assigned: null },
+      ],
+    }))
+    renderWithQuery(<GroupDetailView cluster="prod" group="billing" />)
+    const items = await screen.findAllByTestId('group-member')
+    expect(items[0]).not.toHaveTextContent('idle')
+    const rows = screen.getAllByTestId('partition-row')
+    const owners = rows.map((r) => r.querySelector('[data-testid="partition-owner"]')?.textContent)
+    expect(owners).toEqual(['—', '—', '—'])
+  })
+
+  // Auto layout handed the slack to the widest header and squeezed the
+  // offsets into 70px; the columns are sized on purpose instead.
+  it('sizes the lag columns deliberately rather than by content', async () => {
+    vi.mocked(client.getGroupDetail).mockResolvedValue(detail())
+    renderWithQuery(<GroupDetailView cluster="prod" group="billing" />)
+    const table = (await screen.findAllByTestId('partition-row'))[0].closest('table')!
+    expect(table.className).toMatch(/table-fixed/)
+    const widths = [...table.querySelectorAll('thead th')].map((th) => th.className.match(/w-\[\d+%\]/)?.[0])
+    expect(widths.every(Boolean)).toBe(true)
+    // the two offsets hold the same kind of value, so they get the same room
+    expect(widths[2]).toBe(widths[3])
   })
 
   it('shows members and per-partition lag', async () => {
