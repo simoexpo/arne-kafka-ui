@@ -469,8 +469,8 @@ async fn ffi_committed_offsets_read_a_groups_position_without_a_throwaway_consum
         let handle = handle.clone();
         let wanted = wanted.clone();
         move || {
-            let c = committed_offsets_blocking(&handle, "cgo-group", &wanted, Duration::from_secs(10));
-            let u = committed_offsets_blocking(&handle, "cgo-never-existed", &wanted, Duration::from_secs(10));
+            let c = committed_offsets_blocking(&handle, "cgo-group", Some(&wanted), Duration::from_secs(10));
+            let u = committed_offsets_blocking(&handle, "cgo-never-existed", Some(&wanted), Duration::from_secs(10));
             (c, u)
         }
     })
@@ -482,6 +482,18 @@ async fn ffi_committed_offsets_read_a_groups_position_without_a_throwaway_consum
     assert!(committed.keys().all(|(t, _)| t == "cgo-topic"), "topics are reported: {committed:?}");
     // a group that never committed has no offsets, which is not an error
     assert!(untouched.expect("unknown group is answerable").is_empty());
+
+    // NULL asks for everything the group committed, without naming a single
+    // partition — how every cluster-wide view asks (spike 2026-08-20).
+    let handle2 = handle.clone();
+    let everything = tokio::task::spawn_blocking(move || {
+        committed_offsets_blocking(&handle2, "cgo-group", None, Duration::from_secs(10))
+    })
+    .await
+    .unwrap()
+    .expect("a NULL partition list is librdkafka's documented all-partitions mode");
+    assert_eq!(everything.values().sum::<i64>(), 8, "same answer, nothing enumerated: {everything:?}");
+    assert!(everything.keys().all(|(t, _)| t == "cgo-topic"));
 }
 
 /// Owner design 2026-08-19: k tabs polling the same topic must not multiply

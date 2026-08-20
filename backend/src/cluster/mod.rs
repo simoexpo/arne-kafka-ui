@@ -81,8 +81,16 @@ pub struct ClusterHandle {
     /// (topic, group) at a time: concurrent pollers wait for the in-flight
     /// refresh instead of duplicating it (owner design 2026-08-19).
     pub sampler_flight: single_flight::SingleFlight<String>,
+    /// Lag for ONE topic's partitions, as that topic's tab shows it. Carries
+    /// the two-tier policy, because "this group has no offsets on this topic"
+    /// is a fact worth remembering for a while.
     pub group_lag_cache: group_lag_cache::GroupLagCache,
     pub lag_flight: single_flight::SingleFlight<(String, String)>,
+    /// Lag across every topic a group reads, as the consumers list shows it.
+    /// A separate cache, not a scope inside the one above: different question,
+    /// different key, different freshness policy (owner ruling 2026-08-20).
+    pub cluster_lag_cache: keyed_cache::KeyedCache<String, Vec<admin::PartitionLag>>,
+    pub cluster_lag_flight: single_flight::SingleFlight<String>,
     /// Whole-response snapshots shared by every tab for a few seconds, so tab
     /// count stops multiplying broker calls (owner design 2026-08-19).
     pub topics_snapshot: snapshot::SnapshotCache<admin::TopicList>,
@@ -133,6 +141,8 @@ impl ClusterHandle {
             sampler_flight: single_flight::SingleFlight::new(),
             group_lag_cache: group_lag_cache::GroupLagCache::new(),
             lag_flight: single_flight::SingleFlight::new(),
+            cluster_lag_cache: keyed_cache::KeyedCache::new(group_lag_cache::EVICT_AGE_MS),
+            cluster_lag_flight: single_flight::SingleFlight::new(),
             topics_snapshot: snapshot::SnapshotCache::new(),
             overview_snapshot: snapshot::SnapshotCache::new(),
             groups_snapshot: snapshot::SnapshotCache::new(),

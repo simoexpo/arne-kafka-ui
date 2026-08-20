@@ -371,11 +371,16 @@ impl WatermarkCache {
 /// `partitions` and `watermark_cache` are the caller's request-scoped,
 /// cross-group state, so the metadata lookup and each partition's watermark
 /// are paid once per request, not once per group.
+/// `partitions: None` means "everything this group committed, anywhere" — the
+/// cluster-wide question, asked in one small request instead of enumerating
+/// the whole cluster. `Some(list)` restricts it to one topic's partitions,
+/// which is what a topic's own tab shows. `scope` only labels the test
+/// counter.
 pub fn group_lag_blocking(
     handle: &ClusterHandle,
     scope: &str,
     group: &str,
-    partitions: &[(String, i32)],
+    partitions: Option<&[(String, i32)]>,
     watermark_cache: &mut WatermarkCache,
 ) -> Result<Vec<PartitionLag>, ApiError> {
     record_group_offset_fetch(scope, group);
@@ -489,53 +494,43 @@ fn list_groups_blocking(handle: &ClusterHandle) -> Result<GroupList, ApiError> {
 /// pages still inspect each group once per tier.
 pub async fn groups_lag(handle: Arc<ClusterHandle>, groups: Vec<String>) -> Result<GroupLagBatch, ApiError> {
     tokio::task::spawn_blocking(move || {
-        use super::group_lag_cache::{CachedEntry, LIVE_TTL_MS};
+        use super::group_lag_cache::LIVE_TTL_MS;
         let now = now_ms();
-        // Built on first use only: a page whose groups are all cached costs
-        // nothing at all.
-        let mut tpl: Option<Vec<(String, i32)>> = None;
         let mut watermark_cache = WatermarkCache::new();
         let mut out = Vec::with_capacity(groups.len());
         for group in groups {
-            let fresh = handle
-                .group_lag_cache
-                .freshness(CLUSTER_WIDE, &group)
-                .filter(|f| now - f.sampled_at < LIVE_TTL_MS)
-                .and_then(|_| handle.group_lag_cache.get(CLUSTER_WIDE, &group));
-            let entry = match fresh {
-                Some(e) => Ok(e),
+            let cached = handle.cluster_lag_cache.fresh(&group, LIVE_TTL_MS, now);
+            let rows = match cached {
+                Some(rows) => Ok(rows),
                 None => match handle
-                    .lag_flight
-                    .begin_or_wait((CLUSTER_WIDE.to_string(), group.clone()), single_flight::MAX_WAIT)
+                    .cluster_lag_flight
+                    .begin_or_wait(group.clone(), single_flight::MAX_WAIT)
                 {
                     // Someone else is reading this group right now.
-                    None => match handle.group_lag_cache.get(CLUSTER_WIDE, &group) {
-                        Some(e) => Ok(e),
+                    None => match handle.cluster_lag_cache.get(&group).map(|e| e.value) {
+                        Some(rows) => Ok(rows),
                         None => Err("still being read by another request".to_string()),
                     },
                     Some(_flight) => {
-                        let tpl = match tpl {
-                            Some(ref t) => t,
-                            None => tpl.insert(group_lag_topic_partitions(&handle, None)?),
-                        };
-                        match group_lag_blocking(&handle, CLUSTER_WIDE, &group, tpl, &mut watermark_cache) {
-                            Ok(partitions) => {
-                                let entry = CachedEntry { partitions, sampled_at: now_ms() };
-                                handle.group_lag_cache.insert(CLUSTER_WIDE, &group, entry.clone());
-                                Ok(entry)
+                        // None = every partition this group committed on, in
+                        // one small request (spike 2026-08-20).
+                        match group_lag_blocking(&handle, CLUSTER_WIDE, &group, None, &mut watermark_cache) {
+                            Ok(rows) => {
+                                handle.cluster_lag_cache.insert(group.clone(), rows.clone(), now_ms());
+                                Ok(rows)
                             }
                             Err(e) => Err(lag_error_reason(&e)),
                         }
                     }
                 },
             };
-            out.push(match entry {
+            out.push(match rows {
                 // No committed offsets anywhere means no position to be
                 // behind — undetermined, never a confident 0.
-                Ok(e) if e.partitions.is_empty() => GroupLagEntry { group_id: group, total_lag: None, error: None },
-                Ok(e) => GroupLagEntry {
+                Ok(rows) if rows.is_empty() => GroupLagEntry { group_id: group, total_lag: None, error: None },
+                Ok(rows) => GroupLagEntry {
                     group_id: group,
-                    total_lag: Some(e.partitions.iter().map(|p| p.lag).sum()),
+                    total_lag: Some(rows.iter().map(|p| p.lag).sum()),
                     error: None,
                 },
                 Err(reason) => GroupLagEntry { group_id: group, total_lag: None, error: Some(reason) },
@@ -547,8 +542,8 @@ pub async fn groups_lag(handle: Arc<ClusterHandle>, groups: Vec<String>) -> Resu
     .map_err(ApiError::task_join)?
 }
 
-/// Cache scope for lag that spans every topic a group reads, as the consumers
-/// list shows it — as opposed to one topic's tab.
+/// Label for the cluster-wide scope in the test call counter. The two lag
+/// caches are separate structures now, so this is no longer a cache key.
 const CLUSTER_WIDE: &str = "*";
 
 pub async fn group_detail(handle: Arc<ClusterHandle>, group: String) -> Result<GroupDetail, ApiError> {
@@ -584,9 +579,10 @@ async fn group_detail_uncached(handle: Arc<ClusterHandle>, group: String) -> Res
         let info = gl.groups().iter().find(|g| g.name() == group);
         // a group entry with state "Dead" counts as absent
         let info = info.filter(|i| i.state() != "Dead");
-        let tpl = group_lag_topic_partitions(&handle, None)?;
         let mut watermark_cache = WatermarkCache::new();
-        let partitions = group_lag_blocking(&handle, "*", &group, &tpl, &mut watermark_cache)?;
+        // Everything this group committed, in one request: no cluster-wide
+        // partition enumeration (spike 2026-08-20).
+        let partitions = group_lag_blocking(&handle, CLUSTER_WIDE, &group, None, &mut watermark_cache)?;
         // A group with no broker-side entry AND no committed offsets does not exist.
         let info = match (info, partitions.is_empty()) {
             (Some(i), _) => Some(i),
@@ -761,7 +757,7 @@ pub async fn topic_consumers(handle: Arc<ClusterHandle>, topic: String) -> Resul
                                 Some(ref t) => t,
                                 None => tpl.insert(group_lag_topic_partitions(&handle, Some(&topic))?),
                             };
-                            match group_lag_blocking(&handle, &topic, g.name(), tpl, &mut watermark_cache) {
+                            match group_lag_blocking(&handle, &topic, g.name(), Some(tpl), &mut watermark_cache) {
                                 Ok(partitions) => {
                                     // stamped on completion, not at request start: a long
                                     // sweep must not record its last entries as already stale

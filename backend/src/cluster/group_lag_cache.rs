@@ -25,7 +25,7 @@ pub const LIVE_TTL_MS: i64 = 8_000;
 pub const IDLE_TTL_MS: i64 = 60_000;
 /// A group nobody has viewed for this long is dropped even if it still
 /// exists on the cluster — the next view re-inspects it.
-const EVICT_AGE_MS: i64 = 600_000;
+pub const EVICT_AGE_MS: i64 = 600_000;
 
 /// How a group relates to the topic being viewed, derived from the
 /// group-list's member assignment blobs (`assignment::assigned_topics`).

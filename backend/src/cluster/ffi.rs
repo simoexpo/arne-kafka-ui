@@ -237,15 +237,21 @@ pub fn offsets_by_partition(
 /// (`MUST always be 1`), so the request count per group is unchanged — the
 /// connection setup is what disappears.
 ///
+/// `partitions: None` asks for EVERYTHING the group has committed, across
+/// every topic — librdkafka's documented "NULL for all the partitions" mode
+/// (verified by spike 2026-08-20). That is how the cluster-wide views ask,
+/// instead of enumerating every partition on the cluster and getting back a
+/// mostly-empty answer. An EMPTY list is the one thing librdkafka rejects.
+///
 /// Partitions the group has no committed offset for are simply absent from
 /// the returned map.
 pub fn committed_offsets_blocking(
     handle: &ClusterHandle,
     group: &str,
-    partitions: &[(String, i32)],
+    partitions: Option<&[(String, i32)]>,
     timeout: Duration,
 ) -> Result<std::collections::HashMap<(String, i32), i64>, ApiError> {
-    if partitions.is_empty() {
+    if partitions.is_some_and(|p| p.is_empty()) {
         return Ok(std::collections::HashMap::new());
     }
     let admin = handle.admin();
@@ -255,13 +261,17 @@ pub fn committed_offsets_blocking(
         timeout,
         &handle.name,
     )?;
-    let tpl = OwnedTpl::build(partitions, OffsetSpec::Invalid)?;
+    let tpl = partitions.map(|p| OwnedTpl::build(p, OffsetSpec::Invalid)).transpose()?;
     let group_id = CString::new(group)
         .map_err(|_| ApiError::kafka(&handle.name, format!("group id contains a NUL byte: {group:?}")))?;
     // SAFETY: the request object owns nothing we free early; `tpl` outlives the
     // call, and the request is destroyed before returning.
     unsafe {
-        let request = rd::rd_kafka_ListConsumerGroupOffsets_new(group_id.as_ptr(), tpl.0);
+        let request = rd::rd_kafka_ListConsumerGroupOffsets_new(
+            group_id.as_ptr(),
+            // NULL = every partition this group committed on
+            tpl.as_ref().map_or(std::ptr::null(), |t| t.0),
+        );
         let mut requests = [request];
         rd::rd_kafka_ListConsumerGroupOffsets(call.rk, requests.as_mut_ptr(), 1, call.options, call.queue);
         let event = call.wait(timeout, &handle.name, "fetch committed offsets");
