@@ -22,8 +22,41 @@ describe('GroupDetailView', () => {
       { topic: 'users', partition: 0, committed_offset: 5, end_offset: 5, lag: 0 },
     ],
     unreadable_partitions: 0,
+    assignment_strategy: 'range',
     as_of: Date.now(),
     ...over,
+  })
+
+  // Owner ruling 2026-08-20: broker order is arbitrary and reshuffles between
+  // polls, which makes a ten-member roster unreadable. Sorted by client id,
+  // and the header states how many there are so nobody counts rows.
+  it('lists members in a stable order and states how many there are', async () => {
+    vi.mocked(client.getGroupDetail).mockResolvedValue(detail({
+      members: [
+        { member_id: 'm3', client_id: 'worker-3', client_host: '/10.0.0.3' },
+        { member_id: 'm1', client_id: 'worker-1', client_host: '/10.0.0.1' },
+        { member_id: 'm2', client_id: 'worker-2', client_host: '/10.0.0.2' },
+      ],
+    }))
+    renderWithQuery(<GroupDetailView cluster="prod" group="billing" />)
+    const items = await screen.findAllByTestId('group-member')
+    expect(items.map((li) => li.textContent?.split(' ')[0])).toEqual(['worker-1', 'worker-2', 'worker-3'])
+    const header = screen.getAllByTestId('panel-header').find((h) => h.textContent?.includes('Members'))!
+    expect(header).toHaveTextContent('3')
+  })
+
+  it('names the assignor the group negotiated', async () => {
+    vi.mocked(client.getGroupDetail).mockResolvedValue(detail({ assignment_strategy: 'cooperative-sticky' }))
+    renderWithQuery(<GroupDetailView cluster="prod" group="billing" />)
+    expect(await screen.findByText('cooperative-sticky')).toBeInTheDocument()
+  })
+
+  // An empty group negotiated nothing — saying "range" would be an invention.
+  it('does not invent an assignor for a group with no members', async () => {
+    vi.mocked(client.getGroupDetail).mockResolvedValue(detail({ assignment_strategy: '', members: [], state: 'Empty' }))
+    renderWithQuery(<GroupDetailView cluster="prod" group="billing" />)
+    expect(await screen.findByText('no active members')).toBeInTheDocument()
+    expect(screen.getByTestId('stat-assignor')).toHaveTextContent('—')
   })
 
   it('shows members and per-partition lag', async () => {

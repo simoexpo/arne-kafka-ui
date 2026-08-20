@@ -241,6 +241,9 @@ pub struct MemberInfo { pub member_id: String, pub client_id: String, pub client
 pub struct GroupDetail {
     pub group_id: String,
     pub state: String,
+    /// The assignor the members negotiated (`range`, `cooperative-sticky`, …).
+    /// Empty when the group holds no members to negotiate one.
+    pub assignment_strategy: String,
     pub members: Vec<MemberInfo>,
     pub partitions: Vec<PartitionLag>,
     /// How many partitions this group has committed on whose head could not be
@@ -704,6 +707,7 @@ async fn group_detail_uncached(handle: Arc<ClusterHandle>, group: String) -> Res
         Ok(GroupDetail {
             group_id: group.clone(),
             state: info.map(|i| i.state().to_string()).unwrap_or_else(|| "Empty".into()),
+            assignment_strategy: info.map(|i| i.protocol().to_string()).unwrap_or_default(),
             members: info.map(|i| i.members().iter().map(|m| MemberInfo {
                 member_id: m.id().to_string(),
                 client_id: m.client_id().to_string(),

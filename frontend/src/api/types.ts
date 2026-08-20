@@ -129,6 +129,8 @@ export interface MemberInfo { member_id: string; client_id: string; client_host:
 export interface GroupDetail {
   group_id: string
   state: string
+  // The assignor the members negotiated; empty when there are no members.
+  assignment_strategy: string
   members: MemberInfo[]
   partitions: PartitionLag[]
   // Partitions this group commits on whose head could not be read: absent from

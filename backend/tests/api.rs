@@ -254,6 +254,12 @@ async fn topic_consumers_skips_live_groups_that_moved_to_another_topic() {
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     }
 
+    // The assignor the group negotiated, straight off the same describe call
+    // that yields its members — no extra broker request for it.
+    let (_, body) = get_json(app(state.clone()), "/api/clusters/test/groups/mv-group").await;
+    let strategy = body["assignment_strategy"].as_str().expect("strategy is on the wire");
+    assert!(!strategy.is_empty(), "a stable group negotiated an assignor: {body}");
+
     // Commits are read per group now (one cluster-wide entry), so the readiness
     // polls above legitimately read this group. What must hold is that viewing
     // the OLD topic reads nothing further: a moved-away group is skipped before
