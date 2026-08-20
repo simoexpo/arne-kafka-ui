@@ -7,7 +7,9 @@
 //! in-flight refresh would turn our slowest refresh into a frozen UI, so a
 //! caller that waits too long gives up and serves whatever the cache holds —
 //! honest, because every value we serve carries its own sample timestamp.
-//! What it never does is start a second fetch of the same thing.
+//! What it never does on its own is start a second fetch of the same thing —
+//! though a caller may choose to, rather than answer with nothing, when the
+//! wait expires and there is no cached value to fall back on.
 
 use std::collections::HashSet;
 use std::hash::Hash;

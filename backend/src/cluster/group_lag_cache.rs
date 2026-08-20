@@ -82,13 +82,19 @@ pub struct CommittedOffset {
 }
 
 /// Lag is a SUBTRACTION between a committed offset and a head, so the two
-/// sides must be sampled together: pairing a cached commit with a newer head
-/// invents lag that was never true at any instant (a caught-up consumer on a
-/// 10k msg/s topic would appear 80k behind after 8 seconds). So the pair is
-/// what gets stored and what ages as one — a stored row is old, never wrong.
+/// sides must be sampled together: pairing a cached commit with a NEWER head
+/// invents lag that was never true (a caught-up consumer on a 10k msg/s topic
+/// would look 80k behind after 8 seconds), and pairing it with an OLDER head
+/// puts `committed > end` on screen, which cannot happen in Kafka. So the pair
+/// is what gets stored and what ages as one — a stored row is old, never wrong.
 #[derive(Clone)]
 pub struct LagSnapshot {
     pub rows: Vec<PartitionLag>,
+    /// Partitions the group has committed on whose head could not be read
+    /// (a leader election, or offsets left behind on a deleted topic). Kept
+    /// per partition so trouble on one topic cannot make another topic's tab
+    /// give up: a view is incomplete only if ITS partitions are in here.
+    pub unknown: Vec<(String, i32)>,
 }
 
 impl LagSnapshot {
@@ -96,6 +102,7 @@ impl LagSnapshot {
     /// freshness tier a topic's tab applies to the shared entry.
     pub fn covers(&self, topic: &str) -> bool {
         self.rows.iter().any(|r| r.topic == topic)
+            || self.unknown.iter().any(|(t, _)| t == topic)
     }
 
     /// The rows for one topic, or all of them for a cluster-wide view.
@@ -106,6 +113,12 @@ impl LagSnapshot {
             .cloned()
             .collect()
     }
+
+    /// Whether this view is missing a partition, so its total cannot be
+    /// stated. Summing what we have would under-report with confidence.
+    pub fn incomplete_for(&self, only_topic: Option<&str>) -> bool {
+        self.unknown.iter().any(|(t, _)| only_topic.is_none_or(|want| t == want))
+    }
 }
 
 /// How old a group's commits may be for the purpose at hand. The 8s/60s split
@@ -113,45 +126,49 @@ impl LagSnapshot {
 /// time rather than being baked into separate per-topic entries: a group that
 /// shows nothing on the topic you're looking at is worth re-reading only once
 /// a minute, even though a group that shows rows is worth 8 seconds.
-pub fn commits_ttl(class: &Classification, shows_rows_here: bool) -> i64 {
+/// `None` means "do not read this group at all" — not "read it rarely". An
+/// infinite TTL would still fall through to a fetch on a cache miss, and an
+/// OffsetFetch per moved-away group is the O(N) class this codebase took an
+/// incident on.
+pub fn commits_ttl(class: &Classification, shows_rows_here: bool) -> Option<i64> {
     match class {
-        Classification::AssignedToTopic => LIVE_TTL_MS,
-        Classification::MustInspect if shows_rows_here => LIVE_TTL_MS,
-        Classification::MustInspect => IDLE_TTL_MS,
-        // Callers skip MovedAway groups before asking. If one ever slips
-        // through, it must NOT trigger a read: an OffsetFetch per moved-away
-        // group is the O(N) class this codebase took an incident on.
-        Classification::MovedAway => i64::MAX,
+        Classification::AssignedToTopic => Some(LIVE_TTL_MS),
+        Classification::MustInspect if shows_rows_here => Some(LIVE_TTL_MS),
+        Classification::MustInspect => Some(IDLE_TTL_MS),
+        // Callers skip these before asking; this is the backstop.
+        Classification::MovedAway => None,
     }
 }
 
-/// Lag for the partitions in `commits`, optionally narrowed to one topic.
+/// Lag for every partition in `commits`, plus the ones whose head could not be
+/// read.
 ///
-/// `head` is the shared watermark cache's answer for a partition, and `None`
-/// there means "we could not read it" — a partition whose watermark fetch
-/// failed. That is an error rather than a skipped row: silently omitting a
-/// partition would under-report the group's lag, which is worse than saying
-/// we don't know.
+/// A partition with no readable head becomes an entry in `unknown` rather than
+/// an error for the whole group: a leader election on one topic must not blank
+/// another topic's tab, and a total that silently omits a partition would
+/// under-report with confidence. Callers state "undetermined" for a view whose
+/// own partitions are in there.
 pub fn lag_rows(
     commits: &[CommittedOffset],
-    only_topic: Option<&str>,
     head: impl Fn(&str, i32) -> Option<i64>,
-) -> Result<Vec<PartitionLag>, String> {
-    let mut out = Vec::new();
-    for c in commits.iter().filter(|c| only_topic.is_none_or(|t| c.topic == t)) {
-        let Some(end_offset) = head(&c.topic, c.partition) else {
-            return Err(format!("no offset reported for {}/{}", c.topic, c.partition));
-        };
-        out.push(PartitionLag {
-            topic: c.topic.clone(),
-            partition: c.partition,
-            committed_offset: c.offset,
-            end_offset,
-            lag: (end_offset - c.offset).max(0),
-        });
+) -> LagSnapshot {
+    let mut rows = Vec::new();
+    let mut unknown = Vec::new();
+    for c in commits {
+        match head(&c.topic, c.partition) {
+            Some(end_offset) => rows.push(PartitionLag {
+                topic: c.topic.clone(),
+                partition: c.partition,
+                committed_offset: c.offset,
+                end_offset,
+                lag: (end_offset - c.offset).max(0),
+            }),
+            None => unknown.push((c.topic.clone(), c.partition)),
+        }
     }
-    out.sort_by(|a, b| (a.topic.as_str(), a.partition).cmp(&(b.topic.as_str(), b.partition)));
-    Ok(out)
+    rows.sort_by(|a, b| (a.topic.as_str(), a.partition).cmp(&(b.topic.as_str(), b.partition)));
+    unknown.sort();
+    LagSnapshot { rows, unknown }
 }
 
 /// The partitions `commits` covers, narrowed to one topic when asked — what a
@@ -223,11 +240,19 @@ mod tests {
     /// serving another view at 8s.
     #[test]
     fn a_group_showing_nothing_here_is_worth_re_reading_only_once_a_minute() {
-        assert_eq!(commits_ttl(&Classification::AssignedToTopic, false), LIVE_TTL_MS);
-        assert_eq!(commits_ttl(&Classification::AssignedToTopic, true), LIVE_TTL_MS);
-        assert_eq!(commits_ttl(&Classification::MustInspect, true), LIVE_TTL_MS);
-        assert_eq!(commits_ttl(&Classification::MustInspect, false), IDLE_TTL_MS);
+        assert_eq!(commits_ttl(&Classification::AssignedToTopic, false), Some(LIVE_TTL_MS));
+        assert_eq!(commits_ttl(&Classification::AssignedToTopic, true), Some(LIVE_TTL_MS));
+        assert_eq!(commits_ttl(&Classification::MustInspect, true), Some(LIVE_TTL_MS));
+        assert_eq!(commits_ttl(&Classification::MustInspect, false), Some(IDLE_TTL_MS));
         const { assert!(IDLE_TTL_MS > LIVE_TTL_MS) };
+    }
+
+    /// A moved-away group must not be READ at all — an infinite TTL would
+    /// still fall through to a fetch on a cache miss.
+    #[test]
+    fn a_moved_away_group_is_never_read() {
+        assert_eq!(commits_ttl(&Classification::MovedAway, false), None);
+        assert_eq!(commits_ttl(&Classification::MovedAway, true), None);
     }
 
     fn commits() -> Vec<CommittedOffset> {
@@ -240,19 +265,22 @@ mod tests {
 
     #[test]
     fn lag_is_the_head_minus_the_commit_across_every_topic() {
-        let rows = lag_rows(&commits(), None, |_t, p| Some(20 + i64::from(p))).unwrap();
-        assert_eq!(rows.len(), 3);
-        assert_eq!(rows.iter().map(|r| r.lag).sum::<i64>(), (20 - 10) + (21 - 5) + (20 - 7));
+        let snap = lag_rows(&commits(), |_t, p| Some(20 + i64::from(p)));
+        assert_eq!(snap.rows.len(), 3);
+        assert!(snap.unknown.is_empty());
+        assert_eq!(snap.rows.iter().map(|r| r.lag).sum::<i64>(), (20 - 10) + (21 - 5) + (20 - 7));
     }
 
     /// The whole point of one shared entry: a topic's tab reads the same
     /// commits and simply narrows them to its own partitions.
     #[test]
     fn narrowing_to_one_topic_yields_only_that_topics_rows() {
-        let rows = lag_rows(&commits(), Some("users"), |_t, _p| Some(9)).unwrap();
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].topic, "users");
-        assert_eq!(rows[0].lag, 2);
+        let snap = lag_rows(&commits(), |_t, _p| Some(9));
+        let narrowed = snap.narrowed(Some("users"));
+        assert_eq!(narrowed.len(), 1);
+        assert_eq!(narrowed[0].topic, "users");
+        assert_eq!(narrowed[0].lag, 2);
+        assert!(snap.covers("users") && snap.covers("orders"));
         assert_eq!(partitions_of(&commits(), Some("users")), vec![("users".to_string(), 0)]);
         assert_eq!(partitions_of(&commits(), None).len(), 3);
     }
@@ -260,23 +288,27 @@ mod tests {
     #[test]
     fn a_commit_beyond_the_head_reads_as_zero_not_negative() {
         // retention or a reset can leave a commit ahead of what we read
-        let rows = lag_rows(&commits(), Some("users"), |_t, _p| Some(3)).unwrap();
-        assert_eq!(rows[0].lag, 0);
+        let snap = lag_rows(&commits(), |_t, _p| Some(3));
+        assert!(snap.rows.iter().all(|r| r.lag >= 0));
     }
 
-    /// A partition whose watermark could not be read makes the group's lag
-    /// UNKNOWN. Omitting the row would silently under-report the total, which
-    /// is a confident wrong answer.
+    /// A partition whose head could not be read is NAMED, not dropped and not
+    /// fatal: the rows we have stay usable, and only the views covering that
+    /// partition must withhold their total.
     #[test]
-    fn an_unreadable_head_fails_the_group_rather_than_dropping_a_partition() {
-        let err = lag_rows(&commits(), None, |_t, p| if p == 1 { None } else { Some(50) }).unwrap_err();
-        assert!(err.contains("orders/1"), "the failing partition is named: {err}");
+    fn an_unreadable_head_is_named_per_partition_not_fatal() {
+        let snap = lag_rows(&commits(), |_t, p| if p == 1 { None } else { Some(50) });
+        assert_eq!(snap.unknown, vec![("orders".to_string(), 1)]);
+        assert_eq!(snap.rows.len(), 2, "the readable partitions still have rows");
+        assert!(snap.incomplete_for(Some("orders")), "orders cannot state a total");
+        assert!(!snap.incomplete_for(Some("users")), "users is unaffected by orders' trouble");
+        assert!(snap.incomplete_for(None), "nor can the cluster-wide view");
     }
 
     #[test]
     fn rows_come_back_in_a_stable_order() {
-        let rows = lag_rows(&commits(), None, |_t, _p| Some(99)).unwrap();
-        let keys: Vec<(String, i32)> = rows.iter().map(|r| (r.topic.clone(), r.partition)).collect();
+        let snap = lag_rows(&commits(), |_t, _p| Some(99));
+        let keys: Vec<(String, i32)> = snap.rows.iter().map(|r| (r.topic.clone(), r.partition)).collect();
         let mut sorted = keys.clone();
         sorted.sort();
         assert_eq!(keys, sorted);

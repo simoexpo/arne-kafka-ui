@@ -401,8 +401,11 @@ impl<'a> Watermarks<'a> {
 /// consumers list, every topic's tab and the group's own page, each of which
 /// filters it for itself.
 /// A group's lag rows, read-through: served from the shared cache when younger
-/// than `ttl_ms`, otherwise sampled once (concurrent askers wait rather than
-/// duplicating) and stored for every other view.
+/// than `ttl_ms`, otherwise sampled and stored for every other view. A
+/// concurrent asker waits for the sample already running instead of starting
+/// its own — but if that sample outlasts the wait AND nothing is cached, the
+/// waiter samples too: a page that renders nothing is worse than a duplicated
+/// read on an already-struggling cluster.
 ///
 /// The stored value is a PAIR — commits and the heads they were measured
 /// against, sampled together — so a cached row is old but never wrong. Public
@@ -412,10 +415,16 @@ impl<'a> Watermarks<'a> {
 pub fn group_lag_cached(
     handle: &ClusterHandle,
     group: &str,
-    ttl_ms: i64,
+    ttl_ms: Option<i64>,
     now: i64,
 ) -> Result<Stamped<LagSnapshot>, ApiError> {
-    if let Some(entry) = handle.group_lag.get(&group.to_string()).filter(|e| now - e.sampled_at < ttl_ms) {
+    let cached = handle.group_lag.get(&group.to_string());
+    // `None` means this group must not be read at all — only served if we
+    // happen to know it already.
+    let Some(ttl_ms) = ttl_ms else {
+        return cached.ok_or_else(|| ApiError::kafka(&handle.name, format!("{group} is not read from this view")));
+    };
+    if let Some(entry) = cached.filter(|e| now - e.sampled_at < ttl_ms) {
         return Ok(entry);
     }
     match handle.commits_flight.begin_or_wait(group.to_string(), single_flight::MAX_WAIT) {
@@ -466,21 +475,24 @@ fn is_coordinator_hiccup(message: &str) -> bool {
         .any(|needle| message.contains(needle))
 }
 
-/// Reads a group's commits and the heads for exactly those partitions, close
-/// together in time, and stores the pair.
+/// Reads a group's commits and then, immediately, the heads for exactly those
+/// partitions — and stores the pair.
+///
+/// The heads are read FRESH rather than taken from the shared cache, even
+/// though that costs a call: a cached head is older than the commits we just
+/// read, and `committed > end` cannot happen in Kafka, so showing it would be
+/// visibly incoherent. Reading heads just after the commits errs the only
+/// harmless way — by at most the microseconds between the two calls.
 fn sample_group_lag(handle: &ClusterHandle, group: &str) -> Result<Stamped<LagSnapshot>, ApiError> {
     let commits = fetch_group_commits(handle, group)?;
     let wanted = partitions_of(&commits, None);
-    // Heads for this group only, read now: the pair must be simultaneous.
-    let mut heads = Watermarks::labelled(handle, LAG_WATERMARK_TTL_MS, "lag");
+    let mut heads = Watermarks::always_fresh(handle, "lag");
     heads.ensure(&wanted)?;
-    let rows = lag_rows(&commits, None, |t, p| heads.get(t, p))
-        .map_err(|reason| ApiError::kafka(&handle.name, reason))?;
+    let snapshot = lag_rows(&commits, |t, p| heads.get(t, p));
     // Stamped on COMPLETION: the reads above can spend a second in coordinator
     // retries, and an entry born older than its own TTL would never serve a
     // hit — every poll would re-read every group.
     let sampled_at = now_ms();
-    let snapshot = LagSnapshot { rows };
     handle.group_lag.insert(group.to_string(), snapshot.clone(), sampled_at);
     Ok(Stamped { value: snapshot, sampled_at })
 }
@@ -557,16 +569,24 @@ pub async fn groups_lag(handle: Arc<ClusterHandle>, groups: Vec<String>) -> Resu
         let mut oldest_served: Option<i64> = None;
         for group in groups {
             // Every row here is displayed, so this view always wants the fast tier.
-            match group_lag_cached(&handle, &group, LIVE_TTL_MS, now) {
+            match group_lag_cached(&handle, &group, Some(LIVE_TTL_MS), now) {
                 Ok(entry) => {
                     oldest_served = Some(oldest_served.map_or(entry.sampled_at, |o: i64| o.min(entry.sampled_at)));
                     let rows = &entry.value.rows;
+                    // Undetermined, never a confident number, when the group
+                    // has committed nothing anywhere OR when a partition's head
+                    // could not be read — summing the rest would under-report.
+                    let incomplete = entry.value.incomplete_for(None);
                     out.push(GroupLagEntry {
                         group_id: group,
-                        // No commits anywhere means no position to be behind —
-                        // undetermined, never a confident 0.
-                        total_lag: if rows.is_empty() { None } else { Some(rows.iter().map(|r| r.lag).sum()) },
-                        error: None,
+                        total_lag: if rows.is_empty() || incomplete {
+                            None
+                        } else {
+                            Some(rows.iter().map(|r| r.lag).sum())
+                        },
+                        error: incomplete.then(|| {
+                            format!("{} partition(s) could not be read", entry.value.unknown.len())
+                        }),
                     });
                 }
                 Err(e) => out.push(GroupLagEntry {
@@ -629,7 +649,7 @@ async fn group_detail_uncached(handle: Arc<ClusterHandle>, group: String) -> Res
         // The same shared entry the consumers list uses, so opening a group's
         // page after seeing it in the list costs nothing. Errors keep their own
         // ApiError, so a broker timeout still reports as a timeout.
-        let entry = group_lag_cached(&handle, &group, super::group_lag_cache::LIVE_TTL_MS, now_ms())?;
+        let entry = group_lag_cached(&handle, &group, Some(super::group_lag_cache::LIVE_TTL_MS), now_ms())?;
         let (partitions, pair_at) = (entry.value.rows, entry.sampled_at);
         // A group with no broker-side entry AND no committed offsets does not exist.
         let info = match (info, partitions.is_empty()) {
@@ -778,11 +798,24 @@ pub async fn topic_consumers(handle: Arc<ClusterHandle>, topic: String) -> Resul
             let ttl = commits_ttl(&class, shows_rows_here);
             let outcome = group_lag_cached(&handle, g.name(), ttl, now);
             let pair_at = outcome.as_ref().ok().map(|e| e.sampled_at);
+            // Trouble on another topic is none of this tab's business; only a
+            // gap in THIS topic's partitions makes its total unstateable.
+            let missing_here = outcome
+                .as_ref()
+                .ok()
+                .map(|e| e.value.unknown.iter().filter(|(t, _)| *t == topic).count())
+                .unwrap_or(0);
             let narrowed = outcome
                 .map(|e| e.value.narrowed(Some(&topic)))
                 .map_err(|e| lag_error_reason(&e));
             match inspection_of(g.name(), g.state(), &class, narrowed) {
-                Inspection::Listed(row) => {
+                Inspection::Listed(mut row) => {
+                    if missing_here > 0 {
+                        // The rows we do have stay visible; the total does not
+                        // pretend to be complete.
+                        row.total_lag = None;
+                        row.error = Some(format!("{missing_here} partition(s) could not be read"));
+                    }
                     // Every listed row rests on a real sample, including one
                     // that says "assigned but nothing committed yet".
                     if let Some(at) = pair_at {

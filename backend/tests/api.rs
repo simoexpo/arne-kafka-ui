@@ -189,14 +189,10 @@ async fn topic_consumers_lists_groups_reading_the_topic() {
     assert_eq!(g["total_lag"], 0);
 }
 
-/// B2 perf regression: `/topics/{t}/consumers` must fetch metadata once and
-/// fetch each partition's watermark once per REQUEST, no matter how many
-/// consumer groups read that topic — not once per group. Two groups reading
-/// the same single-partition topic makes the fan-in trivially checkable: if
-/// group-lag lookups still repeated the metadata fetch and the watermark
-/// fetch per group, this would see 2 of each instead of 1.
+/// Two groups reading one topic both appear, each with its own lag — the
+/// per-group sampling must not make them shadow each other.
 #[tokio::test]
-async fn topic_consumers_shares_metadata_and_watermarks_across_groups() {
+async fn topic_consumers_lists_every_group_reading_the_topic() {
     let bootstrap = start_kafka().await;
     let topic = "fanin-topic";
     create_topic(&bootstrap, topic, 1).await;
@@ -757,7 +753,7 @@ async fn one_commits_read_serves_the_list_the_topic_tab_and_the_group_page() {
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
                 .as_millis() as i64;
-            let entry = group_lag_cached(&handle, "cv-group", 60_000, now).expect("lag rows");
+            let entry = group_lag_cached(&handle, "cv-group", Some(60_000), now).expect("lag rows");
             assert!(!entry.value.rows.is_empty(), "the shared entry carries this group's rows");
             group_offset_fetch_count("*", "cv-group")
         }
