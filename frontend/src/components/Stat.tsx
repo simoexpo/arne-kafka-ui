@@ -6,9 +6,11 @@
 // no visual change from either page's previous rendering.
 export function Stat({ label, value, warn, title }: { label: string; value: string; warn?: boolean; title?: string }) {
   return (
-    <div data-testid={`stat-${label}`} title={title} className={title ? 'cursor-help' : undefined}>
+    <div data-testid={`stat-${label}`} title={title} className={`min-w-0 ${title ? 'cursor-help' : ''}`}>
       <dt className="text-xs text-zinc-500">{label}</dt>
-      <dd className={`text-xl font-semibold ${warn ? 'text-red-600 dark:text-red-400' : ''}`}>{value}</dd>
+      {/* A value never spills out of its panel: numbers never reach the edge,
+          but a long name in a narrow column must clip inside its own box. */}
+      <dd className={`truncate text-xl font-semibold ${warn ? 'text-red-600 dark:text-red-400' : ''}`}>{value}</dd>
     </div>
   )
 }

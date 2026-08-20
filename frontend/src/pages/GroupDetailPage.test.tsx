@@ -45,18 +45,28 @@ describe('GroupDetailView', () => {
     expect(header).toHaveTextContent('3')
   })
 
-  it('names the assignor the group negotiated', async () => {
+  // Owner ruling 2026-08-20: named by its assignor class, alongside the other
+  // three figures as a plain fourth stat — same style, same row.
+  it('names the assignment strategy by its class', async () => {
     vi.mocked(client.getGroupDetail).mockResolvedValue(detail({ assignment_strategy: 'cooperative-sticky' }))
     renderWithQuery(<GroupDetailView cluster="prod" group="billing" />)
-    expect(await screen.findByText('cooperative-sticky')).toBeInTheDocument()
+    expect(await screen.findByTestId('stat-assignment strategy')).toHaveTextContent('CooperativeSticky')
   })
 
-  // An empty group negotiated nothing — saying "range" would be an invention.
-  it('does not invent an assignor for a group with no members', async () => {
+  // An unknown protocol is passed through, never mapped to a wrong class: a
+  // custom assignor or a KIP-848 group must read as what the broker said.
+  it('passes an unrecognised assignor through untranslated', async () => {
+    vi.mocked(client.getGroupDetail).mockResolvedValue(detail({ assignment_strategy: 'uniform' }))
+    renderWithQuery(<GroupDetailView cluster="prod" group="billing" />)
+    expect(await screen.findByTestId('stat-assignment strategy')).toHaveTextContent('uniform')
+  })
+
+  // An empty group negotiated nothing — saying "Range" would be an invention.
+  it('does not invent a strategy for a group with no members', async () => {
     vi.mocked(client.getGroupDetail).mockResolvedValue(detail({ assignment_strategy: '', members: [], state: 'Empty' }))
     renderWithQuery(<GroupDetailView cluster="prod" group="billing" />)
     expect(await screen.findByText('no active members')).toBeInTheDocument()
-    expect(screen.getByTestId('stat-assignor')).toHaveTextContent('—')
+    expect(screen.getByTestId('stat-assignment strategy')).toHaveTextContent('—')
   })
 
   it('shows members and per-partition lag', async () => {

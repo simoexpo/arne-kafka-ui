@@ -5,6 +5,7 @@ import { CopyButton } from '../components/CopyButton'
 import { Panel } from '../components/Panel'
 import { Stat } from '../components/Stat'
 import { StalenessChip } from '../components/StalenessChip'
+import { assignorClass } from '../lib/assignor'
 import { statedLag } from '../lib/lag'
 
 export function GroupDetailView({ cluster, group }: { cluster: string; group: string }) {
@@ -31,28 +32,25 @@ export function GroupDetailView({ cluster, group }: { cluster: string; group: st
       {/* Same shape as the overview page (owner ruling 2026-08-20): what this
           group consumes on the left, who is consuming it on the right, and the
           per-partition detail below. */}
-      <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+      <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
         <Panel title="Group" error={detail.error} loading={detail.isPending} hasData={detail.data !== undefined}>
           {detail.data && (
-            <>
-              <dl className="grid grid-cols-3 gap-2 text-sm">
-                <Stat label="topics" value={String(topics)} />
-                <Stat label="partitions" value={String(partitionCount)} />
-                <TotalLagStat rows={detail.data.partitions} unreadable={detail.data.unreadable_partitions} />
-              </dl>
-              <div
-                data-testid="stat-assignor"
-                className="mt-3 flex items-baseline gap-2 border-t border-zinc-200 pt-2 dark:border-zinc-800"
+            // The three figures need only their digits; the strategy name
+            // takes what is left, so nothing is squeezed to a quarter.
+            <dl className="grid grid-cols-[auto_auto_auto_minmax(0,1fr)] gap-3 text-sm">
+              <Stat label="topics" value={String(topics)} />
+              <Stat label="partitions" value={String(partitionCount)} />
+              <TotalLagStat rows={detail.data.partitions} unreadable={detail.data.unreadable_partitions} />
+              <Stat
+                label="assignment strategy"
+                value={assignorClass(detail.data.assignment_strategy)}
                 title={
                   detail.data.assignment_strategy
-                    ? 'the partition assignor these members negotiated'
-                    : 'no members, so the group has negotiated no assignor'
+                    ? assignorClass(detail.data.assignment_strategy)
+                    : 'no members, so no assignor has been negotiated'
                 }
-              >
-                <span className="text-xs text-zinc-500">assignor</span>
-                <span className="font-mono text-sm">{detail.data.assignment_strategy || '—'}</span>
-              </div>
-            </>
+              />
+            </dl>
           )}
         </Panel>
         <Panel
