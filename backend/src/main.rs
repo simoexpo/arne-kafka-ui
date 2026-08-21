@@ -13,11 +13,7 @@ async fn main() -> anyhow::Result<()> {
         )
         .init();
 
-    let path: PathBuf = std::env::args()
-        .nth(1)
-        .or_else(|| std::env::var("BETRACHTUNG_CONFIG").ok())
-        .unwrap_or_else(|| "config.yaml".into())
-        .into();
+    let path = config_path(std::env::args().nth(1), std::env::var("ARNE_CONFIG").ok());
     let config = Config::load(&path)?; // fail fast, precise message
 
     // Nothing samples in the background any more (owner design 2026-08-19):
@@ -33,4 +29,30 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("arne listening on port {}", config.server.port);
     axum::serve(listener, arne::api::app(state)).await?;
     Ok(())
+}
+
+/// First CLI argument, then `ARNE_CONFIG`, then the conventional filename.
+fn config_path(arg: Option<String>, env: Option<String>) -> PathBuf {
+    arg.or(env).unwrap_or_else(|| "config.yaml".into()).into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::config_path;
+
+    #[test]
+    fn the_cli_argument_wins_then_the_env_var_then_the_default() {
+        assert_eq!(
+            config_path(Some("a.yaml".into()), Some("b.yaml".into())),
+            std::path::PathBuf::from("a.yaml")
+        );
+        assert_eq!(
+            config_path(None, Some("b.yaml".into())),
+            std::path::PathBuf::from("b.yaml")
+        );
+        assert_eq!(
+            config_path(None, None),
+            std::path::PathBuf::from("config.yaml")
+        );
+    }
 }

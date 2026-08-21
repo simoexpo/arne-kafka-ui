@@ -6,5 +6,8 @@ clusters:
   # - name: staging
   #   bootstrap: localhost:9093
     # schema_registry: { url: http://localhost:8081 }
+    # Diagnostic: report what Arne asked this cluster's brokers, per broker and
+    # per API, at /api/clusters/<name>/broker-calls. 0 (default) = off.
+    # broker_call_stats_ms: 2000
 server: { port: 8080 }
 limits: { sampler_interval_secs: 10, timeline_scan_budget: 250000 }

@@ -115,9 +115,10 @@ not enough to describe a modern group.
   `ListOffsets`, `ListConsumerGroups`, `DescribeConsumerGroups` and
   `ListConsumerGroupOffsets` are bound directly to librdkafka, replacing
   per-broker fan-outs and per-partition loops with single batched calls.
-- **Costs are measured, not assumed.** A diagnostic endpoint exposes what
-  librdkafka counted itself sending, per broker and per API, so a page's cost
-  is a number rather than an opinion.
+- **Costs are measured, not assumed.** `/api/clusters/<name>/broker-calls`
+  exposes what librdkafka counted itself sending, per broker and per API
+  (enable per cluster with `broker_call_stats_ms`), so a page's cost is a
+  number rather than an opinion.
 
 ## Development
 

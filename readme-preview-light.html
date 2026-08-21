@@ -1246,9 +1246,10 @@ groups. Lag is fetched for the rows on screen and nothing else.</li>
 <code class="notranslate">ListOffsets</code>, <code class="notranslate">ListConsumerGroups</code>, <code class="notranslate">DescribeConsumerGroups</code> and<br>
 <code class="notranslate">ListConsumerGroupOffsets</code> are bound directly to librdkafka, replacing<br>
 per-broker fan-outs and per-partition loops with single batched calls.</li>
-<li><strong>Costs are measured, not assumed.</strong> A diagnostic endpoint exposes what<br>
-librdkafka counted itself sending, per broker and per API, so a page's cost<br>
-is a number rather than an opinion.</li>
+<li><strong>Costs are measured, not assumed.</strong> <code class="notranslate">/api/clusters/&lt;name&gt;/broker-calls</code><br>
+exposes what librdkafka counted itself sending, per broker and per API<br>
+(enable per cluster with <code class="notranslate">broker_call_stats_ms</code>), so a page's cost is a<br>
+number rather than an opinion.</li>
 </ul>
 <h2>Development</h2>
 <p>Requires Rust (stable), Node 20.19+, Docker, and optionally<br>
