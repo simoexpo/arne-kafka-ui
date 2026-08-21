@@ -1,8 +1,9 @@
 <div align="center">
 
-<img src="frontend/public/logo.svg" alt="Arne" width="150">
-
-# Arne
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/wordmark-dark.svg">
+  <img src="docs/images/wordmark-light.svg" alt="Arne" width="380">
+</picture>
 
 **A fast, honest Kafka UI.**
 
