@@ -1,6 +1,19 @@
-.superpowers/
+# Local cluster config: points at your brokers, may hold credentials.
+config.yaml
+
+# Build output and dependencies
 backend/target/
 node_modules/
-config.yaml
-# per-user tool state: absolute paths, never shared
+
+# Per-user tool state: absolute paths, never shared.
 .claude/settings.local.json
+.superpowers/
+
+# Never publishable, and the classic accident in a public repo.
+.env
+.env.*
+
+# Test and coverage artefacts
+coverage/
+*.log
+.DS_Store
