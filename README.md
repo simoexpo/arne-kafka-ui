@@ -20,8 +20,7 @@ it measured it.
 
 ## What Arne is trying to be
 
-Several numbers a Kafka UI shows you are harder to state truthfully than they
-look, and the difficulty is in Kafka's own APIs:
+Some numbers in Kafka are harder to state truthfully than they look:
 
 - A topic's "message count" is a subtraction of two offsets. Sample them a
   moment apart and the answer was never true at any instant.
@@ -100,8 +99,8 @@ Write operations come next, starting with consumer-group offset management.
 Groups using the new consumer protocol are reported correctly — state, members,
 assignor and per-partition ownership — by describing them through their
 coordinator. Read via the legacy `DescribeGroups` API, the same group comes back
-as `Dead` with no members *while it is consuming happily*, so anything built on
-that API alone will misreport it.
+as `Dead` with no members *while it is consuming happily* — so that API alone is
+not enough to describe a modern group.
 
 ## How it is built
 

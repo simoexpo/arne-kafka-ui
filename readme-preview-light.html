@@ -1136,8 +1136,7 @@ it measured it.</p>
 </div>
 <hr>
 <h2>What Arne is trying to be</h2>
-<p>Several numbers a Kafka UI shows you are harder to state truthfully than they<br>
-look, and the difficulty is in Kafka's own APIs:</p>
+<p>Some numbers in Kafka are harder to state truthfully than they look:</p>
 <ul>
 <li>A topic's "message count" is a subtraction of two offsets. Sample them a<br>
 moment apart and the answer was never true at any instant.</li>
@@ -1232,8 +1231,8 @@ Write operations come next, starting with consumer-group offset management.</p>
 <p>Groups using the new consumer protocol are reported correctly — state, members,<br>
 assignor and per-partition ownership — by describing them through their<br>
 coordinator. Read via the legacy <code class="notranslate">DescribeGroups</code> API, the same group comes back<br>
-as <code class="notranslate">Dead</code> with no members <em>while it is consuming happily</em>, so anything built on<br>
-that API alone will misreport it.</p>
+as <code class="notranslate">Dead</code> with no members <em>while it is consuming happily</em> — so that API alone is<br>
+not enough to describe a modern group.</p>
 <h2>How it is built</h2>
 <ul>
 <li><strong>One binary.</strong> Rust and axum, with the React frontend embedded via<br>
