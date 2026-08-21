@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { nextPause } from './pauseMachine'
 
-// Every table entry below states `inspecting` explicitly (design spec v1.7,
+// Every table entry below states `inspecting` explicitly (
 // "Inspection pause") even where a case doesn't exercise it — a decision
 // table is exactly the place a reader should never have to guess a default.
 describe('nextPause', () => {
@@ -127,7 +127,7 @@ describe('nextPause', () => {
       })
     })
 
-    // Inspection pause dominance (design spec v1.7): an open inspection is a
+    // Inspection pause dominance: an open inspection is a
     // stronger "don't move things" signal than scroll position — pinning at
     // top must never implicitly resume, or implicitly flush, while any row
     // is still expanded.
@@ -210,7 +210,7 @@ describe('nextPause', () => {
       })
     })
 
-    // M1: inspection dominance (design spec v1.7) applies here exactly like
+    // M1: inspection dominance applies here exactly like
     // it does to scrollPinnedTop — catching the tail while a row is expanded
     // must never flush/merge the buffer into the list out from under the
     // reader's open inspection. Nothing about the pause reason changes
@@ -280,7 +280,7 @@ describe('nextPause', () => {
     })
   })
 
-  // Design spec v1.7: "Live resumes automatically when the LAST inspection
+  // Live resumes automatically when the LAST inspection
   // closes while pinned at top (mirroring auto-pause)." The caller (Timeline)
   // only ever fires this event once it has already confirmed both
   // preconditions itself (the just-closed inspection was the last one, and

@@ -102,7 +102,7 @@ try {
     undefined,
     { timeout: 5000 },
   )
-  // Inspection pause (spec v1.7): an expanded row means live arrivals BUFFER
+  // Inspection pause: an expanded row means live arrivals BUFFER
   // into the pill instead of changing the top row. Wait for the pill to
   // count one (proves buffering), then flush via the pill — inspections
   // survive a flush by spec, and the flush is what triggers the prepend
@@ -195,7 +195,7 @@ try {
     fail(`an offset jump did not leave its target row at the bottom of the viewport: ${JSON.stringify(targetPlacement)}`)
   }
 
-  // Filter grammar v2 + autocomplete (design spec 2026-08-17), REAL BROWSER:
+  // Filter grammar + autocomplete, REAL BROWSER:
   // proposals must include fields extracted from the actual window content,
   // and a field-equality expression must drive a scan that renders matches.
   const filterInput = page.getByLabel('filter messages')

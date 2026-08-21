@@ -76,7 +76,7 @@ function completeField(field: string, typed: string): string | null {
   return out === typed ? null : out
 }
 
-// Dropdown rows for the filter box (design spec 2026-08-17 "Autocomplete"):
+// Dropdown rows for the filter box:
 // pure function of the typed text and the known field paths (already sorted
 // by extractFieldPaths, `[]` canonical for arrays). Field rows replace the
 // bare `value.` row when fields are known; a quoted or completed-operator

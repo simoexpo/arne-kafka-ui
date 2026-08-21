@@ -390,7 +390,7 @@ limits: { sampler_interval_secs: 5 }
 
     #[test]
     fn unquoted_var_in_flow_mapping_interpolates() {
-        // Spec's canonical syntax (design spec line ~166): unquoted ${VAR} inside
+        // Canonical syntax: unquoted ${VAR} inside
         // a flow mapping. This must remain valid, since `{`/`}` are YAML flow
         // indicators and become invalid syntax if left unquoted-but-unsubstituted.
         let yaml = "clusters:\n  - name: prod\n    bootstrap: broker1:9092\n    sasl: { mechanism: SCRAM-SHA-512, username: app, password: ${TEST_KAFKA_PW} }\n";

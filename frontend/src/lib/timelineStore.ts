@@ -35,14 +35,10 @@ function findOffsetIndex(arr: MessageOut[], offset: number): number {
 }
 
 // ===========================================================================
-// v1.6 sliding window store (spec: docs/superpowers/specs/2026-08-13-
-// messages-timeline-design.md, "Sliding window (v1.6 — owner ruling)").
-// `Timeline.tsx` drives `createSlidingWindowStore` exclusively — see
-// docs/superpowers/specs/timeline-design-decisions.md for this file's
-// predecessor.
+// Sliding window store. `Timeline.tsx` drives `createSlidingWindowStore`
+// exclusively.
 //
-// Design summary (see the doc comments below for the exact per-rule
-// reasoning): the store tracks two per-partition position maps — `bottomMap`
+// How it works (the per-rule reasoning is on each rule below): the store tracks two per-partition position maps — `bottomMap`
 // (exclusive upper bound for reading older) and `topMap` (inclusive lower
 // bound for reading newer) — updated on every page insert and on every
 // row-exact trim, so a cursor minted from either map, followed in the

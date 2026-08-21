@@ -1,7 +1,8 @@
 # Arne — Kafka UI
 
 Fast, reliable Kafka UI for developers. Read-only v1: topic monitoring +
-message lookup. Design spec: `docs/superpowers/specs/2026-08-09-arne-kafka-ui-design.md`.
+message lookup. The code and its tests are the specification — there is no
+separate design document to keep in sync.
 
 ## Stack
 
@@ -29,4 +30,4 @@ message lookup. Design spec: `docs/superpowers/specs/2026-08-09-arne-kafka-ui-de
 
 ## Dev commands
 
-(justfile to be created during implementation: `just dev`, `just test`, `just docker`)
+`just dev`, `just test`, `just docker` — see the `justfile`.

@@ -1548,7 +1548,7 @@ async fn timeline_forward_position_adjacent_drop_does_not_livelock() {
     assert_eq!(seen_set, expected, "every record must be served, with no losses");
 }
 
-/// Superseded by spec v1.6 (owner ruling): direction now belongs to the
+/// Superseded: direction now belongs to the
 /// REQUEST, not the cursor blob — a cursor minted by a back page must be
 /// followable with `direction=forward` (and vice versa), since the sliding
 /// window re-reads trimmed regions by flipping direction against an edge
@@ -1608,7 +1608,7 @@ async fn timeline_direction_flip_reads_back_pages_continuation_forward_and_gets_
     assert_eq!(f, expected_m, "forward-from-the-back-page's-own-continuation-cursor must read back exactly M: {f:?}");
 }
 
-/// Anchor partition property (spec v1.6, binding acceptance test): for
+/// Anchor partition property (binding acceptance test): for
 /// anchor=timestamp, `back(anchor)` and `forward(anchor)` split the topic
 /// disjointly and completely per partition — reading upward from a jump's
 /// anchor is gap-free and overlap-free against the downward read. Same
@@ -1761,7 +1761,7 @@ async fn timeline_offset_anchor_forward_past_the_high_watermark_reports_an_in_st
     );
 }
 
-/// Documents and locks down the cursor's wire-format contract (spec v1.6:
+/// Documents and locks down the cursor's wire-format contract (
 /// "a documented, client-constructible format"): base64 of the compact JSON
 /// `{"direction":"back"|"forward","positions":[[partition,offset],...]}`.
 /// This builds that JSON *by hand* — the way an external client would, with

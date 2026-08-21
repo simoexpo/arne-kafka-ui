@@ -722,7 +722,7 @@ describe('Timeline', () => {
     })
   })
 
-  // Design spec v1.7 "Inspection pause": expanding a row to inspect it is a
+  // Inspection pause: expanding a row to inspect it is a
   // stronger "don't move things" signal than scroll position — while ANY row
   // is expanded, live messages buffer to the pill regardless of scroll
   // position (even pinned at top), and the top-pin auto-resume rule is
@@ -1126,7 +1126,7 @@ describe('Timeline', () => {
       expect(FakeEventSource.instances[2].url).toBe(url({ direction: 'forward', limit: '100', cursor: cur({ 0: 3 }) }))
     })
 
-    // Scroll anchoring (design spec v1.3, owner feedback 2026-08-15; row-
+    // Scroll anchoring (row-
     // identity rewrite, fix round 1 M1): a forward page's rows rank newer,
     // so they land near the TOP of the newest-first merge — i.e. they
     // prepend above whatever the reader was looking at. Without
@@ -2106,7 +2106,7 @@ describe('Timeline', () => {
     // `timelineStore.test.ts`.
   })
 
-  // Window cap honesty (design spec v1.4, owner ruling 2026-08-15): the
+  // Window cap honesty: the
   // 2000-row default cap is too large to exercise here, so these tests pass
   // a small `windowCap` prop (test-only — production always uses the
   // default) to force drops with just a handful of messages.
@@ -2439,7 +2439,7 @@ describe('Timeline', () => {
     })
   })
 
-  // Acceptance bar (design spec v1.6, task-3 plan): the jsdom PROPERTY WALK
+  // Acceptance bar: the jsdom PROPERTY WALK
   // — scripted FakeEventSource pages with a small cap, scroll down past it
   // (content never resets — rows present before an insert remain except
   // trimmed ones), then scroll up re-fetching trimmed regions via the
@@ -2583,7 +2583,7 @@ describe('Timeline', () => {
 
       // Recovering p0·9 over cap(2) evicts the oldest (p0·7) — exactly the
       // row the LAST back page had itself just added. Reports exhausted:
-      // re-attaches (spec: "re-attaches when a forward page reports
+      // re-attaches (when a forward page reports
       // exhausted").
       const idx = FakeEventSource.instances.length - 1
       await emit(idx, 'match', mk(9))

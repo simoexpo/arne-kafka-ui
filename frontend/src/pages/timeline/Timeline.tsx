@@ -30,10 +30,10 @@ import { useTimelinePage } from './useTimelinePage'
 import { TimelineHeader } from './TimelineHeader'
 
 const PAGE_LIMIT = 100
-// ~20 auto-continues per gesture, per the design spec; the policy lives in
+// ~20 auto-continues per gesture; the policy lives in
 // lib/timeline/postPage.ts.
 const ITERATION_CAP = 20
-// Live-buffer cap while paused/detached (design spec).
+// Live-buffer cap while paused/detached.
 const BUFFER_CAP = 500
 // Settling normally resolves within a couple of scroll events; this caps a pathological non-settling case.
 const MAX_SETTLE_ATTEMPTS = 10
@@ -179,17 +179,32 @@ export function Timeline({
   // an empty page that auto-continues further.
   const listRef = useRef<MessageListHandle>(null)
   const pendingScrollEdgeRef = useRef<'top' | 'bottom' | null>(null)
-  // See docs/superpowers/specs/timeline-design-decisions.md ("MessageList.scrollToEdge's return value") for why re-snapping is needed at all.
+  // Why re-snapping is needed at all: setting `el.scrollTop` to land a jump
+  // makes a real browser fire a genuine native 'scroll' event (jsdom does
+  // not, which is why this once shipped untested). That echo arrives exactly
+  // at the bottom, satisfies the bottom sentinel, and fires an unsolicited
+  // loadOlder a moment after landing.
+  //
+  // Two cheaper fixes were tried and REFUTED by a real-browser probe, so do
+  // not reach for them again: (1) swallow the next scroll event with a
+  // one-shot flag — it can swallow a genuinely later, unrelated scroll;
+  // (2) remember the exact scrollTop we set and match on it — the
+  // virtualizer keeps measuring real row heights (ResizeObserver) for
+  // several event cycles after landing, so scrollHeight moves under you
+  // (measured: 3405 at arm time, 3768 by the first echo) and the value
+  // never matches. Hence SETTLING, not a single value.
   const settlingRef = useRef<SettlingState | null>(null)
   const settleAttemptsRef = useRef(0)
 
   // Scroll anchoring: capture the row at index 0 before a forward batch (or
   // the last committed row before a back commit — see runPage's `onPageEnd`
   // for the capture site); after render, find that same row's new index and
-  // adjust scrollTop by its offset delta. Robust to a same-commit trim below
-  // the reader, which a total-height delta is not — see
-  // docs/superpowers/specs/timeline-design-decisions.md ("Scroll anchoring:
-  // rejected total-height-delta approach") for why.
+  // adjust scrollTop by its offset delta. Anchoring to a row's IDENTITY, not
+  // to a total-height delta: the delta approach ("added - removed") was tried
+  // and is wrong the instant an insert also trims rows BELOW the viewport in
+  // the same commit — routine at a small cap — because the trim shrinks total
+  // height without moving anything the reader can see, so the two cancel
+  // toward zero and the reader gets relocated anyway.
   const pendingAnchorRef = useRef<{ partition: number; offset: number; priorTop: number } | null>(null)
 
   // Owner-requested (2026-08-15): the row landed on by an offset jump gets a
@@ -216,7 +231,7 @@ export function Timeline({
   // never actually visible. The global store this reads from is unchanged.
   const timeDisplayMode = useTimeDisplayMode()
 
-  // Attached vs detached windows (design spec v1.3): the loaded window is
+  // Attached vs detached windows: the loaded window is
   // either ATTACHED to now (opened at latest, or forward-paginated until the
   // topic reported exhausted) or DETACHED (any historical jump — beginning,
   // offset, timestamp — or a filter settle that re-reads from the
@@ -259,7 +274,7 @@ export function Timeline({
   const pauseReasonRef = useRef<PauseReason>('none')
   const liveBufferRef = useRef(createLiveBuffer(BUFFER_CAP))
 
-  // Inspection pause (design spec v1.7) + expansion identity ownership (fix:
+  // Inspection pause + expansion identity ownership (fix:
   // expansion state survives virtualization, owned by identity): Timeline is
   // the single owner of which (partition, offset) identities are currently
   // expanded — MessageRow is a controlled component with no local state of
@@ -290,8 +305,7 @@ export function Timeline({
   // override a STALE exhausted flag when a trim (page or live insert) has
   // touched that side since. Cleared the instant a fresh page for that
   // direction lands; set the instant a trim touches that side. See
-  // `noteOutcome` below and its two call sites. (Predecessor machinery this
-  // replaced: docs/superpowers/specs/timeline-design-decisions.md.)
+  // `noteOutcome` below and its two call sites.
   const bottomTrimmedSinceRef = useRef(false)
   const topTrimmedSinceRef = useRef(false)
 
@@ -966,9 +980,12 @@ export function Timeline({
     runPage('back', withFilter({ direction: 'back', limit: PAGE_LIMIT, cursor }), { resetIteration: true, attach: false })
   }
   // `edges().top === null` here means nothing more to load; `state.exhausted
-  // .forward` already covers that case above. See docs/superpowers/specs/
-  // timeline-design-decisions.md ("loadNewer's deleted forward-anchor
-  // fallback") for why no fallback is needed for a null top edge.
+  // .forward` already covers that case above. No fallback is needed because
+  // every jump ('beginning', 'offset', 'timestamp') is a FORWARD-anchored
+  // bootstrap, so the top map is always authoritatively seeded. Reintroduce a
+  // back-anchored bootstrap and this needs one: re-issue the same anchor with
+  // `direction: 'forward'` when the top edge is null but forward is not
+  // exhausted.
   const loadNewer = () => {
     if (state.exhausted.forward && !topTrimmedSinceRef.current) return
     const cursor = storeRef.current.edges().top
@@ -1018,7 +1035,7 @@ export function Timeline({
       return
     }
     const { pinnedTop, nearBottom } = classifyScroll({ scrollTop, scrollHeight, clientHeight })
-    // Inspection pause (design spec v1.7): closing the LAST inspection is a
+    // Inspection pause: closing the LAST inspection is a
     // click, not a scroll event — handleToggleExpand (and noteOutcome's own
     // eviction pruning) consult this to know whether the viewport happens to
     // be pinned at top right now.
@@ -1204,7 +1221,7 @@ export function Timeline({
       {continueDirection === 'back' ? (
         <ContinueScanButton label={continueScanLabel} onClick={continueScan} />
       ) : (
-        // Captions (design spec v1.6): "beginning of topic" only when the
+        // Captions: "beginning of topic" only when the
         // bottom edge is genuinely the topic start — exhausted AND not
         // stale (see bottomTrimmedSinceRef's own comment: a live/forward
         // trim after a genuine exhausted:true response can slide the

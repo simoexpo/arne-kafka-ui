@@ -3,7 +3,7 @@ import type { PauseReason } from './model'
 export interface PauseInput {
   pauseReason: PauseReason
   attached: boolean
-  // True while at least one message row is expanded (design spec v1.7,
+  // True while at least one message row is expanded (
   // "Inspection pause"): dominates the scrollPinnedTop resume rule below —
   // an open inspection is a stronger "don't move things" signal than scroll
   // position, so pinning at top never implicitly resumes (or flushes) while
@@ -27,7 +27,7 @@ export type PauseEvent =
   // this once it has already confirmed both preconditions itself — this WAS
   // the last inspection, and the viewport is currently pinned at top — so
   // the decision left here is exactly scrollPinnedTop's own resume rule
-  // (design spec v1.7: "mirroring auto-pause").
+  // (mirroring auto-pause).
   | 'lastInspectionClosed'
   // A jump landed (any kind — now/beginning/offset/timestamp). This is
   // the ONE transition every caller must route through this table (Timeline
@@ -55,7 +55,7 @@ export function nextPause({ pauseReason, attached, inspecting, intent }: PauseIn
       if (pauseReason === 'none') return idle('explicit')
       return { pause: 'none', flush: true, jumpToNow: false, scrollTop: false }
     case 'scrollPinnedTop':
-      // Inspection pause dominance (design spec v1.7): never implicitly
+      // Inspection pause dominance: never implicitly
       // resume (or flush) while any row is still expanded.
       if (inspecting) return idle(pauseReason)
       return attached && pauseReason === 'auto'

@@ -109,7 +109,7 @@ describe('useLiveTail', () => {
     expect(d.onLiveInsert).not.toHaveBeenCalled()
   })
 
-  // Design spec v1.7 "Inspection pause": an open inspection buffers live
+  // Inspection pause: an open inspection buffers live
   // messages regardless of attachment/pause state — even the ordinarily
   // "merge live" case (attached, unpaused).
   it('a matching message buffers instead of merging while inspecting, even attached and unpaused', () => {

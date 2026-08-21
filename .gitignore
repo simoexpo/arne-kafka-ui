@@ -2,3 +2,5 @@
 backend/target/
 node_modules/
 config.yaml
+# per-user tool state: absolute paths, never shared
+.claude/settings.local.json

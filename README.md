@@ -70,9 +70,9 @@ it.
 Each broker's advertised listener assumes Docker Desktop (macOS/Windows,
 which resolves `host.docker.internal` automatically); on plain Docker
 Engine on Linux, add `extra_hosts: ["host.docker.internal:host-gateway"]`
-to the `kafka` and `kafka2` services in `docker-compose.dev.yml`, or use a
-dual-listener setup instead (see
-`docs/superpowers/plans/2026-08-11-messages-ui-and-packaging-followups.md`).
+to the `kafka` and `kafka2` services in `docker-compose.dev.yml`, or give
+each broker a dual listener (one advertised to the host, one for in-network
+traffic) instead.
 
 The smoke check expects `just dev` (or the raw backend+vite equivalent)
 already running and drives it with Playwright via `channel: 'chrome'` —

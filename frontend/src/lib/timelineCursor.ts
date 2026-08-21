@@ -1,5 +1,5 @@
 // Client-side mirror of the backend's cursor codec (see the `Cursor` doc
-// comment in `backend/src/message/timeline/cursor.rs`, spec v1.6 "Sliding window").
+// comment in `backend/src/message/timeline/cursor.rs`).
 //
 // Wire format (documented contract, not an implementation detail): standard-
 // alphabet base64 (with padding — `+`/`/`/`=`, NOT the URL-safe variant) of

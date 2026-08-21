@@ -242,7 +242,7 @@ mod tests {
         assert!(at_edge(positions[0].1, 0, 10, Direction::Back), "clamped position at the edge must report exhausted, not loop forever");
     }
 
-    /// Anchor partition property (spec v1.6, binding acceptance test),
+    /// Anchor partition property (binding acceptance test),
     /// cheap variant: for `Anchor::Beginning`, `back(anchor)` has nothing to
     /// read (already at the low watermark) while `forward(anchor)` reads
     /// everything — a trivial but real instance of "back(anchor) and

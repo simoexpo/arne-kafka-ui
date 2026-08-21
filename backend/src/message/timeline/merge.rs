@@ -20,7 +20,7 @@ pub(super) fn merge_prefers(direction: Direction, candidate: &RawRecord, current
     candidate.partition < current_best.partition
 }
 
-/// Owner's ordering ruling (spec v1.2 §Out-of-order policy): within one
+/// Ordering rule: within one
 /// partition, offset order ALWAYS; across partitions, merge by timestamp
 /// (ties: smaller partition id; null ts = i64::MIN). A pure-timestamp sort
 /// would invert same-partition offset order under non-monotonic producer

@@ -12,7 +12,7 @@ export interface UseLiveTailDeps {
   predicateRef: RefObject<(m: MessageOut) => boolean>
   attachedRef: RefObject<boolean>
   pauseReasonRef: RefObject<PauseReason>
-  // True while at least one message row is expanded (design spec v1.7,
+  // True while at least one message row is expanded (
   // "Inspection pause"): forces buffering even in the ordinarily "merge
   // live" case (attached, unpaused) — an open inspection is a stronger
   // "don't move things" signal than either of those.

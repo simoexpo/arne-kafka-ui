@@ -71,7 +71,7 @@ export function TimelineHeader({
             <StalenessChip asOf={newestTsMs} failed={false} />
           )
         ) : (
-          // Detached (design spec v1.3, owner ruling 2026-08-15): the
+          // Detached: the
           // toggle IS the mode signal — always shown lit paused (live
           // rendering is off by definition while detached, regardless of
           // pauseReason, which keeps driving buffering underneath), no

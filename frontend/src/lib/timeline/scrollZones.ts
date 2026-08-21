@@ -1,6 +1,6 @@
-// Design spec threshold: roughly half a row.
+// Threshold: roughly half a row.
 const TOP_PIN_THRESHOLD = 20
-// Design spec: "scroll down -> next 100 older".
+// Scroll down -> next 100 older.
 const BOTTOM_PIN_THRESHOLD = 20
 
 export interface ScrollMetrics {

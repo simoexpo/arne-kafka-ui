@@ -1,7 +1,7 @@
 import type { MessageOut } from '../api/types'
 
 // Field paths for autocomplete, extracted from the window's own JSON-able
-// values (design spec 2026-08-17 "Field-path source"). Scalar leaves only —
+// values. Scalar leaves only —
 // the grammar's path filters match scalars only. Arrays descend via index 0
 // (owner ruling: `items.0.sku` is directly usable). Caps keep a huge window
 // from stalling typing; callers memoize per rows identity.

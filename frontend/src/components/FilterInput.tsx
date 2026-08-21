@@ -17,7 +17,7 @@ export function FilterInput({
   ariaLabel?: string
   className?: string
   fullWidth?: boolean
-  // Autocomplete rows for the current text (design spec 2026-08-17). Without
+  // Autocomplete rows for the current text. Without
   // this prop the input has no combobox semantics at all — the other filter
   // boxes (topics, groups) stay plain inputs.
   proposals?: (text: string) => readonly string[]

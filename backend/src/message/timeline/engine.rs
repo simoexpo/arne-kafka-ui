@@ -351,7 +351,7 @@ fn all_partitions_at_edge(positions: &[(i32, i64)], watermarks: &[(i32, i64, i64
     })
 }
 
-/// Sends one chunk's matches in display order (spec v1.2's Out-of-order
+/// Sends one chunk's matches in display order (the out-of-order
 /// policy: offset order within a partition always, timestamp order across
 /// partitions — see `chunk_display_order`), then the chunk's own `Progress`
 /// event. Returns `false` the moment a send fails, so the caller stops

@@ -29,7 +29,7 @@ impl Default for Direction {
 
 /// An opaque, per-partition offset map plus the direction it was minted in.
 ///
-/// **Wire format (documented contract, spec v1.6):** standard-alphabet
+/// **Wire format (documented contract):** standard-alphabet
 /// base64 of the compact JSON `{"positions":[[partition,offset],...]
 /// ,"direction":"back"|"forward"}` — `positions` is an array of 2-element
 /// `[i32, i64]` pairs, one per partition, in no particular guaranteed
