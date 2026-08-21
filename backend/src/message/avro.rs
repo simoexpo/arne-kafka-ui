@@ -29,9 +29,10 @@ pub fn parse_schema(schema_json: &str) -> Result<Schema, String> {
 pub fn decode_with_schema(schema: &Schema, datum: &[u8]) -> Result<String, String> {
     // TODO: migrate to GenericDatumReader (tracked in plan 2 follow-ups)
     #[allow(deprecated)]
-    let value = apache_avro::from_avro_datum(schema, &mut &datum[..], None).map_err(|e| format!("avro decode: {e}"))?;
-    let json: serde_json::Value = serde_json::Value::try_from(value)
-        .map_err(|e| format!("avro to json: {e}"))?;
+    let value = apache_avro::from_avro_datum(schema, &mut &datum[..], None)
+        .map_err(|e| format!("avro decode: {e}"))?;
+    let json: serde_json::Value =
+        serde_json::Value::try_from(value).map_err(|e| format!("avro to json: {e}"))?;
     serde_json::to_string(&json).map_err(|e| format!("json render: {e}"))
 }
 
@@ -48,8 +49,8 @@ pub fn decode(schema_json: &str, datum: &[u8]) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use apache_avro::types::{Record, Value};
     use apache_avro::Schema;
+    use apache_avro::types::{Record, Value};
 
     /// The record's fully qualified name IS the subject under the
     /// record-name strategy — namespace + name, a possibly-already-dotted

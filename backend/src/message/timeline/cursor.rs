@@ -80,7 +80,9 @@ impl Cursor {
     }
 
     pub fn decode(s: &str) -> Result<Cursor, String> {
-        let bytes = base64::engine::general_purpose::STANDARD.decode(s).map_err(|e| e.to_string())?;
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(s)
+            .map_err(|e| e.to_string())?;
         serde_json::from_slice(&bytes).map_err(|e| e.to_string())
     }
 }
@@ -91,7 +93,10 @@ mod tests {
 
     #[test]
     fn cursor_roundtrips() {
-        let c = Cursor { direction: Direction::Back, positions: vec![(0, 60), (1, 5)] };
+        let c = Cursor {
+            direction: Direction::Back,
+            positions: vec![(0, 60), (1, 5)],
+        };
         let c2 = Cursor::decode(&c.encode()).unwrap();
         assert_eq!(c2.direction, Direction::Back);
         assert_eq!(c2.positions, vec![(0, 60), (1, 5)]);

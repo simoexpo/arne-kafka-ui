@@ -1,8 +1,8 @@
 use crate::error::ApiError;
 use crate::message::schema_registry::{SchemaRegistry, SubjectError};
 use crate::state::AppState;
-use axum::extract::{Path, Query, State};
 use axum::Json;
+use axum::extract::{Path, Query, State};
 use serde::Deserialize;
 use serde_json::json;
 use std::sync::Arc;
@@ -27,25 +27,44 @@ fn resolve_strategy(subject: &str, topics: &[String], fqn: Option<&str>) -> Subj
         if let Some(t) = subject.strip_suffix(suffix)
             && topics.iter().any(|name| name == t)
         {
-            return SubjectStrategy { strategy: Some("topic_name"), topic: Some(t.to_string()), role: Some(role) };
+            return SubjectStrategy {
+                strategy: Some("topic_name"),
+                topic: Some(t.to_string()),
+                role: Some(role),
+            };
         }
     }
     if let Some(fqn) = fqn {
         if subject == fqn {
-            return SubjectStrategy { strategy: Some("record_name"), topic: None, role: None };
+            return SubjectStrategy {
+                strategy: Some("record_name"),
+                topic: None,
+                role: None,
+            };
         }
         if let Some(t) = subject.strip_suffix(&format!("-{fqn}"))
             && topics.iter().any(|name| name == t)
         {
-            return SubjectStrategy { strategy: Some("topic_record_name"), topic: Some(t.to_string()), role: None };
+            return SubjectStrategy {
+                strategy: Some("topic_record_name"),
+                topic: Some(t.to_string()),
+                role: None,
+            };
         }
     }
-    SubjectStrategy { strategy: None, topic: None, role: None }
+    SubjectStrategy {
+        strategy: None,
+        topic: None,
+        role: None,
+    }
 }
 
 fn registry_for(state: &AppState, cluster: &str) -> Result<Arc<SchemaRegistry>, ApiError> {
     let handle = state.registry.get(cluster)?;
-    handle.schema_registry.clone().ok_or_else(|| ApiError::no_schema_registry(cluster))
+    handle
+        .schema_registry
+        .clone()
+        .ok_or_else(|| ApiError::no_schema_registry(cluster))
 }
 
 fn subject_error(cluster: &str, subject: &str, e: SubjectError) -> ApiError {
@@ -64,7 +83,9 @@ pub async fn list(
         .subjects()
         .await
         .map_err(|e| subject_error(&cluster, "", e))?;
-    Ok(Json(json!({ "subjects": subjects, "as_of": crate::util::now_ms() })))
+    Ok(Json(
+        json!({ "subjects": subjects, "as_of": crate::util::now_ms() }),
+    ))
 }
 
 /// The registry URL comes from the user's own config, but embedded
@@ -134,7 +155,9 @@ pub async fn subject_of_id(
         SubjectError::NotFound => ApiError::schema_id_not_found(&cluster, id),
         other => subject_error(&cluster, "", other),
     })?;
-    Ok(Json(json!({ "subject": hit.subject, "version": hit.version, "as_of": crate::util::now_ms() })))
+    Ok(Json(
+        json!({ "subject": hit.subject, "version": hit.version, "as_of": crate::util::now_ms() }),
+    ))
 }
 
 pub async fn strategy(
@@ -142,7 +165,10 @@ pub async fn strategy(
     Path((cluster, subject)): Path<(String, String)>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let handle = state.registry.get(&cluster)?;
-    let sr = handle.schema_registry.clone().ok_or_else(|| ApiError::no_schema_registry(&cluster))?;
+    let sr = handle
+        .schema_registry
+        .clone()
+        .ok_or_else(|| ApiError::no_schema_registry(&cluster))?;
     let detail = sr
         .subject_detail(&subject, None)
         .await
@@ -171,7 +197,9 @@ pub async fn compatibility_level(
         .subject_compatibility_level(&subject)
         .await
         .map_err(|e| subject_error(&cluster, &subject, e))?;
-    Ok(Json(json!({ "level": level, "as_of": crate::util::now_ms() })))
+    Ok(Json(
+        json!({ "level": level, "as_of": crate::util::now_ms() }),
+    ))
 }
 
 #[derive(Deserialize)]
@@ -208,9 +236,22 @@ mod tests {
     #[test]
     fn topic_name_strategy_matches_only_existing_topics() {
         let s = resolve_strategy("orders-value", &topics(&["orders", "payments"]), None);
-        assert_eq!(s, SubjectStrategy { strategy: Some("topic_name"), topic: Some("orders".into()), role: Some("value") });
-        assert_eq!(resolve_strategy("ghost-value", &topics(&["orders"]), None).strategy, None);
-        assert_eq!(resolve_strategy("orders-key", &topics(&["orders"]), None).role, Some("key"));
+        assert_eq!(
+            s,
+            SubjectStrategy {
+                strategy: Some("topic_name"),
+                topic: Some("orders".into()),
+                role: Some("value")
+            }
+        );
+        assert_eq!(
+            resolve_strategy("ghost-value", &topics(&["orders"]), None).strategy,
+            None
+        );
+        assert_eq!(
+            resolve_strategy("orders-key", &topics(&["orders"]), None).role,
+            Some("key")
+        );
     }
 
     /// The record's fully qualified name comes from the SCHEMA (not the
@@ -218,18 +259,59 @@ mod tests {
     /// never guessed.
     #[test]
     fn record_name_strategy_is_verified_against_the_schema_fqn() {
-        let s = resolve_strategy("com.acme.Order", &topics(&["orders"]), Some("com.acme.Order"));
-        assert_eq!(s, SubjectStrategy { strategy: Some("record_name"), topic: None, role: None });
+        let s = resolve_strategy(
+            "com.acme.Order",
+            &topics(&["orders"]),
+            Some("com.acme.Order"),
+        );
+        assert_eq!(
+            s,
+            SubjectStrategy {
+                strategy: Some("record_name"),
+                topic: None,
+                role: None
+            }
+        );
         // Same name WITHOUT a matching schema FQN stays honestly unknown.
-        assert_eq!(resolve_strategy("com.acme.Order", &topics(&["orders"]), None).strategy, None);
-        assert_eq!(resolve_strategy("com.acme.Order", &topics(&["orders"]), Some("com.acme.Other")).strategy, None);
+        assert_eq!(
+            resolve_strategy("com.acme.Order", &topics(&["orders"]), None).strategy,
+            None
+        );
+        assert_eq!(
+            resolve_strategy(
+                "com.acme.Order",
+                &topics(&["orders"]),
+                Some("com.acme.Other")
+            )
+            .strategy,
+            None
+        );
     }
 
     #[test]
     fn topic_record_name_requires_existing_topic_and_exact_fqn_remainder() {
-        let s = resolve_strategy("orders-com.acme.Order", &topics(&["orders", "orders-eu"]), Some("com.acme.Order"));
-        assert_eq!(s, SubjectStrategy { strategy: Some("topic_record_name"), topic: Some("orders".into()), role: None });
-        assert_eq!(resolve_strategy("ghost-com.acme.Order", &topics(&["orders"]), Some("com.acme.Order")).strategy, None);
+        let s = resolve_strategy(
+            "orders-com.acme.Order",
+            &topics(&["orders", "orders-eu"]),
+            Some("com.acme.Order"),
+        );
+        assert_eq!(
+            s,
+            SubjectStrategy {
+                strategy: Some("topic_record_name"),
+                topic: Some("orders".into()),
+                role: None
+            }
+        );
+        assert_eq!(
+            resolve_strategy(
+                "ghost-com.acme.Order",
+                &topics(&["orders"]),
+                Some("com.acme.Order")
+            )
+            .strategy,
+            None
+        );
     }
 
     /// `orders-eu-value` is the topic-name strategy for topic `orders-eu`,
@@ -252,8 +334,14 @@ mod url_tests {
     #[test]
     fn strips_userinfo_but_nothing_else() {
         assert_eq!(strip_userinfo("http://sr:8081"), "http://sr:8081");
-        assert_eq!(strip_userinfo("https://user:pass@sr.example.com:8081"), "https://sr.example.com:8081");
+        assert_eq!(
+            strip_userinfo("https://user:pass@sr.example.com:8081"),
+            "https://sr.example.com:8081"
+        );
         // An @ past the authority (path/query) is not userinfo.
-        assert_eq!(strip_userinfo("http://sr:8081/path@x"), "http://sr:8081/path@x");
+        assert_eq!(
+            strip_userinfo("http://sr:8081/path@x"),
+            "http://sr:8081/path@x"
+        );
     }
 }

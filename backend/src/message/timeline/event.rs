@@ -10,9 +10,21 @@ use crate::message::MessageOut;
 #[serde(untagged)]
 pub enum TimelineEvent {
     Match(Box<MessageOut>),
-    Progress { scanned: u64, matches: u64, budget: u64 },
-    PageEnd { cursor: Option<String>, exhausted: bool },
-    Error { code: String, message: String, cluster: Option<String>, retriable: bool },
+    Progress {
+        scanned: u64,
+        matches: u64,
+        budget: u64,
+    },
+    PageEnd {
+        cursor: Option<String>,
+        exhausted: bool,
+    },
+    Error {
+        code: String,
+        message: String,
+        cluster: Option<String>,
+        retriable: bool,
+    },
 }
 
 impl TimelineEvent {
@@ -41,6 +53,11 @@ impl TimelineEvent {
 
 impl From<ApiError> for TimelineEvent {
     fn from(e: ApiError) -> Self {
-        TimelineEvent::Error { code: e.code.to_string(), message: e.message, cluster: e.cluster, retriable: e.retriable }
+        TimelineEvent::Error {
+            code: e.code.to_string(),
+            message: e.message,
+            cluster: e.cluster,
+            retriable: e.retriable,
+        }
     }
 }

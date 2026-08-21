@@ -1,6 +1,6 @@
-use super::group_lag_cache::{commits_ttl, lag_rows, partitions_of, CommittedOffset, LagSnapshot};
+use super::group_lag_cache::{CommittedOffset, LagSnapshot, commits_ttl, lag_rows, partitions_of};
 use super::keyed_cache::Stamped;
-use super::{ffi, single_flight, snapshot, ClusterHandle, ADMIN_TIMEOUT};
+use super::{ADMIN_TIMEOUT, ClusterHandle, ffi, single_flight, snapshot};
 use crate::error::{self, ApiError};
 use crate::util::now_ms;
 use rdkafka::consumer::Consumer;
@@ -57,7 +57,8 @@ pub async fn list_topics(handle: Arc<ClusterHandle>) -> Result<Arc<TopicList>, A
 
 fn list_topics_blocking(handle: &ClusterHandle) -> Result<TopicList, ApiError> {
     {
-        let md = handle.consumer()
+        let md = handle
+            .consumer()
             .fetch_metadata(None, ADMIN_TIMEOUT)
             .map_err(|e| error::from_kafka(&handle.name, "fetch metadata", &e))?;
         let mut topics = Vec::new();
@@ -65,13 +66,25 @@ fn list_topics_blocking(handle: &ClusterHandle) -> Result<TopicList, ApiError> {
             topics.push(TopicSummary {
                 name: t.name().to_string(),
                 partitions: t.partitions().len() as i32,
-                replication_factor: t.partitions().first().map(|p| p.replicas().len()).unwrap_or(0) as i32,
-                isr: t.partitions().iter().map(|p| p.isr().len()).min().unwrap_or(0) as i32,
+                replication_factor: t
+                    .partitions()
+                    .first()
+                    .map(|p| p.replicas().len())
+                    .unwrap_or(0) as i32,
+                isr: t
+                    .partitions()
+                    .iter()
+                    .map(|p| p.isr().len())
+                    .min()
+                    .unwrap_or(0) as i32,
                 internal: is_internal_topic(t.name()),
             });
         }
         topics.sort_by(|a, b| a.name.cmp(&b.name));
-        Ok(TopicList { topics, as_of: now_ms() })
+        Ok(TopicList {
+            topics,
+            as_of: now_ms(),
+        })
     }
 }
 
@@ -104,8 +117,14 @@ pub struct TopicDetail {
 /// 2026-08-20): the backend answers from memory and reaches the broker only
 /// when it has nothing fresh, so broker load follows our refresh policy
 /// rather than how many people have Arne open.
-pub async fn topic_detail(handle: Arc<ClusterHandle>, topic: String) -> Result<Arc<TopicDetail>, ApiError> {
-    if let Some(fresh) = handle.topic_detail_cache.fresh(&topic, super::DETAIL_TTL_MS, now_ms()) {
+pub async fn topic_detail(
+    handle: Arc<ClusterHandle>,
+    topic: String,
+) -> Result<Arc<TopicDetail>, ApiError> {
+    if let Some(fresh) = handle
+        .topic_detail_cache
+        .fresh(&topic, super::DETAIL_TTL_MS, now_ms())
+    {
         return Ok(fresh);
     }
     // The guard is HELD across the fetch below: acquiring it and letting it
@@ -114,37 +133,48 @@ pub async fn topic_detail(handle: Arc<ClusterHandle>, topic: String) -> Result<A
     let flight = {
         let flights = handle.detail_flight.clone();
         let topic = topic.clone();
-        tokio::task::spawn_blocking(move || flights.begin_or_wait_owned(("topic", topic), single_flight::MAX_WAIT))
-            .await
-            .map_err(ApiError::task_join)?
+        tokio::task::spawn_blocking(move || {
+            flights.begin_or_wait_owned(("topic", topic), single_flight::MAX_WAIT)
+        })
+        .await
+        .map_err(ApiError::task_join)?
     };
     // Another request just fetched this one (or is still fetching): read what
     // it produced rather than asking the broker again.
     // Another request just fetched this one (or is still fetching): read what
     // it produced rather than asking the broker again.
-    if let (None, Some(value)) = (&flight, handle.topic_detail_cache.get(&topic).map(|e| e.value)) {
+    if let (None, Some(value)) = (
+        &flight,
+        handle.topic_detail_cache.get(&topic).map(|e| e.value),
+    ) {
         return Ok(value);
     }
     let fresh = Arc::new(topic_detail_uncached(handle.clone(), topic.clone()).await?);
-    handle.topic_detail_cache.insert(topic, fresh.clone(), now_ms());
+    handle
+        .topic_detail_cache
+        .insert(topic, fresh.clone(), now_ms());
     drop(flight);
     Ok(fresh)
 }
 
-async fn topic_detail_uncached(handle: Arc<ClusterHandle>, topic: String) -> Result<TopicDetail, ApiError> {
+async fn topic_detail_uncached(
+    handle: Arc<ClusterHandle>,
+    topic: String,
+) -> Result<TopicDetail, ApiError> {
     // Configs and partitions/offsets both go through the one resident client.
     let cfg_handle = handle.clone();
     let cfg_topic = topic.clone();
     let configs_fut = async move {
         tokio::task::spawn_blocking(move || {
-            let mut out: Vec<ConfigEntryOut> = super::ffi::describe_topic_config_blocking(
-                &cfg_handle,
-                &cfg_topic,
-                ADMIN_TIMEOUT,
-            )?
-            .into_iter()
-            .map(|e| ConfigEntryOut { name: e.name, value: e.value, is_default: e.is_default })
-            .collect();
+            let mut out: Vec<ConfigEntryOut> =
+                super::ffi::describe_topic_config_blocking(&cfg_handle, &cfg_topic, ADMIN_TIMEOUT)?
+                    .into_iter()
+                    .map(|e| ConfigEntryOut {
+                        name: e.name,
+                        value: e.value,
+                        is_default: e.is_default,
+                    })
+                    .collect();
             out.sort_by(|a, b| a.name.cmp(&b.name));
             Ok::<_, ApiError>(out)
         })
@@ -155,17 +185,29 @@ async fn topic_detail_uncached(handle: Arc<ClusterHandle>, topic: String) -> Res
     let part_handle = handle.clone();
     let part_topic = topic.clone();
     let partitions_fut = tokio::task::spawn_blocking(move || {
-        let md = part_handle.consumer()
+        let md = part_handle
+            .consumer()
             .fetch_metadata(Some(&part_topic), ADMIN_TIMEOUT)
             .map_err(|e| error::from_kafka(&part_handle.name, "fetch metadata", &e))?;
-        let t = md.topics().iter()
+        let t = md
+            .topics()
+            .iter()
             .find(|t| t.name() == part_topic && !t.partitions().is_empty())
             .ok_or_else(|| ApiError::topic_not_found(&part_handle.name, &part_topic))?;
         // Two batched ListOffsets calls for the whole topic, not a sequential
         // watermark round trip per partition: a 1000-partition topic used to
         // cost 1000 round trips on every 10s poll of this tab.
-        let wanted: Vec<(String, i32)> = t.partitions().iter().map(|p| (part_topic.clone(), p.id())).collect();
-        let starts = ffi::offsets_by_partition(&part_handle, &wanted, ffi::OffsetSpec::Earliest, ADMIN_TIMEOUT)?;
+        let wanted: Vec<(String, i32)> = t
+            .partitions()
+            .iter()
+            .map(|p| (part_topic.clone(), p.id()))
+            .collect();
+        let starts = ffi::offsets_by_partition(
+            &part_handle,
+            &wanted,
+            ffi::OffsetSpec::Earliest,
+            ADMIN_TIMEOUT,
+        )?;
         // High watermarks come from the shared cache at this page's own
         // cadence; low watermarks move only with retention, so they are not
         // worth caching separately.
@@ -175,12 +217,18 @@ async fn topic_detail_uncached(handle: Arc<ClusterHandle>, topic: String) -> Res
             .iter()
             .filter_map(|(t, p)| heads.get(t, *p).map(|hi| (*p, hi)))
             .collect();
-        let partitions = t.partitions().iter().map(|p| PartitionInfo {
-            id: p.id(), leader: p.leader(),
-            replicas: p.replicas().to_vec(), isr: p.isr().to_vec(),
-            start_offset: starts.get(&p.id()).copied().unwrap_or(-1),
-            end_offset: ends.get(&p.id()).copied().unwrap_or(-1),
-        }).collect();
+        let partitions = t
+            .partitions()
+            .iter()
+            .map(|p| PartitionInfo {
+                id: p.id(),
+                leader: p.leader(),
+                replicas: p.replicas().to_vec(),
+                isr: p.isr().to_vec(),
+                start_offset: starts.get(&p.id()).copied().unwrap_or(-1),
+                end_offset: ends.get(&p.id()).copied().unwrap_or(-1),
+            })
+            .collect();
         Ok::<_, ApiError>((partitions, heads_at))
     });
 
@@ -189,7 +237,12 @@ async fn topic_detail_uncached(handle: Arc<ClusterHandle>, topic: String) -> Res
     let (partitions, heads_at) = partitions.map_err(ApiError::task_join)??;
     let configs = configs?;
     // No fresher than the heads it shows.
-    Ok(TopicDetail { name: topic, partitions, configs, as_of: heads_at.min(now_ms()) })
+    Ok(TopicDetail {
+        name: topic,
+        partitions,
+        configs,
+        as_of: heads_at.min(now_ms()),
+    })
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -240,7 +293,10 @@ pub struct GroupLagBatch {
 }
 
 #[derive(Debug, Serialize, Clone)]
-pub struct GroupList { pub groups: Vec<GroupSummary>, pub as_of: i64 }
+pub struct GroupList {
+    pub groups: Vec<GroupSummary>,
+    pub as_of: i64,
+}
 
 #[derive(Debug, Serialize, Clone)]
 pub struct MemberInfo {
@@ -324,7 +380,9 @@ fn bump(counts: &Mutex<HashMap<(String, String), u64>>, scope: &str, subject: &s
 }
 
 pub fn count_of(counts: &Mutex<HashMap<(String, String), u64>>, scope: &str, subject: &str) -> u64 {
-    counts.lock().expect("fetch counts lock poisoned")
+    counts
+        .lock()
+        .expect("fetch counts lock poisoned")
         .get(&(scope.to_string(), subject.to_string()))
         .copied()
         .unwrap_or(0)
@@ -362,7 +420,12 @@ impl<'a> Watermarks<'a> {
     }
 
     pub fn labelled(handle: &'a ClusterHandle, ttl_ms: i64, label: &'static str) -> Self {
-        Self { handle, ttl_ms, label, validated: HashMap::new() }
+        Self {
+            handle,
+            ttl_ms,
+            label,
+            validated: HashMap::new(),
+        }
     }
 
     /// A caller that must see the current head (a bounded scan deciding
@@ -391,7 +454,11 @@ impl<'a> Watermarks<'a> {
         if missing.is_empty() {
             return Ok(oldest.unwrap_or(now));
         }
-        for topic in missing.iter().map(|(t, _)| t.as_str()).collect::<std::collections::BTreeSet<_>>() {
+        for topic in missing
+            .iter()
+            .map(|(t, _)| t.as_str())
+            .collect::<std::collections::BTreeSet<_>>()
+        {
             record_group_watermark_fetch(self.handle, self.label, topic);
         }
         let fetched_at = now_ms();
@@ -418,7 +485,6 @@ impl<'a> Watermarks<'a> {
     pub fn get(&self, topic: &str, partition: i32) -> Option<i64> {
         self.validated.get(&(topic.to_string(), partition)).copied()
     }
-
 }
 
 /// Committed offsets fetched WITHOUT joining the group: ListConsumerGroupOffsets
@@ -454,12 +520,17 @@ pub fn group_lag_cached(
     // `None` means this group must not be read at all — only served if we
     // happen to know it already.
     let Some(ttl_ms) = ttl_ms else {
-        return cached.ok_or_else(|| ApiError::kafka(&handle.name, format!("{group} is not read from this view")));
+        return cached.ok_or_else(|| {
+            ApiError::kafka(&handle.name, format!("{group} is not read from this view"))
+        });
     };
     if let Some(entry) = cached.filter(|e| now - e.sampled_at < ttl_ms) {
         return Ok(entry);
     }
-    match handle.commits_flight.begin_or_wait(group.to_string(), single_flight::MAX_WAIT) {
+    match handle
+        .commits_flight
+        .begin_or_wait(group.to_string(), single_flight::MAX_WAIT)
+    {
         // Someone else is reading this group right now: take their answer
         // rather than asking the broker the same question again. If their read
         // is still running, do it ourselves — liveness beats perfect
@@ -476,7 +547,10 @@ pub fn group_lag_cached(
 /// NULL-partitions mode, verified by spike 2026-08-20). Never narrowed to a
 /// topic: one answer serves the consumers list, every topic's tab and the
 /// group's own page.
-fn fetch_group_commits(handle: &ClusterHandle, group: &str) -> Result<Vec<CommittedOffset>, ApiError> {
+fn fetch_group_commits(
+    handle: &ClusterHandle,
+    group: &str,
+) -> Result<Vec<CommittedOffset>, ApiError> {
     record_group_offset_fetch(handle, CLUSTER_WIDE, group);
     // NotCoordinator/CoordinatorNotAvailable/CoordinatorLoadInProgress are
     // transient by protocol contract: the coordinator is moving or still
@@ -494,17 +568,27 @@ fn fetch_group_commits(handle: &ClusterHandle, group: &str) -> Result<Vec<Commit
     };
     Ok(committed
         .into_iter()
-        .map(|((topic, partition), offset)| CommittedOffset { topic, partition, offset })
+        .map(|((topic, partition), offset)| CommittedOffset {
+            topic,
+            partition,
+            offset,
+        })
         .collect())
 }
 
 /// The coordinator moving or still loading its state reads as a failure but
 /// isn't one — the three conditions worth a brief retry.
 fn is_coordinator_hiccup(message: &str) -> bool {
-    ["NOT_COORDINATOR", "COORDINATOR_NOT_AVAILABLE", "COORDINATOR_LOAD_IN_PROGRESS",
-     "Not coordinator", "Coordinator not available", "Coordinator load in progress"]
-        .iter()
-        .any(|needle| message.contains(needle))
+    [
+        "NOT_COORDINATOR",
+        "COORDINATOR_NOT_AVAILABLE",
+        "COORDINATOR_LOAD_IN_PROGRESS",
+        "Not coordinator",
+        "Coordinator not available",
+        "Coordinator load in progress",
+    ]
+    .iter()
+    .any(|needle| message.contains(needle))
 }
 
 /// Reads a group's commits and then, immediately, the heads for exactly those
@@ -515,7 +599,10 @@ fn is_coordinator_hiccup(message: &str) -> bool {
 /// read, and `committed > end` cannot happen in Kafka, so showing it would be
 /// visibly incoherent. Reading heads just after the commits errs the only
 /// harmless way — by at most the microseconds between the two calls.
-fn sample_group_lag(handle: &ClusterHandle, group: &str) -> Result<Stamped<Arc<LagSnapshot>>, ApiError> {
+fn sample_group_lag(
+    handle: &ClusterHandle,
+    group: &str,
+) -> Result<Stamped<Arc<LagSnapshot>>, ApiError> {
     let commits = fetch_group_commits(handle, group)?;
     let wanted = partitions_of(&commits, None);
     let mut heads = Watermarks::always_fresh(handle, "lag");
@@ -526,8 +613,13 @@ fn sample_group_lag(handle: &ClusterHandle, group: &str) -> Result<Stamped<Arc<L
     // hit — every poll would re-read every group.
     let sampled_at = now_ms();
     let snapshot = Arc::new(snapshot);
-    handle.group_lag.insert(group.to_string(), snapshot.clone(), sampled_at);
-    Ok(Stamped { value: snapshot, sampled_at })
+    handle
+        .group_lag
+        .insert(group.to_string(), snapshot.clone(), sampled_at);
+    Ok(Stamped {
+        value: snapshot,
+        sampled_at,
+    })
 }
 
 /// One group as its coordinator describes it, shared and age-tiered like the
@@ -540,12 +632,17 @@ pub fn group_description_cached(
     ttl_ms: i64,
     now: i64,
 ) -> Result<Stamped<Arc<super::ffi::GroupDescription>>, ApiError> {
-    if let Some(entry) = handle.group_description.get(&group.to_string())
+    if let Some(entry) = handle
+        .group_description
+        .get(&group.to_string())
         .filter(|e| now - e.sampled_at < ttl_ms)
     {
         return Ok(entry);
     }
-    match handle.describe_flight.begin_or_wait(group.to_string(), single_flight::MAX_WAIT) {
+    match handle
+        .describe_flight
+        .begin_or_wait(group.to_string(), single_flight::MAX_WAIT)
+    {
         // Another request is describing this group: take its answer rather
         // than asking the coordinator the same question twice. Still running
         // after the wait — do it ourselves; liveness beats deduplication.
@@ -565,8 +662,13 @@ fn describe_group(
         .ok_or_else(|| ApiError::group_not_found(&handle.name, group))?;
     let sampled_at = now_ms();
     let described = Arc::new(described);
-    handle.group_description.insert(group.to_string(), described.clone(), sampled_at);
-    Ok(Stamped { value: described, sampled_at })
+    handle
+        .group_description
+        .insert(group.to_string(), described.clone(), sampled_at);
+    Ok(Stamped {
+        value: described,
+        sampled_at,
+    })
 }
 
 /// A group whose protocol type is anything other than a consumer group's uses
@@ -581,7 +683,8 @@ fn is_consumer_group_protocol(protocol_type: &str) -> bool {
 
 pub async fn topic_names(handle: Arc<ClusterHandle>) -> Result<Vec<String>, ApiError> {
     tokio::task::spawn_blocking(move || {
-        let md = handle.consumer()
+        let md = handle
+            .consumer()
             .fetch_metadata(None, ADMIN_TIMEOUT)
             .map_err(|e| error::from_kafka(&handle.name, "fetch metadata", &e))?;
         Ok(md.topics().iter().map(|t| t.name().to_string()).collect())
@@ -627,7 +730,10 @@ pub struct GroupRoster {
 /// Public as a test hook — sharing must be asserted with an explicit window,
 /// not by racing requests against a production TTL.
 #[doc(hidden)]
-pub fn group_roster_cached(handle: &ClusterHandle, ttl_ms: i64) -> Result<Arc<GroupRoster>, ApiError> {
+pub fn group_roster_cached(
+    handle: &ClusterHandle,
+    ttl_ms: i64,
+) -> Result<Arc<GroupRoster>, ApiError> {
     snapshot::cached_or_refresh(
         &handle.groups_snapshot,
         &handle.snapshot_flight,
@@ -648,16 +754,21 @@ fn fetch_group_roster(handle: &ClusterHandle) -> Result<GroupRoster, ApiError> {
     // topic's activity tab still answer from the legacy call — degraded to the
     // classic view of state, never blank (a broken part must not take the page
     // down). Its own failure is not silent to us: `describe` still reports.
-    let listings = super::ffi::list_consumer_groups_blocking(handle, ADMIN_TIMEOUT).unwrap_or_default();
+    let listings =
+        super::ffi::list_consumer_groups_blocking(handle, ADMIN_TIMEOUT).unwrap_or_default();
     let listed: std::collections::HashMap<&str, &super::ffi::GroupListing> =
         listings.iter().map(|l| (l.group_id.as_str(), l)).collect();
-    let gl = handle.consumer()
+    let gl = handle
+        .consumer()
         .fetch_group_list(None, ADMIN_TIMEOUT)
         .map_err(|e| error::from_kafka(&handle.name, "list groups", &e))?;
-    let mut groups: Vec<GroupMembership> = gl.groups().iter()
+    let mut groups: Vec<GroupMembership> = gl
+        .groups()
+        .iter()
         .filter(|g| is_consumer_group_protocol(g.protocol_type()))
         .map(|g| {
-            let (state, group_type) = resolved_state_and_type(listed.get(g.name()).copied(), g.state());
+            let (state, group_type) =
+                resolved_state_and_type(listed.get(g.name()).copied(), g.state());
             // A KIP-848 group's members are absent from the legacy describe,
             // so its count here is a phantom zero and must not be stated.
             let countable_here = !needs_coordinator_describe(&group_type);
@@ -667,14 +778,19 @@ fn fetch_group_roster(handle: &ClusterHandle) -> Result<GroupRoster, ApiError> {
                 protocol_type: g.protocol_type().to_string(),
                 group_type,
                 member_count: countable_here.then(|| g.members().len()),
-                member_topics: g.members().iter()
+                member_topics: g
+                    .members()
+                    .iter()
                     .map(|m| m.assignment().and_then(super::assignment::assigned_topics))
                     .collect(),
             }
         })
         .collect();
     groups.sort_by(|a, b| a.group_id.cmp(&b.group_id));
-    Ok(GroupRoster { groups, as_of: now_ms() })
+    Ok(GroupRoster {
+        groups,
+        as_of: now_ms(),
+    })
 }
 
 /// librdkafka's name for the KIP-848 rebalance protocol, and for a state it
@@ -695,7 +811,10 @@ fn resolved_state_and_type(
         .map(|l| l.state.clone())
         .filter(|s| s != UNKNOWN_STATE)
         .unwrap_or_else(|| legacy_state.to_string());
-    (state, listing.map(|l| l.group_type.clone()).unwrap_or_default())
+    (
+        state,
+        listing.map(|l| l.group_type.clone()).unwrap_or_default(),
+    )
 }
 
 /// Whether this group's members have to be read from its coordinator, one
@@ -712,13 +831,17 @@ pub async fn list_groups(handle: Arc<ClusterHandle>) -> Result<Arc<GroupList>, A
     tokio::task::spawn_blocking(move || {
         let roster = group_roster_cached(&handle, GROUPS_TTL_MS)?;
         Ok(Arc::new(GroupList {
-            groups: roster.groups.iter().map(|g| GroupSummary {
-                group_id: g.group_id.clone(),
-                state: g.state.clone(),
-                protocol_type: g.protocol_type.clone(),
-                group_type: g.group_type.clone(),
-                member_count: g.member_count,
-            }).collect(),
+            groups: roster
+                .groups
+                .iter()
+                .map(|g| GroupSummary {
+                    group_id: g.group_id.clone(),
+                    state: g.state.clone(),
+                    protocol_type: g.protocol_type.clone(),
+                    group_type: g.group_type.clone(),
+                    member_count: g.member_count,
+                })
+                .collect(),
             // The roster's own sample time, not this request's.
             as_of: roster.as_of,
         }))
@@ -730,18 +853,25 @@ pub async fn list_groups(handle: Arc<ClusterHandle>) -> Result<Arc<GroupList>, A
 /// Cluster-wide lag for the named groups only — what a paginated consumers
 /// list asks for, one page at a time. Reads the shared per-group entry, so a
 /// group already sampled for its own page or a topic's tab costs nothing here.
-pub async fn groups_lag(handle: Arc<ClusterHandle>, groups: Vec<String>) -> Result<GroupLagBatch, ApiError> {
+pub async fn groups_lag(
+    handle: Arc<ClusterHandle>,
+    groups: Vec<String>,
+) -> Result<GroupLagBatch, ApiError> {
     tokio::task::spawn_blocking(move || {
         use super::group_lag_cache::LIVE_TTL_MS;
         let now = now_ms();
         // Which of these the cluster-wide list could not count. Read from the
         // shared roster, so this costs nothing.
-        let uncountable: std::collections::HashSet<String> = group_roster_cached(&handle, GROUPS_TTL_MS)
-            .map(|r| r.groups.iter()
-                .filter(|g| g.member_count.is_none())
-                .map(|g| g.group_id.clone())
-                .collect())
-            .unwrap_or_default();
+        let uncountable: std::collections::HashSet<String> =
+            group_roster_cached(&handle, GROUPS_TTL_MS)
+                .map(|r| {
+                    r.groups
+                        .iter()
+                        .filter(|g| g.member_count.is_none())
+                        .map(|g| g.group_id.clone())
+                        .collect()
+                })
+                .unwrap_or_default();
         let mut out = Vec::with_capacity(groups.len());
         // The batch is only as fresh as the oldest entry it serves — a cached
         // row must not be presented under a "just now" stamp.
@@ -750,14 +880,19 @@ pub async fn groups_lag(handle: Arc<ClusterHandle>, groups: Vec<String>) -> Resu
             // Every row here is displayed, so this view always wants the fast tier.
             // One describe for a row whose members the list could not count.
             // A failure here is not this row's headline — the lag still shows.
-            let member_count = uncountable.contains(&group).then(|| {
-                group_description_cached(&handle, &group, LIVE_TTL_MS, now)
-                    .ok()
-                    .map(|d| d.value.members.len())
-            }).flatten();
+            let member_count = uncountable
+                .contains(&group)
+                .then(|| {
+                    group_description_cached(&handle, &group, LIVE_TTL_MS, now)
+                        .ok()
+                        .map(|d| d.value.members.len())
+                })
+                .flatten();
             match group_lag_cached(&handle, &group, Some(LIVE_TTL_MS), now) {
                 Ok(entry) => {
-                    oldest_served = Some(oldest_served.map_or(entry.sampled_at, |o: i64| o.min(entry.sampled_at)));
+                    oldest_served = Some(
+                        oldest_served.map_or(entry.sampled_at, |o: i64| o.min(entry.sampled_at)),
+                    );
                     out.push(GroupLagEntry {
                         group_id: group,
                         total_lag: entry.value.statable_total(),
@@ -775,7 +910,10 @@ pub async fn groups_lag(handle: Arc<ClusterHandle>, groups: Vec<String>) -> Resu
                 }),
             }
         }
-        Ok(GroupLagBatch { groups: out, as_of: oldest_served.unwrap_or(now) })
+        Ok(GroupLagBatch {
+            groups: out,
+            as_of: oldest_served.unwrap_or(now),
+        })
     })
     .await
     .map_err(ApiError::task_join)?
@@ -792,8 +930,14 @@ pub const LAG_WATERMARK_TTL_MS: i64 = 2_000;
 /// commits are read once for every view, so every read carries this label.
 const CLUSTER_WIDE: &str = "*";
 
-pub async fn group_detail(handle: Arc<ClusterHandle>, group: String) -> Result<Arc<GroupDetail>, ApiError> {
-    if let Some(fresh) = handle.group_detail_cache.fresh(&group, super::DETAIL_TTL_MS, now_ms()) {
+pub async fn group_detail(
+    handle: Arc<ClusterHandle>,
+    group: String,
+) -> Result<Arc<GroupDetail>, ApiError> {
+    if let Some(fresh) = handle
+        .group_detail_cache
+        .fresh(&group, super::DETAIL_TTL_MS, now_ms())
+    {
         return Ok(fresh);
     }
     // The guard is HELD across the fetch below: acquiring it and letting it
@@ -802,37 +946,53 @@ pub async fn group_detail(handle: Arc<ClusterHandle>, group: String) -> Result<A
     let flight = {
         let flights = handle.detail_flight.clone();
         let group = group.clone();
-        tokio::task::spawn_blocking(move || flights.begin_or_wait_owned(("group", group), single_flight::MAX_WAIT))
-            .await
-            .map_err(ApiError::task_join)?
+        tokio::task::spawn_blocking(move || {
+            flights.begin_or_wait_owned(("group", group), single_flight::MAX_WAIT)
+        })
+        .await
+        .map_err(ApiError::task_join)?
     };
     // Another request just fetched this one (or is still fetching): read what
     // it produced rather than asking the broker again.
-    if let (None, Some(value)) = (&flight, handle.group_detail_cache.get(&group).map(|e| e.value)) {
+    if let (None, Some(value)) = (
+        &flight,
+        handle.group_detail_cache.get(&group).map(|e| e.value),
+    ) {
         return Ok(value);
     }
     let fresh = Arc::new(group_detail_uncached(handle.clone(), group.clone()).await?);
-    handle.group_detail_cache.insert(group, fresh.clone(), now_ms());
+    handle
+        .group_detail_cache
+        .insert(group, fresh.clone(), now_ms());
     drop(flight);
     Ok(fresh)
 }
 
-async fn group_detail_uncached(handle: Arc<ClusterHandle>, group: String) -> Result<GroupDetail, ApiError> {
+async fn group_detail_uncached(
+    handle: Arc<ClusterHandle>,
+    group: String,
+) -> Result<GroupDetail, ApiError> {
     tokio::task::spawn_blocking(move || {
         // The coordinator, not every broker: see `describe_consumer_group_blocking`.
         // Shared with the list and the activity tab, so opening a group's page
         // after seeing it there costs nothing.
-        let described = match group_description_cached(&handle, &group, super::DETAIL_TTL_MS, now_ms()) {
-            Ok(d) => Some(d.value),
-            Err(e) if e.code == "group_not_found" => None,
-            Err(e) => return Err(e),
-        };
+        let described =
+            match group_description_cached(&handle, &group, super::DETAIL_TTL_MS, now_ms()) {
+                Ok(d) => Some(d.value),
+                Err(e) if e.code == "group_not_found" => None,
+                Err(e) => return Err(e),
+            };
         // A group the coordinator calls Dead is gone; its offsets may linger.
         let described = described.filter(|d| d.state != "Dead");
         // The same shared entry the consumers list uses, so opening a group's
         // page after seeing it in the list costs nothing. Errors keep their own
         // ApiError, so a broker timeout still reports as a timeout.
-        let entry = group_lag_cached(&handle, &group, Some(super::group_lag_cache::LIVE_TTL_MS), now_ms())?;
+        let entry = group_lag_cached(
+            &handle,
+            &group,
+            Some(super::group_lag_cache::LIVE_TTL_MS),
+            now_ms(),
+        )?;
         // The snapshot is shared, so this view copies just the rows it renders.
         let (partitions, pair_at) = (entry.value.rows.clone(), entry.sampled_at);
         let unreadable_partitions = entry.value.unknown.len();
@@ -844,15 +1004,31 @@ async fn group_detail_uncached(handle: Arc<ClusterHandle>, group: String) -> Res
         };
         Ok(GroupDetail {
             group_id: group.clone(),
-            state: described.as_ref().map(|d| d.state.clone()).unwrap_or_else(|| "Empty".into()),
-            group_type: described.as_ref().map(|d| d.group_type.clone()).unwrap_or_default(),
-            assignment_strategy: described.as_ref().map(|d| d.assignor.clone()).unwrap_or_default(),
-            members: described.map(|d| d.members.iter().map(|m| MemberInfo {
-                member_id: m.member_id.clone(),
-                client_id: m.client_id.clone(),
-                client_host: m.host.clone(),
-                assigned: m.assigned.as_ref().map(|a| group_by_topic(a.clone())),
-            }).collect()).unwrap_or_default(),
+            state: described
+                .as_ref()
+                .map(|d| d.state.clone())
+                .unwrap_or_else(|| "Empty".into()),
+            group_type: described
+                .as_ref()
+                .map(|d| d.group_type.clone())
+                .unwrap_or_default(),
+            assignment_strategy: described
+                .as_ref()
+                .map(|d| d.assignor.clone())
+                .unwrap_or_default(),
+            members: described
+                .map(|d| {
+                    d.members
+                        .iter()
+                        .map(|m| MemberInfo {
+                            member_id: m.member_id.clone(),
+                            client_id: m.client_id.clone(),
+                            client_host: m.host.clone(),
+                            assigned: m.assigned.as_ref().map(|a| group_by_topic(a.clone())),
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
             partitions,
             unreadable_partitions,
             // as fresh as the older of the two samples behind the lag
@@ -870,7 +1046,10 @@ fn group_by_topic(assigned: Vec<(String, i32)>) -> Vec<MemberAssignment> {
     for (topic, partition) in assigned {
         match out.iter_mut().find(|a| a.topic == topic) {
             Some(entry) => entry.partitions.push(partition),
-            None => out.push(MemberAssignment { topic, partitions: vec![partition] }),
+            None => out.push(MemberAssignment {
+                topic,
+                partitions: vec![partition],
+            }),
         }
     }
     for a in &mut out {
@@ -918,11 +1097,15 @@ enum Inspection {
 /// operation name `from_kafka` interpolates — the UI's own sentence already
 /// says what failed.
 fn lag_error_reason(err: &ApiError) -> String {
-    ["fetch committed offsets: ", "fetch watermarks: ", "fetch metadata: "]
-        .iter()
-        .find_map(|p| err.message.strip_prefix(p))
-        .unwrap_or(&err.message)
-        .to_string()
+    [
+        "fetch committed offsets: ",
+        "fetch watermarks: ",
+        "fetch metadata: ",
+    ]
+    .iter()
+    .find_map(|p| err.message.strip_prefix(p))
+    .unwrap_or(&err.message)
+    .to_string()
 }
 
 fn inspection_of(
@@ -980,9 +1163,12 @@ pub struct TopicConsumers {
 /// group fully assigned to other topics is skipped outright: its residual
 /// offsets on this topic stay visible on the group's own detail page until
 /// Kafka expires them, but it is no longer a consumer of this topic.
-pub async fn topic_consumers(handle: Arc<ClusterHandle>, topic: String) -> Result<TopicConsumers, ApiError> {
+pub async fn topic_consumers(
+    handle: Arc<ClusterHandle>,
+    topic: String,
+) -> Result<TopicConsumers, ApiError> {
     tokio::task::spawn_blocking(move || {
-        use super::group_lag_cache::{classify, Classification};
+        use super::group_lag_cache::{Classification, classify};
         let now = now_ms();
         // The SAME roster the consumers list reads: who exists, and what each
         // live member is assigned to. One group-list call per window now serves
@@ -1014,8 +1200,15 @@ pub async fn topic_consumers(handle: Arc<ClusterHandle>, topic: String) -> Resul
             let assignments = match needs_coordinator_describe(&g.group_type) {
                 false => g.member_topics.clone(),
                 true => match group_description_cached(&handle, &g.group_id, describe_ttl, now) {
-                    Ok(d) => d.value.members.iter()
-                        .map(|m| m.assigned.as_ref().map(|a| a.iter().map(|(t, _)| t.clone()).collect()))
+                    Ok(d) => d
+                        .value
+                        .members
+                        .iter()
+                        .map(|m| {
+                            m.assigned
+                                .as_ref()
+                                .map(|a| a.iter().map(|(t, _)| t.clone()).collect())
+                        })
                         .collect(),
                     // Undescribable: fall back to the blob, which for this
                     // protocol is empty and so fails open into an inspection.
@@ -1031,7 +1224,10 @@ pub async fn topic_consumers(handle: Arc<ClusterHandle>, topic: String) -> Resul
             let pair_at = outcome.as_ref().ok().map(|e| e.sampled_at);
             // Trouble on another topic is none of this tab's business; only a
             // gap in THIS topic's partitions makes its total unstateable.
-            let missing_here = outcome.as_ref().ok().map_or(0, |e| e.value.unreadable_on(&topic));
+            let missing_here = outcome
+                .as_ref()
+                .ok()
+                .map_or(0, |e| e.value.unreadable_on(&topic));
             let narrowed = outcome
                 .map(|e| e.value.narrowed(Some(&topic)))
                 .map_err(|e| lag_error_reason(&e));
@@ -1052,17 +1248,29 @@ pub async fn topic_consumers(handle: Arc<ClusterHandle>, topic: String) -> Resul
         unchecked.sort_by(|a, b| a.group_id.cmp(&b.group_id));
         // With nothing rendered, the honest stamp is when we learned who
         // exists — not the moment of the request.
-        Ok(TopicConsumers { topic, groups, unchecked, as_of: oldest_served.unwrap_or(roster.as_of) })
+        Ok(TopicConsumers {
+            topic,
+            groups,
+            unchecked,
+            as_of: oldest_served.unwrap_or(roster.as_of),
+        })
     })
     .await
     .map_err(ApiError::task_join)?
 }
 
 #[derive(Debug, Serialize, Clone)]
-pub struct BrokerInfo { pub id: i32, pub host: String, pub port: i32 }
+pub struct BrokerInfo {
+    pub id: i32,
+    pub host: String,
+    pub port: i32,
+}
 
 #[derive(Debug, Serialize, Clone)]
-pub struct TopicPartitions { pub name: String, pub partitions: usize }
+pub struct TopicPartitions {
+    pub name: String,
+    pub partitions: usize,
+}
 
 #[derive(Debug, Serialize, Clone)]
 pub struct Overview {
@@ -1079,13 +1287,22 @@ pub struct Overview {
 /// metadata call already carries. Message estimates cost O(partitions)
 /// watermark calls and real sizes need DescribeLogDirs, which librdkafka
 /// lacks (confluentinc/librdkafka#5333).
-fn top_topics_by_partitions<'a>(topics: impl IntoIterator<Item = (&'a str, usize)>) -> Vec<TopicPartitions> {
+fn top_topics_by_partitions<'a>(
+    topics: impl IntoIterator<Item = (&'a str, usize)>,
+) -> Vec<TopicPartitions> {
     let mut out: Vec<TopicPartitions> = topics
         .into_iter()
         .filter(|(name, _)| !is_internal_topic(name))
-        .map(|(name, partitions)| TopicPartitions { name: name.to_string(), partitions })
+        .map(|(name, partitions)| TopicPartitions {
+            name: name.to_string(),
+            partitions,
+        })
         .collect();
-    out.sort_by(|a, b| b.partitions.cmp(&a.partitions).then_with(|| a.name.cmp(&b.name)));
+    out.sort_by(|a, b| {
+        b.partitions
+            .cmp(&a.partitions)
+            .then_with(|| a.name.cmp(&b.name))
+    });
     out.truncate(10);
     out
 }
@@ -1109,17 +1326,28 @@ pub async fn overview(handle: Arc<ClusterHandle>) -> Result<Arc<Overview>, ApiEr
 
 fn overview_blocking(handle: &ClusterHandle) -> Result<Overview, ApiError> {
     {
-        let md = handle.consumer()
+        let md = handle
+            .consumer()
             .fetch_metadata(None, ADMIN_TIMEOUT)
             .map_err(|e| error::from_kafka(&handle.name, "fetch metadata", &e))?;
-        let brokers = md.brokers().iter()
-            .map(|b| BrokerInfo { id: b.id(), host: b.host().to_string(), port: b.port() })
+        let brokers = md
+            .brokers()
+            .iter()
+            .map(|b| BrokerInfo {
+                id: b.id(),
+                host: b.host().to_string(),
+                port: b.port(),
+            })
             .collect();
         let mut partition_count = 0;
         let mut urp = 0;
         for t in md.topics() {
             partition_count += t.partitions().len();
-            urp += t.partitions().iter().filter(|p| p.isr().len() < p.replicas().len()).count();
+            urp += t
+                .partitions()
+                .iter()
+                .filter(|p| p.isr().len() < p.replicas().len())
+                .count();
         }
         Ok(Overview {
             brokers,
@@ -1127,7 +1355,9 @@ fn overview_blocking(handle: &ClusterHandle) -> Result<Overview, ApiError> {
             topic_count: md.topics().len(),
             partition_count,
             under_replicated_partitions: urp,
-            top_topics: top_topics_by_partitions(md.topics().iter().map(|t| (t.name(), t.partitions().len()))),
+            top_topics: top_topics_by_partitions(
+                md.topics().iter().map(|t| (t.name(), t.partitions().len())),
+            ),
             as_of: now_ms(),
         })
     }
@@ -1135,8 +1365,8 @@ fn overview_blocking(handle: &ClusterHandle) -> Result<Overview, ApiError> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::group_lag_cache::Classification;
+    use super::*;
 
     /// Owner ruling 2026-08-17: groups that use Kafka's membership protocol
     /// only for coordination (schema registry's "sr", Connect's "connect")
@@ -1162,8 +1392,16 @@ mod tests {
     /// separately instead of being listed or silently dropped.
     #[test]
     fn assigned_group_without_commits_is_listed_with_undetermined_lag() {
-        let ins = inspection_of("g", "Stable", &Classification::AssignedToTopic, Ok(vec![]), 0);
-        let Inspection::Listed(row) = ins else { panic!("must be listed") };
+        let ins = inspection_of(
+            "g",
+            "Stable",
+            &Classification::AssignedToTopic,
+            Ok(vec![]),
+            0,
+        );
+        let Inspection::Listed(row) = ins else {
+            panic!("must be listed")
+        };
         assert_eq!(row.total_lag, None);
         assert!(row.partitions.is_empty());
         assert_eq!(row.error, None);
@@ -1171,8 +1409,16 @@ mod tests {
 
     #[test]
     fn assigned_group_with_commits_reports_summed_lag() {
-        let ins = inspection_of("g", "Stable", &Classification::AssignedToTopic, Ok(vec![lag(3), lag(4)]), 0);
-        let Inspection::Listed(row) = ins else { panic!("must be listed") };
+        let ins = inspection_of(
+            "g",
+            "Stable",
+            &Classification::AssignedToTopic,
+            Ok(vec![lag(3), lag(4)]),
+            0,
+        );
+        let Inspection::Listed(row) = ins else {
+            panic!("must be listed")
+        };
         assert_eq!(row.total_lag, Some(7));
         assert_eq!(row.partitions.len(), 2);
     }
@@ -1187,8 +1433,16 @@ mod tests {
 
     #[test]
     fn inspected_group_with_offsets_here_is_listed() {
-        let ins = inspection_of("g", "Empty", &Classification::MustInspect, Ok(vec![lag(5)]), 0);
-        let Inspection::Listed(row) = ins else { panic!("must be listed") };
+        let ins = inspection_of(
+            "g",
+            "Empty",
+            &Classification::MustInspect,
+            Ok(vec![lag(5)]),
+            0,
+        );
+        let Inspection::Listed(row) = ins else {
+            panic!("must be listed")
+        };
         assert_eq!(row.total_lag, Some(5));
     }
 
@@ -1245,17 +1499,34 @@ mod tests {
     fn only_a_known_new_protocol_group_needs_its_coordinator_asked() {
         assert!(needs_coordinator_describe("Consumer"));
         assert!(!needs_coordinator_describe("Classic"));
-        assert!(!needs_coordinator_describe("Unknown"), "a pre-4.0 broker must not cost a describe per group");
-        assert!(!needs_coordinator_describe(""), "nor must a broker that says nothing at all");
+        assert!(
+            !needs_coordinator_describe("Unknown"),
+            "a pre-4.0 broker must not cost a describe per group"
+        );
+        assert!(
+            !needs_coordinator_describe(""),
+            "nor must a broker that says nothing at all"
+        );
     }
 
     #[test]
     fn a_partial_topic_total_is_stated_as_a_bound_not_withheld() {
-        let ins = inspection_of("g", "Stable", &Classification::AssignedToTopic, Ok(vec![lag(3), lag(4)]), 1);
-        let Inspection::Listed(row) = ins else { panic!("must be listed") };
+        let ins = inspection_of(
+            "g",
+            "Stable",
+            &Classification::AssignedToTopic,
+            Ok(vec![lag(3), lag(4)]),
+            1,
+        );
+        let Inspection::Listed(row) = ins else {
+            panic!("must be listed")
+        };
         assert_eq!(row.total_lag, Some(7));
         assert_eq!(row.unreadable_partitions, 1);
-        assert_eq!(row.error, None, "an unread partition is not an error, it is a bound");
+        assert_eq!(
+            row.error, None,
+            "an unread partition is not an error, it is a bound"
+        );
     }
 
     // It committed here, so it consumes this topic: dropping it because every
@@ -1263,23 +1534,41 @@ mod tests {
     #[test]
     fn a_group_whose_every_partition_here_is_unreadable_is_still_listed() {
         let ins = inspection_of("g", "Empty", &Classification::MustInspect, Ok(vec![]), 2);
-        let Inspection::Listed(row) = ins else { panic!("a consumer of this topic stays listed") };
+        let Inspection::Listed(row) = ins else {
+            panic!("a consumer of this topic stays listed")
+        };
         assert_eq!(row.total_lag, None);
         assert_eq!(row.unreadable_partitions, 2);
     }
 
     #[test]
     fn a_known_consumers_failed_lookup_keeps_its_row_and_says_why() {
-        let ins = inspection_of("g", "Stable", &Classification::AssignedToTopic, Err("Broker: Not coordinator".into()), 0);
-        let Inspection::Listed(row) = ins else { panic!("a known consumer stays listed") };
+        let ins = inspection_of(
+            "g",
+            "Stable",
+            &Classification::AssignedToTopic,
+            Err("Broker: Not coordinator".into()),
+            0,
+        );
+        let Inspection::Listed(row) = ins else {
+            panic!("a known consumer stays listed")
+        };
         assert_eq!(row.total_lag, None);
         assert_eq!(row.error.as_deref(), Some("Broker: Not coordinator"));
     }
 
     #[test]
     fn an_unknown_groups_failed_lookup_is_disclosed_not_listed() {
-        let ins = inspection_of("g", "Empty", &Classification::MustInspect, Err("Broker: Not coordinator".into()), 0);
-        let Inspection::Unchecked(u) = ins else { panic!("must be disclosed as unchecked") };
+        let ins = inspection_of(
+            "g",
+            "Empty",
+            &Classification::MustInspect,
+            Err("Broker: Not coordinator".into()),
+            0,
+        );
+        let Inspection::Unchecked(u) = ins else {
+            panic!("must be disclosed as unchecked")
+        };
         assert_eq!(u.group_id, "g");
         assert_eq!(u.error, "Broker: Not coordinator");
     }
@@ -1295,7 +1584,13 @@ mod tests {
     }
 
     fn lag(l: i64) -> PartitionLag {
-        PartitionLag { topic: "t".into(), partition: 0, committed_offset: 1, end_offset: 1 + l, lag: l }
+        PartitionLag {
+            topic: "t".into(),
+            partition: 0,
+            committed_offset: 1,
+            end_offset: 1 + l,
+            lag: l,
+        }
     }
 
     /// Owner ruling 2026-08-18: the overview's top-topics table ranks by
@@ -1305,7 +1600,8 @@ mod tests {
     /// become available.
     #[test]
     fn top_topics_ranked_by_partitions_internal_excluded_capped_at_ten() {
-        let mut input: Vec<(String, usize)> = (0..12).map(|i| (format!("t-{i:02}"), i + 1)).collect();
+        let mut input: Vec<(String, usize)> =
+            (0..12).map(|i| (format!("t-{i:02}"), i + 1)).collect();
         input.push(("__consumer_offsets".into(), 50));
         input.push(("_schemas".into(), 50));
         input.push(("t-tie".into(), 12));
@@ -1314,7 +1610,10 @@ mod tests {
         assert_eq!(top[0].name, "t-11");
         assert_eq!(top[0].partitions, 12);
         assert_eq!(top[1].name, "t-tie"); // tie broken by name, after t-11
-        assert!(top.iter().all(|t| !t.name.starts_with("__") && t.name != "_schemas"));
+        assert!(
+            top.iter()
+                .all(|t| !t.name.starts_with("__") && t.name != "_schemas")
+        );
     }
 
     /// Owner ruling 2026-08-17: `_schemas` (the schema registry's storage
@@ -1327,5 +1626,4 @@ mod tests {
         assert!(!is_internal_topic("_my_topic"));
         assert!(!is_internal_topic("demo-orders"));
     }
-
 }

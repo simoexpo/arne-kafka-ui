@@ -1,4 +1,4 @@
-use super::{ClusterHandle, ADMIN_TIMEOUT};
+use super::{ADMIN_TIMEOUT, ClusterHandle};
 use crate::error::{self, ApiError};
 use rdkafka::consumer::Consumer;
 use serde::Serialize;
@@ -53,13 +53,19 @@ impl Default for SamplerStore {
 
 impl SamplerStore {
     pub fn new() -> Self {
-        Self { inner: RwLock::new(HashMap::new()) }
+        Self {
+            inner: RwLock::new(HashMap::new()),
+        }
     }
 
     /// Milliseconds since this topic's newest sample, or `None` if it has
     /// never been sampled — the caller samples when this exceeds its interval.
     pub fn age(&self, topic: &str, now_ms: i64) -> Option<i64> {
-        self.inner.read().unwrap().get(topic).and_then(|b| b.back().map(|s| now_ms - s.ts_ms))
+        self.inner
+            .read()
+            .unwrap()
+            .get(topic)
+            .and_then(|b| b.back().map(|s| now_ms - s.ts_ms))
     }
 
     pub fn record(&self, topic: &str, ts_ms: i64, total_msgs: i64) {
@@ -77,7 +83,9 @@ impl SamplerStore {
 
     pub fn rate_points(&self, topic: &str, interval_ms: i64) -> Vec<RatePoint> {
         let map = self.inner.read().unwrap();
-        let Some(buf) = map.get(topic) else { return Vec::new() };
+        let Some(buf) = map.get(topic) else {
+            return Vec::new();
+        };
         buf.iter()
             .zip(buf.iter().skip(1))
             .filter_map(|(a, b)| {
@@ -98,7 +106,11 @@ impl SamplerStore {
     }
 
     pub fn as_of(&self, topic: &str) -> Option<i64> {
-        self.inner.read().unwrap().get(topic).and_then(|b| b.back().map(|s| s.ts_ms))
+        self.inner
+            .read()
+            .unwrap()
+            .get(topic)
+            .and_then(|b| b.back().map(|s| s.ts_ms))
     }
 }
 
@@ -106,13 +118,20 @@ impl SamplerStore {
 /// `topic`. All-or-nothing — a single failed partition fails the sample
 /// rather than producing a total that silently omits data.
 pub fn sample_topic_blocking(handle: &ClusterHandle, topic: &str) -> Result<i64, ApiError> {
-    let md = handle.consumer()
+    let md = handle
+        .consumer()
         .fetch_metadata(Some(topic), ADMIN_TIMEOUT)
         .map_err(|e| error::from_kafka(&handle.name, "fetch metadata", &e))?;
-    let t = md.topics().iter()
+    let t = md
+        .topics()
+        .iter()
         .find(|t| t.name() == topic && !t.partitions().is_empty())
         .ok_or_else(|| ApiError::topic_not_found(&handle.name, topic))?;
-    let wanted: Vec<(String, i32)> = t.partitions().iter().map(|p| (topic.to_string(), p.id())).collect();
+    let wanted: Vec<(String, i32)> = t
+        .partitions()
+        .iter()
+        .map(|p| (topic.to_string(), p.id()))
+        .collect();
     // A rate is a delta between two point-in-time sums, so this caller needs
     // a FRESH read — a cached watermark would flatten the delta or stretch it
     // over the wrong window. It still fills the shared cache for readers that
@@ -125,7 +144,12 @@ pub fn sample_topic_blocking(handle: &ClusterHandle, topic: &str) -> Result<i64,
     for (t, p) in &wanted {
         match heads.get(t, *p) {
             Some(hi) => total += hi,
-            None => return Err(ApiError::kafka(&handle.name, "sample throughput: incomplete offsets")),
+            None => {
+                return Err(ApiError::kafka(
+                    &handle.name,
+                    "sample throughput: incomplete offsets",
+                ));
+            }
         }
     }
     Ok(total)
@@ -149,7 +173,10 @@ mod tests {
         assert!((p.msgs_per_sec - 5.0).abs() < f64::EPSILON);
         assert_eq!(p.ts_ms, 11_000);
         assert_eq!(p.window_ms, 10_000);
-        assert!(p.continuous, "consecutive samples one interval apart are continuous");
+        assert!(
+            p.continuous,
+            "consecutive samples one interval apart are continuous"
+        );
     }
 
     #[test]
@@ -159,9 +186,15 @@ mod tests {
         // viewer left and came back three minutes later
         s.record("t", 180_000, 360);
         let p = &s.rate_points("t", 10_000)[0];
-        assert!((p.msgs_per_sec - 2.0).abs() < f64::EPSILON, "average over the gap is real data");
+        assert!(
+            (p.msgs_per_sec - 2.0).abs() < f64::EPSILON,
+            "average over the gap is real data"
+        );
         assert_eq!(p.window_ms, 180_000);
-        assert!(!p.continuous, "the chart must break the line across an unmeasured stretch");
+        assert!(
+            !p.continuous,
+            "the chart must break the line across an unmeasured stretch"
+        );
     }
 
     /// A baseline older than the horizon cannot describe "now": the old
@@ -172,7 +205,10 @@ mod tests {
         let s = SamplerStore::new();
         s.record("t", 0, 0);
         s.record("t", HORIZON_MS + 1, 1_000_000);
-        assert!(s.rate_points("t", 10_000).is_empty(), "no rate across a discarded baseline");
+        assert!(
+            s.rate_points("t", 10_000).is_empty(),
+            "no rate across a discarded baseline"
+        );
         assert_eq!(s.as_of("t"), Some(HORIZON_MS + 1));
     }
 
@@ -181,13 +217,21 @@ mod tests {
     #[test]
     fn samples_older_than_the_horizon_are_pruned() {
         let s = SamplerStore::new();
-        s.record("t", 0, 0);                    // dropped below: 906s old
-        s.record("t", 10_000, 10);              // kept: 896s old, inside 900s
+        s.record("t", 0, 0); // dropped below: 906s old
+        s.record("t", 10_000, 10); // kept: 896s old, inside 900s
         s.record("t", HORIZON_MS - 5_000, 100);
         s.record("t", HORIZON_MS + 6_000, 200);
         let points = s.rate_points("t", 10_000);
-        assert_eq!(points.len(), 2, "three in-horizon samples make two rate points");
-        assert_eq!(points[0].ts_ms, HORIZON_MS - 5_000, "the sample past the horizon is gone");
+        assert_eq!(
+            points.len(),
+            2,
+            "three in-horizon samples make two rate points"
+        );
+        assert_eq!(
+            points[0].ts_ms,
+            HORIZON_MS - 5_000,
+            "the sample past the horizon is gone"
+        );
     }
 
     /// Owner ruling 2026-08-19: a shrinking total means the topic was
@@ -199,7 +243,10 @@ mod tests {
         let s = SamplerStore::new();
         s.record("t", 0, 100);
         s.record("t", 10_000, 40);
-        assert!(s.rate_points("t", 10_000).is_empty(), "no rate is honest; 0 msg/s is not");
+        assert!(
+            s.rate_points("t", 10_000).is_empty(),
+            "no rate is honest; 0 msg/s is not"
+        );
         assert_eq!(s.as_of("t"), Some(10_000));
     }
 

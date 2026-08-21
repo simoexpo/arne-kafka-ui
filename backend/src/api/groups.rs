@@ -1,8 +1,8 @@
 use crate::cluster::admin;
 use crate::error::ApiError;
 use crate::state::AppState;
-use axum::extract::{Path, Query, State};
 use axum::Json;
+use axum::extract::{Path, Query, State};
 
 pub async fn list(
     State(state): State<AppState>,

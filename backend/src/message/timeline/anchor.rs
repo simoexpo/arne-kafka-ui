@@ -1,4 +1,4 @@
-use crate::cluster::{ClusterHandle, ADMIN_TIMEOUT};
+use crate::cluster::{ADMIN_TIMEOUT, ClusterHandle};
 use crate::error::{self, ApiError};
 use crate::message::fetch;
 
@@ -59,7 +59,11 @@ pub enum Anchor {
     /// in the resulting page while every other partition picks up at-or-after
     /// the same instant: nothing lost, nothing pinned to the wrong end,
     /// relative to a `TimestampResolved` anchor at that same timestamp.
-    OffsetForwardAligned { partition: i32, offset: i64, aligned: Vec<(i32, Option<i64>)> },
+    OffsetForwardAligned {
+        partition: i32,
+        offset: i64,
+        aligned: Vec<(i32, Option<i64>)>,
+    },
 }
 
 /// Computes the starting cursor positions for a fresh (non-cursor) page
@@ -70,22 +74,38 @@ pub fn initial_positions(watermarks: &[(i32, i64, i64)], anchor: &Anchor) -> Vec
         Anchor::Beginning => watermarks.iter().map(|&(p, lo, _)| (p, lo)).collect(),
         Anchor::Offset { partition, offset } => watermarks
             .iter()
-            .map(|&(p, _, hi)| if p == *partition { (p, offset + 1) } else { (p, hi) })
+            .map(|&(p, _, hi)| {
+                if p == *partition {
+                    (p, offset + 1)
+                } else {
+                    (p, hi)
+                }
+            })
             .collect(),
         Anchor::TimestampResolved(resolved) => watermarks
             .iter()
             .map(|&(p, _, hi)| {
-                let found = resolved.iter().find(|&&(rp, _)| rp == p).and_then(|&(_, o)| o);
+                let found = resolved
+                    .iter()
+                    .find(|&&(rp, _)| rp == p)
+                    .and_then(|&(_, o)| o);
                 (p, found.unwrap_or(hi))
             })
             .collect(),
-        Anchor::OffsetForwardAligned { partition, offset, aligned } => watermarks
+        Anchor::OffsetForwardAligned {
+            partition,
+            offset,
+            aligned,
+        } => watermarks
             .iter()
             .map(|&(p, _, hi)| {
                 if p == *partition {
                     (p, *offset)
                 } else {
-                    let found = aligned.iter().find(|&&(rp, _)| rp == p).and_then(|&(_, o)| o);
+                    let found = aligned
+                        .iter()
+                        .find(|&&(rp, _)| rp == p)
+                        .and_then(|&(_, o)| o);
                     (p, found.unwrap_or(hi))
                 }
             })
@@ -115,24 +135,29 @@ pub fn resolve_timestamp_offsets_blocking(
     watermarks: &[(i32, i64, i64)],
     ts_ms: i64,
 ) -> Result<Vec<(i32, Option<i64>)>, ApiError> {
+    use rdkafka::Offset;
     use rdkafka::consumer::Consumer;
     use rdkafka::topic_partition_list::TopicPartitionList;
-    use rdkafka::Offset;
     let mut tpl = TopicPartitionList::new();
     for &(p, _, _) in watermarks {
         tpl.add_partition_offset(topic, p, Offset::Offset(ts_ms))
             .map_err(|e| error::from_kafka(&handle.name, "resolve message timestamps", &e))?;
     }
-    let resolved = handle.consumer()
+    let resolved = handle
+        .consumer()
         .offsets_for_times(tpl, ADMIN_TIMEOUT)
         .map_err(|e| error::from_kafka(&handle.name, "resolve message timestamps", &e))?;
-    Ok(resolved.elements().iter().map(|e| {
-        let start = match e.offset() {
-            Offset::Offset(o) => Some(o),
-            _ => None, // no message at/after ts in this partition
-        };
-        (e.partition(), start)
-    }).collect())
+    Ok(resolved
+        .elements()
+        .iter()
+        .map(|e| {
+            let start = match e.offset() {
+                Offset::Offset(o) => Some(o),
+                _ => None, // no message at/after ts in this partition
+            };
+            (e.partition(), start)
+        })
+        .collect())
 }
 
 /// Resolves a fresh page request's starting positions: builds the resolved
@@ -163,13 +188,25 @@ pub fn resolve_positions_blocking(
             // partition at that instant, the same way a timestamp anchor
             // would.
             if direction == Direction::Forward {
-                let anchor_ts = fetch::fetch_one_record_blocking(&handle.config, topic, partition, offset)?
-                    .and_then(|r| r.timestamp_ms)
-                    .ok_or_else(|| ApiError::bad_request(format!(
+                let anchor_ts = fetch::fetch_one_record_blocking(
+                    &handle.config,
+                    topic,
+                    partition,
+                    offset,
+                )?
+                .and_then(|r| r.timestamp_ms)
+                .ok_or_else(|| {
+                    ApiError::bad_request(format!(
                         "no message with a timestamp at partition {partition} offset {offset}"
-                    )))?;
-                let aligned = resolve_timestamp_offsets_blocking(handle, topic, watermarks, anchor_ts)?;
-                Anchor::OffsetForwardAligned { partition, offset, aligned }
+                    ))
+                })?;
+                let aligned =
+                    resolve_timestamp_offsets_blocking(handle, topic, watermarks, anchor_ts)?;
+                Anchor::OffsetForwardAligned {
+                    partition,
+                    offset,
+                    aligned,
+                }
             } else {
                 Anchor::Offset { partition, offset }
             }

@@ -1,9 +1,9 @@
 mod support;
 
-use axum::http::StatusCode;
 use arne::api::app;
 use arne::cluster::{ClusterHandle, HealthStatus};
 use arne::config::Limits;
+use axum::http::StatusCode;
 use std::sync::Arc;
 use support::*;
 use tower::ServiceExt;
@@ -58,12 +58,18 @@ async fn topics_inventory_lists_topic_with_isr_and_no_estimates() {
     let (status, body) = get_json(app(state), "/api/clusters/test/topics").await;
     assert_eq!(status, 200);
     let topics = body["topics"].as_array().unwrap();
-    let t = topics.iter().find(|t| t["name"] == "inv-topic").expect("topic listed");
+    let t = topics
+        .iter()
+        .find(|t| t["name"] == "inv-topic")
+        .expect("topic listed");
     assert_eq!(t["partitions"], 3);
     assert_eq!(t["replication_factor"], 1);
     assert_eq!(t["isr"], 1);
     assert_eq!(t["internal"], false);
-    assert!(t.get("message_estimate").is_none(), "estimates are gone from the inventory");
+    assert!(
+        t.get("message_estimate").is_none(),
+        "estimates are gone from the inventory"
+    );
     assert!(body["as_of"].as_i64().unwrap() > 0);
 }
 
@@ -79,7 +85,9 @@ async fn topics_inventory_lists_internal_topics() {
     let (status, body) = get_json(app(state), "/api/clusters/test/topics").await;
     assert_eq!(status, 200);
     let topics = body["topics"].as_array().unwrap();
-    let t = topics.iter().find(|t| t["name"] == "__consumer_offsets")
+    let t = topics
+        .iter()
+        .find(|t| t["name"] == "__consumer_offsets")
         .expect("__consumer_offsets topic listed");
     assert_eq!(t["internal"], true);
 }
@@ -95,15 +103,30 @@ async fn topic_detail_shows_partitions_offsets_and_configs() {
     assert_eq!(body["name"], "detail-topic");
     let parts = body["partitions"].as_array().unwrap();
     assert_eq!(parts.len(), 2);
-    let total: i64 = parts.iter().map(|p| p["end_offset"].as_i64().unwrap() - p["start_offset"].as_i64().unwrap()).sum();
+    let total: i64 = parts
+        .iter()
+        .map(|p| p["end_offset"].as_i64().unwrap() - p["start_offset"].as_i64().unwrap())
+        .sum();
     assert_eq!(total, 5);
     assert!(parts[0]["leader"].as_i64().is_some());
     assert!(!parts[0]["isr"].as_array().unwrap().is_empty());
     let configs = body["configs"].as_array().unwrap();
-    assert!(configs.iter().any(|c| c["name"] == "retention.ms"), "expected retention.ms in configs");
-    let retention = configs.iter().find(|c| c["name"] == "retention.ms").unwrap();
-    assert!(retention["value"].is_string(), "a config carries its value: {retention}");
-    assert!(retention["is_default"].is_boolean(), "and whether it is the broker default: {retention}");
+    assert!(
+        configs.iter().any(|c| c["name"] == "retention.ms"),
+        "expected retention.ms in configs"
+    );
+    let retention = configs
+        .iter()
+        .find(|c| c["name"] == "retention.ms")
+        .unwrap();
+    assert!(
+        retention["value"].is_string(),
+        "a config carries its value: {retention}"
+    );
+    assert!(
+        retention["is_default"].is_boolean(),
+        "and whether it is the broker default: {retention}"
+    );
 }
 
 /// Regression: `describe_configs` inside `topic_detail` must carry the same
@@ -168,29 +191,58 @@ async fn group_detail_tells_the_truth_about_a_new_protocol_group() {
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     };
 
-    assert_eq!(body["group_type"], "Consumer", "the group speaks the KIP-848 protocol: {body}");
+    assert_eq!(
+        body["group_type"], "Consumer",
+        "the group speaks the KIP-848 protocol: {body}"
+    );
 
     // The count the list cannot take from the roster is fetched for the rows
     // on screen only — the same page-scoped batch that carries their lag.
-    let (_, page) = get_json(app(state.clone()), "/api/clusters/test/group-lag?groups=next-group").await;
+    let (_, page) = get_json(
+        app(state.clone()),
+        "/api/clusters/test/group-lag?groups=next-group",
+    )
+    .await;
     let row = &page["groups"][0];
-    assert_eq!(row["member_count"], 1, "the visible row learns its member count: {page}");
+    assert_eq!(
+        row["member_count"], 1,
+        "the visible row learns its member count: {page}"
+    );
 
     // The LIST must agree with the detail page. The legacy describe reports
     // these groups as Dead with no members, so the list reads its state from
     // the modern listing instead of asserting something it cannot know.
     let (_, list) = get_json(app(state.clone()), "/api/clusters/test/groups").await;
-    let listed = list["groups"].as_array().unwrap().iter()
+    let listed = list["groups"]
+        .as_array()
+        .unwrap()
+        .iter()
         .find(|g| g["group_id"] == "next-group")
         .unwrap_or_else(|| panic!("the group is listed: {list}"));
-    assert_eq!(listed["state"], "Stable", "the list agrees with the coordinator: {listed}");
-    assert_eq!(listed["group_type"], "Consumer", "and names the protocol: {listed}");
+    assert_eq!(
+        listed["state"], "Stable",
+        "the list agrees with the coordinator: {listed}"
+    );
+    assert_eq!(
+        listed["group_type"], "Consumer",
+        "and names the protocol: {listed}"
+    );
     let member = &body["members"][0];
-    assert!(!member["client_id"].as_str().unwrap_or("").is_empty(), "member has a client id: {body}");
+    assert!(
+        !member["client_id"].as_str().unwrap_or("").is_empty(),
+        "member has a client id: {body}"
+    );
     // The blob is empty on this protocol: only the coordinator knows this.
     let assigned = member["assigned"].as_array().expect("assignment stated");
-    assert_eq!(assigned[0]["topic"], "next-topic", "the member owns the topic it consumes: {body}");
-    assert_eq!(assigned[0]["partitions"], serde_json::json!([0]), "owning the only partition: {body}");
+    assert_eq!(
+        assigned[0]["topic"], "next-topic",
+        "the member owns the topic it consumes: {body}"
+    );
+    assert_eq!(
+        assigned[0]["partitions"],
+        serde_json::json!([0]),
+        "owning the only partition: {body}"
+    );
 }
 
 /// The activity tab classifies groups from their member assignments. A
@@ -212,10 +264,16 @@ async fn a_new_protocol_group_that_moved_topics_leaves_its_old_tab() {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
         loop {
             let (_, body) = get_json(app(state.clone()), "/api/clusters/test/groups/kn-mv").await;
-            if body["partitions"].as_array().is_some_and(|ps| ps.iter().any(|p| p["topic"] == "kn-a")) {
+            if body["partitions"]
+                .as_array()
+                .is_some_and(|ps| ps.iter().any(|p| p["topic"] == "kn-a"))
+            {
                 break;
             }
-            assert!(std::time::Instant::now() < deadline, "kn-mv never committed on kn-a: {body}");
+            assert!(
+                std::time::Instant::now() < deadline,
+                "kn-mv never committed on kn-a: {body}"
+            );
             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
         }
     }
@@ -225,19 +283,36 @@ async fn a_new_protocol_group_that_moved_topics_leaves_its_old_tab() {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
     loop {
         let (_, body) = get_json(app(state.clone()), "/api/clusters/test/groups/kn-mv").await;
-        let on_b = body["members"].as_array().is_some_and(|ms| ms.iter().any(|m| {
-            m["assigned"].as_array().is_some_and(|a| a.iter().any(|t| t["topic"] == "kn-b"))
-        }));
-        if on_b { break; }
-        assert!(std::time::Instant::now() < deadline, "kn-mv never took kn-b: {body}");
+        let on_b = body["members"].as_array().is_some_and(|ms| {
+            ms.iter().any(|m| {
+                m["assigned"]
+                    .as_array()
+                    .is_some_and(|a| a.iter().any(|t| t["topic"] == "kn-b"))
+            })
+        });
+        if on_b {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "kn-mv never took kn-b: {body}"
+        );
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     }
 
     let before = handle_of(&state).offset_fetch_count("*", "kn-mv");
-    let (status, body) = get_json(app(state.clone()), "/api/clusters/test/topics/kn-a/consumers").await;
+    let (status, body) = get_json(
+        app(state.clone()),
+        "/api/clusters/test/topics/kn-a/consumers",
+    )
+    .await;
     assert_eq!(status, 200);
     assert!(
-        !body["groups"].as_array().unwrap().iter().any(|g| g["group_id"] == "kn-mv"),
+        !body["groups"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|g| g["group_id"] == "kn-mv"),
         "a group assigned elsewhere must not appear on its old topic: {body}"
     );
     assert!(
@@ -253,7 +328,11 @@ async fn a_new_protocol_group_that_moved_topics_leaves_its_old_tab() {
     // and it IS a consumer of the topic it moved to
     let (_, body) = get_json(app(state), "/api/clusters/test/topics/kn-b/consumers").await;
     assert!(
-        body["groups"].as_array().unwrap().iter().any(|g| g["group_id"] == "kn-mv"),
+        body["groups"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|g| g["group_id"] == "kn-mv"),
         "it consumes kn-b: {body}"
     );
 }
@@ -302,8 +381,14 @@ async fn a_group_page_asks_its_coordinator_and_never_enumerates_the_brokers() {
     let (status, _) = get_json(app(state.clone()), "/api/clusters/test/groups").await;
     assert_eq!(status, 200);
     let delta = calls_since(&state, &before).await;
-    assert!(delta.get("ListGroups").copied().unwrap_or(0) >= 1, "the list enumerates: {delta:?}");
-    assert!(delta.get("DescribeGroups").copied().unwrap_or(0) >= 1, "and describes in one batch: {delta:?}");
+    assert!(
+        delta.get("ListGroups").copied().unwrap_or(0) >= 1,
+        "the list enumerates: {delta:?}"
+    );
+    assert!(
+        delta.get("DescribeGroups").copied().unwrap_or(0) >= 1,
+        "and describes in one batch: {delta:?}"
+    );
 }
 
 /// A topic list is `O(topics)` of highly repetitive JSON — the one response
@@ -316,8 +401,12 @@ async fn large_json_responses_are_compressed_but_streams_are_not() {
     let state = state_for(&bootstrap, vec![]);
 
     let plain = get_bytes(app(state.clone()), "/api/clusters/test/topics", None).await;
-    let (headers, gzipped) =
-        get_with_headers(app(state.clone()), "/api/clusters/test/topics", Some("gzip")).await;
+    let (headers, gzipped) = get_with_headers(
+        app(state.clone()),
+        "/api/clusters/test/topics",
+        Some("gzip"),
+    )
+    .await;
     assert_eq!(
         headers.get("content-encoding").map(|v| v.to_str().unwrap()),
         Some("gzip"),
@@ -363,7 +452,10 @@ async fn a_second_look_inside_the_window_costs_the_brokers_nothing() {
     let before = broker_calls(&state).await;
     get_json(app(state.clone()), "/api/clusters/test/topics").await;
     let cold = calls_since(&state, &before).await;
-    assert!(cold.get("Metadata").copied().unwrap_or(0) >= 1, "a cold topic list asks: {cold:?}");
+    assert!(
+        cold.get("Metadata").copied().unwrap_or(0) >= 1,
+        "a cold topic list asks: {cold:?}"
+    );
 
     // Warm: five more viewers of the same page, still inside the window.
     let before = broker_calls(&state).await;
@@ -377,10 +469,17 @@ async fn a_second_look_inside_the_window_costs_the_brokers_nothing() {
     let before = broker_calls(&state).await;
     get_json(app(state.clone()), "/api/clusters/test/groups").await;
     let listed = calls_since(&state, &before).await;
-    assert!(listed.get("ListGroups").copied().unwrap_or(0) >= 1, "a cold group list asks: {listed:?}");
+    assert!(
+        listed.get("ListGroups").copied().unwrap_or(0) >= 1,
+        "a cold group list asks: {listed:?}"
+    );
 
     let before = broker_calls(&state).await;
-    get_json(app(state.clone()), "/api/clusters/test/topics/tier-topic/consumers").await;
+    get_json(
+        app(state.clone()),
+        "/api/clusters/test/topics/tier-topic/consumers",
+    )
+    .await;
     let tab = calls_since(&state, &before).await;
     assert_eq!(
         tab.get("ListGroups").copied().unwrap_or(0),
@@ -414,20 +513,35 @@ async fn groups_list_and_detail_report_lag() {
 
     let (status, body) = get_json(app(state.clone()), "/api/clusters/test/groups").await;
     assert_eq!(status, 200);
-    body["groups"].as_array().unwrap().iter()
-        .find(|g| g["group_id"] == "lag-group").expect("group listed");
+    body["groups"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|g| g["group_id"] == "lag-group")
+        .expect("group listed");
     // lag comes from the scoped endpoint now, for the rows a viewer can see
-    let (status, body) = get_json(app(state.clone()), "/api/clusters/test/group-lag?groups=lag-group").await;
+    let (status, body) = get_json(
+        app(state.clone()),
+        "/api/clusters/test/group-lag?groups=lag-group",
+    )
+    .await;
     assert_eq!(status, 200);
-    let g = body["groups"].as_array().unwrap().iter()
-        .find(|g| g["group_id"] == "lag-group").expect("lag reported");
+    let g = body["groups"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|g| g["group_id"] == "lag-group")
+        .expect("lag reported");
     assert_eq!(g["total_lag"], 6); // 10 produced - 4 committed
 
     let (status, body) = get_json(app(state), "/api/clusters/test/groups/lag-group").await;
     assert_eq!(status, 200);
     assert_eq!(body["group_id"], "lag-group");
     // a healthy group hides nothing, so its total is stateable
-    assert_eq!(body["unreadable_partitions"], 0, "every partition's head was read: {body}");
+    assert_eq!(
+        body["unreadable_partitions"], 0,
+        "every partition's head was read: {body}"
+    );
     let parts = body["partitions"].as_array().unwrap();
     assert_eq!(parts.len(), 1);
     assert_eq!(parts[0]["topic"], "lag-topic");
@@ -450,7 +564,10 @@ async fn topic_consumers_lists_groups_reading_the_topic() {
     assert_eq!(status, 200);
     let groups = body["groups"].as_array().unwrap();
     assert!(groups.iter().any(|g| g["group_id"] == "tc-group"));
-    assert!(!groups.iter().any(|g| g["group_id"] == "tc-other-group"), "unrelated group must not appear");
+    assert!(
+        !groups.iter().any(|g| g["group_id"] == "tc-other-group"),
+        "unrelated group must not appear"
+    );
     let g = groups.iter().find(|g| g["group_id"] == "tc-group").unwrap();
     assert_eq!(g["total_lag"], 0);
 }
@@ -467,7 +584,11 @@ async fn topic_consumers_lists_every_group_reading_the_topic() {
     consume_and_commit(&bootstrap, topic, "fanin-group-b", 5).await;
     let state = state_for(&bootstrap, vec![]);
 
-    let (status, body) = get_json(app(state), &format!("/api/clusters/test/topics/{topic}/consumers")).await;
+    let (status, body) = get_json(
+        app(state),
+        &format!("/api/clusters/test/topics/{topic}/consumers"),
+    )
+    .await;
     assert_eq!(status, 200);
     let groups = body["groups"].as_array().unwrap();
     assert!(groups.iter().any(|g| g["group_id"] == "fanin-group-a"));
@@ -491,7 +612,6 @@ async fn topic_consumers_lists_every_group_reading_the_topic() {
 /// change) no longer pays an OffsetFetch for it on every poll.
 #[tokio::test]
 async fn topic_consumers_skips_live_groups_that_moved_to_another_topic() {
-
     let bootstrap = start_kafka().await;
     create_topic(&bootstrap, "mv-a", 1).await;
     create_topic(&bootstrap, "mv-b", 1).await;
@@ -511,44 +631,87 @@ async fn topic_consumers_skips_live_groups_that_moved_to_another_topic() {
     loop {
         let (_, body) = get_json(app(state.clone()), "/api/clusters/test/groups/mv-group").await;
         let committed_on_b = body["state"] == "Stable"
-            && body["partitions"].as_array().is_some_and(|ps| ps.iter().any(|p| p["topic"] == "mv-b"));
-        if committed_on_b { break; }
-        assert!(std::time::Instant::now() < deadline, "mv-group never became a stable consumer of mv-b: {body}");
+            && body["partitions"]
+                .as_array()
+                .is_some_and(|ps| ps.iter().any(|p| p["topic"] == "mv-b"));
+        if committed_on_b {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "mv-group never became a stable consumer of mv-b: {body}"
+        );
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     }
 
     // The coordinator names the group's protocol, so the page can say why a
     // group shows what it shows instead of guessing.
     let (_, body) = get_json(app(state.clone()), "/api/clusters/test/groups/mv-group").await;
-    assert_eq!(body["group_type"], "Classic", "a legacy consumer speaks the classic protocol: {body}");
-    assert_eq!(body["state"], "Stable", "the live member keeps the group stable: {body}");
-    let hosts: Vec<_> = body["members"].as_array().unwrap().iter()
+    assert_eq!(
+        body["group_type"], "Classic",
+        "a legacy consumer speaks the classic protocol: {body}"
+    );
+    assert_eq!(
+        body["state"], "Stable",
+        "the live member keeps the group stable: {body}"
+    );
+    let hosts: Vec<_> = body["members"]
+        .as_array()
+        .unwrap()
+        .iter()
         .map(|m| m["client_host"].as_str().unwrap_or("").to_string())
         .collect();
-    assert!(hosts.iter().all(|h| !h.is_empty()), "every member reports a host: {body}");
+    assert!(
+        hosts.iter().all(|h| !h.is_empty()),
+        "every member reports a host: {body}"
+    );
 
     // Each live member reports the partitions it actually owns, straight from
     // the coordinator — right for the classic and the KIP-848 protocol alike.
     let (_, body) = get_json(app(state.clone()), "/api/clusters/test/groups/mv-group").await;
     let members = body["members"].as_array().expect("members on the wire");
-    let owned: Vec<_> = members.iter()
-        .flat_map(|m| m["assigned"].as_array().expect("assignment on the wire").iter())
-        .map(|a| (a["topic"].as_str().unwrap().to_string(), a["partitions"].as_array().unwrap().len()))
+    let owned: Vec<_> = members
+        .iter()
+        .flat_map(|m| {
+            m["assigned"]
+                .as_array()
+                .expect("assignment on the wire")
+                .iter()
+        })
+        .map(|a| {
+            (
+                a["topic"].as_str().unwrap().to_string(),
+                a["partitions"].as_array().unwrap().len(),
+            )
+        })
         .collect();
-    assert_eq!(owned, vec![("mv-b".to_string(), 1)], "the live member owns mv-b's only partition: {body}");
+    assert_eq!(
+        owned,
+        vec![("mv-b".to_string(), 1)],
+        "the live member owns mv-b's only partition: {body}"
+    );
 
     // The assignor the group negotiated, straight off the same describe call
     // that yields its members — no extra broker request for it.
     let (_, body) = get_json(app(state.clone()), "/api/clusters/test/groups/mv-group").await;
-    let strategy = body["assignment_strategy"].as_str().expect("strategy is on the wire");
-    assert!(!strategy.is_empty(), "a stable group negotiated an assignor: {body}");
+    let strategy = body["assignment_strategy"]
+        .as_str()
+        .expect("strategy is on the wire");
+    assert!(
+        !strategy.is_empty(),
+        "a stable group negotiated an assignor: {body}"
+    );
 
     // Commits are read per group now (one cluster-wide entry), so the readiness
     // polls above legitimately read this group. What must hold is that viewing
     // the OLD topic reads nothing further: a moved-away group is skipped before
     // the cache is even consulted.
     let before_old_topic = handle_of(&state).offset_fetch_count("*", "mv-group");
-    let (status, body) = get_json(app(state.clone()), "/api/clusters/test/topics/mv-a/consumers").await;
+    let (status, body) = get_json(
+        app(state.clone()),
+        "/api/clusters/test/topics/mv-a/consumers",
+    )
+    .await;
     assert_eq!(status, 200);
     let groups = body["groups"].as_array().unwrap();
     assert!(
@@ -570,22 +733,33 @@ async fn topic_consumers_skips_live_groups_that_moved_to_another_topic() {
 /// hinge on wall-clock timing against a broker shared with every other test.
 #[tokio::test]
 async fn topic_consumers_lists_stopped_groups_that_still_hold_offsets() {
-
     let bootstrap = start_kafka().await;
     create_topic(&bootstrap, "ttl-topic", 1).await;
     produce(&bootstrap, "ttl-topic", 5).await;
     consume_and_commit(&bootstrap, "ttl-topic", "ttl-group", 2).await;
     let state = state_for(&bootstrap, vec![]);
 
-    let (status, body) = get_json(app(state.clone()), "/api/clusters/test/topics/ttl-topic/consumers").await;
+    let (status, body) = get_json(
+        app(state.clone()),
+        "/api/clusters/test/topics/ttl-topic/consumers",
+    )
+    .await;
     assert_eq!(status, 200);
-    let g = body["groups"].as_array().unwrap().iter()
-        .find(|g| g["group_id"] == "ttl-group").expect("stopped group with offsets is shown").clone();
+    let g = body["groups"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|g| g["group_id"] == "ttl-group")
+        .expect("stopped group with offsets is shown")
+        .clone();
     assert_eq!(g["state"], "Empty");
     assert_eq!(g["total_lag"], 3);
     // Commits are read per GROUP now (one request each, whatever topics they
     // cover), so the scope label is the cluster-wide one.
-    assert!(handle_of(&state).offset_fetch_count("*", "ttl-group") >= 1, "an Empty group must be inspected");
+    assert!(
+        handle_of(&state).offset_fetch_count("*", "ttl-group") >= 1,
+        "an Empty group must be inspected"
+    );
 }
 
 /// Owner ruling 2026-08-19: a group that holds an assignment for the topic is
@@ -605,21 +779,36 @@ async fn topic_consumers_lists_an_assigned_group_that_has_not_committed() {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
     loop {
         let (_, body) = get_json(app(state.clone()), "/api/clusters/test/groups/nc-group").await;
-        let joined = body["state"] == "Stable"
-            && body["members"].as_array().is_some_and(|m| m.len() == 1);
-        if joined { break; }
-        assert!(std::time::Instant::now() < deadline, "nc-group never joined: {body}");
+        let joined =
+            body["state"] == "Stable" && body["members"].as_array().is_some_and(|m| m.len() == 1);
+        if joined {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "nc-group never joined: {body}"
+        );
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     }
 
-    let (status, body) = get_json(app(state.clone()), "/api/clusters/test/topics/nc-topic/consumers").await;
+    let (status, body) = get_json(
+        app(state.clone()),
+        "/api/clusters/test/topics/nc-topic/consumers",
+    )
+    .await;
     assert_eq!(status, 200);
-    let g = body["groups"].as_array().unwrap().iter()
+    let g = body["groups"]
+        .as_array()
+        .unwrap()
+        .iter()
         .find(|g| g["group_id"] == "nc-group")
         .unwrap_or_else(|| panic!("an assigned group must be listed before it commits: {body}"))
         .clone();
     assert!(g["total_lag"].is_null(), "lag is undetermined, not 0: {g}");
-    assert!(g["error"].is_null(), "nothing failed — the group simply has no committed offset");
+    assert!(
+        g["error"].is_null(),
+        "nothing failed — the group simply has no committed offset"
+    );
     assert_eq!(g["partitions"].as_array().unwrap().len(), 0);
 }
 
@@ -630,7 +819,12 @@ async fn subjects_without_a_configured_registry_answer_an_honest_envelope() {
     let (status, body) = get_json(app(state), "/api/clusters/test/subjects").await;
     assert_eq!(status, 400, "body: {body}");
     assert_eq!(body["code"], "no_schema_registry");
-    assert!(body["message"].as_str().unwrap().contains("no schema registry configured"));
+    assert!(
+        body["message"]
+            .as_str()
+            .unwrap()
+            .contains("no schema registry configured")
+    );
 }
 
 #[tokio::test]
@@ -650,25 +844,50 @@ async fn unknown_group_is_404() {
 async fn throughput_samples_on_request_and_reports_a_positive_rate() {
     let bootstrap = start_kafka().await;
     create_topic(&bootstrap, "tp-topic", 1).await;
-    let state = state_with_limits(&bootstrap, vec![], Limits { sampler_interval_secs: 0, ..Limits::default() });
+    let state = state_with_limits(
+        &bootstrap,
+        vec![],
+        Limits {
+            sampler_interval_secs: 0,
+            ..Limits::default()
+        },
+    );
     let url = "/api/clusters/test/topics/tp-topic/throughput";
 
     // first poll: baseline only — a rate needs two samples
     let (status, body) = get_json(app(state.clone()), url).await;
     assert_eq!(status, 200);
-    assert!(body["samples"].as_array().unwrap().is_empty(), "one sample cannot make a rate: {body}");
-    assert!(body["as_of"].as_i64().unwrap() > 0, "the baseline is stamped: {body}");
+    assert!(
+        body["samples"].as_array().unwrap().is_empty(),
+        "one sample cannot make a rate: {body}"
+    );
+    assert!(
+        body["as_of"].as_i64().unwrap() > 0,
+        "the baseline is stamped: {body}"
+    );
 
     produce(&bootstrap, "tp-topic", 20).await;
 
     let (status, body) = get_json(app(state.clone()), url).await;
     assert_eq!(status, 200);
     let samples = body["samples"].as_array().unwrap();
-    assert!(!samples.is_empty(), "the second poll must sample again and produce a rate: {body}");
+    assert!(
+        !samples.is_empty(),
+        "the second poll must sample again and produce a rate: {body}"
+    );
     let p = samples.last().unwrap();
-    assert!(p["msgs_per_sec"].as_f64().unwrap() > 0.0, "20 messages arrived between polls: {body}");
-    assert!(p["window_ms"].as_i64().unwrap() > 0, "a rate states the window it covers: {body}");
-    assert_eq!(p["continuous"], true, "back-to-back polls are a continuous stretch: {body}");
+    assert!(
+        p["msgs_per_sec"].as_f64().unwrap() > 0.0,
+        "20 messages arrived between polls: {body}"
+    );
+    assert!(
+        p["window_ms"].as_i64().unwrap() > 0,
+        "a rate states the window it covers: {body}"
+    );
+    assert_eq!(
+        p["continuous"], true,
+        "back-to-back polls are a continuous stretch: {body}"
+    );
 }
 
 /// A topic nobody has ever opened has no samples at all — proof that
@@ -682,14 +901,22 @@ async fn an_unwatched_topic_is_never_sampled() {
     // give any (now deleted) background sweep every chance to run
     tokio::time::sleep(std::time::Duration::from_millis(1_200)).await;
     let handle = state.registry.get("test").unwrap();
-    assert_eq!(handle.sampler.as_of("unwatched-topic"), None, "no request, no sample");
+    assert_eq!(
+        handle.sampler.as_of("unwatched-topic"),
+        None,
+        "no request, no sample"
+    );
 }
 
 #[tokio::test]
 async fn throughput_of_a_missing_topic_is_an_honest_404() {
     let bootstrap = start_kafka().await;
     let state = state_for(&bootstrap, vec![]);
-    let (status, body) = get_json(app(state), "/api/clusters/test/topics/no-such-topic-here/throughput").await;
+    let (status, body) = get_json(
+        app(state),
+        "/api/clusters/test/topics/no-such-topic-here/throughput",
+    )
+    .await;
     assert_eq!(status, 404, "body: {body}");
     assert_eq!(body["code"], "topic_not_found");
 }
@@ -700,7 +927,7 @@ async fn throughput_of_a_missing_topic_is_an_honest_404() {
 /// partition's watermark in ONE invocation instead of one round trip each.
 #[tokio::test]
 async fn ffi_describe_cluster_and_batched_list_offsets_work_against_a_real_broker() {
-    use arne::cluster::ffi::{describe_cluster_blocking, list_offsets_blocking, OffsetSpec};
+    use arne::cluster::ffi::{OffsetSpec, describe_cluster_blocking, list_offsets_blocking};
     use std::time::Duration;
 
     let bootstrap = start_kafka().await;
@@ -716,18 +943,38 @@ async fn ffi_describe_cluster_and_batched_list_offsets_work_against_a_real_broke
     .await
     .unwrap()
     .expect("describe cluster");
-    assert_eq!(described.brokers.len(), 1, "single-broker test cluster: {described:?}");
-    assert!(described.brokers[0].0 >= 0, "broker id is reported: {described:?}");
-    assert!(!described.brokers[0].1.is_empty(), "broker host is reported: {described:?}");
-    assert_eq!(described.controller_id, Some(described.brokers[0].0), "the only broker is the controller");
+    assert_eq!(
+        described.brokers.len(),
+        1,
+        "single-broker test cluster: {described:?}"
+    );
+    assert!(
+        described.brokers[0].0 >= 0,
+        "broker id is reported: {described:?}"
+    );
+    assert!(
+        !described.brokers[0].1.is_empty(),
+        "broker host is reported: {described:?}"
+    );
+    assert_eq!(
+        described.controller_id,
+        Some(described.brokers[0].0),
+        "the only broker is the controller"
+    );
 
     let parts: Vec<(String, i32)> = (0..3).map(|p| ("ffi-topic".to_string(), p)).collect();
     let (latest, earliest) = tokio::task::spawn_blocking({
         let handle = handle.clone();
         let parts = parts.clone();
         move || {
-            let l = list_offsets_blocking(&handle, &parts, OffsetSpec::Latest, Duration::from_secs(10));
-            let e = list_offsets_blocking(&handle, &parts, OffsetSpec::Earliest, Duration::from_secs(10));
+            let l =
+                list_offsets_blocking(&handle, &parts, OffsetSpec::Latest, Duration::from_secs(10));
+            let e = list_offsets_blocking(
+                &handle,
+                &parts,
+                OffsetSpec::Earliest,
+                Duration::from_secs(10),
+            );
             (l, e)
         }
     })
@@ -735,13 +982,32 @@ async fn ffi_describe_cluster_and_batched_list_offsets_work_against_a_real_broke
     .unwrap();
     let latest = latest.expect("list offsets latest");
     let earliest = earliest.expect("list offsets earliest");
-    assert_eq!(latest.len(), 3, "one entry per requested partition in a single call: {latest:?}");
-    assert!(latest.iter().all(|p| p.error.is_none()), "no per-partition errors: {latest:?}");
-    assert_eq!(latest.iter().map(|p| p.offset).sum::<i64>(), 9, "9 messages across 3 partitions: {latest:?}");
-    assert_eq!(earliest.iter().map(|p| p.offset).sum::<i64>(), 0, "nothing trimmed yet: {earliest:?}");
+    assert_eq!(
+        latest.len(),
+        3,
+        "one entry per requested partition in a single call: {latest:?}"
+    );
+    assert!(
+        latest.iter().all(|p| p.error.is_none()),
+        "no per-partition errors: {latest:?}"
+    );
+    assert_eq!(
+        latest.iter().map(|p| p.offset).sum::<i64>(),
+        9,
+        "9 messages across 3 partitions: {latest:?}"
+    );
+    assert_eq!(
+        earliest.iter().map(|p| p.offset).sum::<i64>(),
+        0,
+        "nothing trimmed yet: {earliest:?}"
+    );
 
     // an empty request must not touch the broker at all
-    assert!(list_offsets_blocking(&handle, &[], OffsetSpec::Latest, Duration::from_secs(1)).unwrap().is_empty());
+    assert!(
+        list_offsets_blocking(&handle, &[], OffsetSpec::Latest, Duration::from_secs(1))
+            .unwrap()
+            .is_empty()
+    );
 }
 
 /// Committed offsets through the SHARED admin client: the old path built a
@@ -763,8 +1029,18 @@ async fn ffi_committed_offsets_read_a_groups_position_without_a_throwaway_consum
         let handle = handle.clone();
         let wanted = wanted.clone();
         move || {
-            let c = committed_offsets_blocking(&handle, "cgo-group", Some(&wanted), Duration::from_secs(10));
-            let u = committed_offsets_blocking(&handle, "cgo-never-existed", Some(&wanted), Duration::from_secs(10));
+            let c = committed_offsets_blocking(
+                &handle,
+                "cgo-group",
+                Some(&wanted),
+                Duration::from_secs(10),
+            );
+            let u = committed_offsets_blocking(
+                &handle,
+                "cgo-never-existed",
+                Some(&wanted),
+                Duration::from_secs(10),
+            );
             (c, u)
         }
     })
@@ -772,8 +1048,15 @@ async fn ffi_committed_offsets_read_a_groups_position_without_a_throwaway_consum
     .unwrap();
 
     let committed = committed.expect("committed offsets");
-    assert_eq!(committed.values().sum::<i64>(), 8, "all 8 messages were committed: {committed:?}");
-    assert!(committed.keys().all(|(t, _)| t == "cgo-topic"), "topics are reported: {committed:?}");
+    assert_eq!(
+        committed.values().sum::<i64>(),
+        8,
+        "all 8 messages were committed: {committed:?}"
+    );
+    assert!(
+        committed.keys().all(|(t, _)| t == "cgo-topic"),
+        "topics are reported: {committed:?}"
+    );
     // a group that never committed has no offsets, which is not an error
     assert!(untouched.expect("unknown group is answerable").is_empty());
 
@@ -786,7 +1069,11 @@ async fn ffi_committed_offsets_read_a_groups_position_without_a_throwaway_consum
     .await
     .unwrap()
     .expect("a NULL partition list is librdkafka's documented all-partitions mode");
-    assert_eq!(everything.values().sum::<i64>(), 8, "same answer, nothing enumerated: {everything:?}");
+    assert_eq!(
+        everything.values().sum::<i64>(),
+        8,
+        "same answer, nothing enumerated: {everything:?}"
+    );
     assert!(everything.keys().all(|(t, _)| t == "cgo-topic"));
 }
 
@@ -795,7 +1082,6 @@ async fn ffi_committed_offsets_read_a_groups_position_without_a_throwaway_consum
 /// already in flight — the counter proves only one inspection happened.
 #[tokio::test]
 async fn concurrent_polls_of_one_topic_inspect_each_group_once() {
-
     let bootstrap = start_kafka().await;
     create_topic(&bootstrap, "sf-topic", 1).await;
     produce(&bootstrap, "sf-topic", 6).await;
@@ -815,7 +1101,11 @@ async fn concurrent_polls_of_one_topic_inspect_each_group_once() {
         let (status, body) = res.unwrap();
         assert_eq!(status, 200);
         assert!(
-            body["groups"].as_array().unwrap().iter().any(|g| g["group_id"] == "sf-group"),
+            body["groups"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|g| g["group_id"] == "sf-group"),
             "every caller is served the group, whoever did the work: {body}"
         );
         served += 1;
@@ -842,7 +1132,11 @@ async fn concurrent_list_requests_share_one_snapshot() {
     create_topic(&bootstrap, "snap-topic", 1).await;
     let state = state_for(&bootstrap, vec![]);
 
-    for url in ["/api/clusters/test/topics", "/api/clusters/test/groups", "/api/clusters/test/overview"] {
+    for url in [
+        "/api/clusters/test/topics",
+        "/api/clusters/test/groups",
+        "/api/clusters/test/overview",
+    ] {
         let mut set = tokio::task::JoinSet::new();
         for _ in 0..8 {
             let state = state.clone();
@@ -852,9 +1146,17 @@ async fn concurrent_list_requests_share_one_snapshot() {
         while let Some(res) = set.join_next().await {
             let (status, body) = res.unwrap();
             assert_eq!(status, 200, "{url}: {body}");
-            stamps.insert(body["as_of"].as_i64().expect("every list payload is stamped"));
+            stamps.insert(
+                body["as_of"]
+                    .as_i64()
+                    .expect("every list payload is stamped"),
+            );
         }
-        assert_eq!(stamps.len(), 1, "{url}: eight callers, one shared snapshot (got {stamps:?})");
+        assert_eq!(
+            stamps.len(),
+            1,
+            "{url}: eight callers, one shared snapshot (got {stamps:?})"
+        );
     }
 }
 
@@ -863,7 +1165,6 @@ async fn concurrent_list_requests_share_one_snapshot() {
 /// call, no lag — and lag is asked for by name, for the rows on screen.
 #[tokio::test]
 async fn groups_list_is_identity_only_and_lag_is_requested_per_group() {
-
     let bootstrap = start_kafka().await;
     create_topic(&bootstrap, "gl-a", 1).await;
     create_topic(&bootstrap, "gl-b", 1).await;
@@ -878,26 +1179,40 @@ async fn groups_list_is_identity_only_and_lag_is_requested_per_group() {
     let (status, body) = get_json(app(state.clone()), "/api/clusters/test/groups").await;
     assert_eq!(status, 200);
     let listed = body["groups"].as_array().unwrap();
-    let a = listed.iter().find(|g| g["group_id"] == "gl-group-a").expect("listed");
+    let a = listed
+        .iter()
+        .find(|g| g["group_id"] == "gl-group-a")
+        .expect("listed");
     assert_eq!(a["state"], "Empty");
     assert_eq!(a["member_count"], 0);
-    assert!(a.get("total_lag").is_none(), "the list carries no lag any more: {body}");
+    assert!(
+        a.get("total_lag").is_none(),
+        "the list carries no lag any more: {body}"
+    );
     assert_eq!(
-        handle_of(&state).offset_fetch_count("*", "gl-group-a"), before_a,
+        handle_of(&state).offset_fetch_count("*", "gl-group-a"),
+        before_a,
         "listing groups must not inspect any group's offsets"
     );
-    assert_eq!(handle_of(&state).offset_fetch_count("*", "gl-group-b"), before_b);
+    assert_eq!(
+        handle_of(&state).offset_fetch_count("*", "gl-group-b"),
+        before_b
+    );
 
     // lag for exactly the groups asked for
     let (status, body) = get_json(
         app(state.clone()),
         "/api/clusters/test/group-lag?groups=gl-group-b",
-    ).await;
+    )
+    .await;
     assert_eq!(status, 200, "body: {body}");
     let entries = body["groups"].as_array().unwrap();
     assert_eq!(entries.len(), 1, "only the requested group: {body}");
     assert_eq!(entries[0]["group_id"], "gl-group-b");
-    assert_eq!(entries[0]["total_lag"], 0, "it committed everything: {body}");
+    assert_eq!(
+        entries[0]["total_lag"], 0,
+        "it committed everything: {body}"
+    );
     assert!(body["as_of"].as_i64().unwrap() > 0);
     assert!(
         handle_of(&state).offset_fetch_count("*", "gl-group-a") == before_a,
@@ -908,13 +1223,20 @@ async fn groups_list_is_identity_only_and_lag_is_requested_per_group() {
     let (status, body) = get_json(
         app(state.clone()),
         "/api/clusters/test/group-lag?groups=gl-group-a,does-not-exist",
-    ).await;
+    )
+    .await;
     assert_eq!(status, 200, "body: {body}");
     let entries = body["groups"].as_array().unwrap();
     assert_eq!(entries.len(), 2);
-    let ghost = entries.iter().find(|g| g["group_id"] == "does-not-exist").unwrap();
+    let ghost = entries
+        .iter()
+        .find(|g| g["group_id"] == "does-not-exist")
+        .unwrap();
     assert!(ghost["total_lag"].is_null(), "no commits, no lag: {body}");
-    let a = entries.iter().find(|g| g["group_id"] == "gl-group-a").unwrap();
+    let a = entries
+        .iter()
+        .find(|g| g["group_id"] == "gl-group-a")
+        .unwrap();
     assert_eq!(a["total_lag"], 3, "committed 2 of 5: {body}");
 }
 
@@ -939,7 +1261,10 @@ async fn detail_pages_are_cached_per_entity_and_never_cross_over() {
     assert_eq!(two["name"], "dc-two");
     assert_eq!(one["partitions"].as_array().unwrap().len(), 1);
     assert_eq!(two["partitions"].as_array().unwrap().len(), 3);
-    assert_eq!(one_again["name"], "dc-one", "the other topic did not overwrite this one");
+    assert_eq!(
+        one_again["name"], "dc-one",
+        "the other topic did not overwrite this one"
+    );
     assert_eq!(
         one_again["as_of"], one["as_of"],
         "a second look inside the window is served from cache: {one_again}"
@@ -958,7 +1283,11 @@ async fn detail_pages_are_cached_per_entity_and_never_cross_over() {
         assert_eq!(body["group_id"], "dc-group");
         stamps.insert(body["as_of"].as_i64().unwrap());
     }
-    assert_eq!(stamps.len(), 1, "six readers, one shared answer (got {stamps:?})");
+    assert_eq!(
+        stamps.len(),
+        1,
+        "six readers, one shared answer (got {stamps:?})"
+    );
 }
 
 /// Owner ruling 2026-08-20: watermarks live in ONE cache on the handle, so
@@ -982,11 +1311,21 @@ async fn watermarks_are_shared_across_requests_not_refetched() {
 
     // a lag request fills the shared cache for the partitions it touched
     let before = handle_of(&state).watermark_fetch_count("lag", "wm-topic");
-    let (status, body) = get_json(app(state.clone()), "/api/clusters/test/group-lag?groups=wm-group-a").await;
+    let (status, body) = get_json(
+        app(state.clone()),
+        "/api/clusters/test/group-lag?groups=wm-group-a",
+    )
+    .await;
     assert_eq!(status, 200);
-    assert!(body["groups"][0]["total_lag"].is_i64(), "a lag was computed: {body}");
+    assert!(
+        body["groups"][0]["total_lag"].is_i64(),
+        "a lag was computed: {body}"
+    );
     let after_first = handle_of(&state).watermark_fetch_count("lag", "wm-topic");
-    assert!(after_first > before, "the first request had to read the heads");
+    assert!(
+        after_first > before,
+        "the first request had to read the heads"
+    );
 
     // a later reader with a generous window finds them already there
     let handle = state.registry.get("test").unwrap();
@@ -1003,14 +1342,28 @@ async fn watermarks_are_shared_across_requests_not_refetched() {
     })
     .await
     .unwrap();
-    assert_eq!(fetches, after_first, "nothing was refetched: the heads came from the shared cache");
-    assert!(found.iter().all(|v| v.is_some()), "and they were actually served: {found:?}");
+    assert_eq!(
+        fetches, after_first,
+        "nothing was refetched: the heads came from the shared cache"
+    );
+    assert!(
+        found.iter().all(|v| v.is_some()),
+        "and they were actually served: {found:?}"
+    );
 
     // A batch discloses the age of what it SERVED, not the moment it was
     // asked: asking again inside the window returns the same stamp, because it
     // is the same sample (owner ruling 2026-08-20).
-    let (_, first) = get_json(app(state.clone()), "/api/clusters/test/group-lag?groups=wm-group-a").await;
-    let (_, again) = get_json(app(state.clone()), "/api/clusters/test/group-lag?groups=wm-group-a").await;
+    let (_, first) = get_json(
+        app(state.clone()),
+        "/api/clusters/test/group-lag?groups=wm-group-a",
+    )
+    .await;
+    let (_, again) = get_json(
+        app(state.clone()),
+        "/api/clusters/test/group-lag?groups=wm-group-a",
+    )
+    .await;
     assert_eq!(
         again["as_of"], first["as_of"],
         "a cached answer keeps its own timestamp instead of claiming to be new"
@@ -1032,10 +1385,20 @@ async fn one_commits_read_serves_the_list_the_topic_tab_and_the_group_page() {
     let state = state_for(&bootstrap, vec![]);
 
     let before = handle_of(&state).offset_fetch_count("*", "cv-group");
-    let (_, list) = get_json(app(state.clone()), "/api/clusters/test/group-lag?groups=cv-group").await;
-    let listed = list["groups"][0]["total_lag"].as_i64().expect("the list computed a lag");
+    let (_, list) = get_json(
+        app(state.clone()),
+        "/api/clusters/test/group-lag?groups=cv-group",
+    )
+    .await;
+    let listed = list["groups"][0]["total_lag"]
+        .as_i64()
+        .expect("the list computed a lag");
     let after_list = handle_of(&state).offset_fetch_count("*", "cv-group");
-    assert_eq!(after_list, before + 1, "the list read this group's commits once");
+    assert_eq!(
+        after_list,
+        before + 1,
+        "the list read this group's commits once"
+    );
 
     // A later reader with a generous window finds those commits already there
     // — asserted against the cache directly, because racing two HTTP requests
@@ -1050,21 +1413,39 @@ async fn one_commits_read_serves_the_list_the_topic_tab_and_the_group_page() {
                 .unwrap()
                 .as_millis() as i64;
             let entry = group_lag_cached(&handle, "cv-group", Some(60_000), now).expect("lag rows");
-            assert!(!entry.value.rows.is_empty(), "the shared entry carries this group's rows");
+            assert!(
+                !entry.value.rows.is_empty(),
+                "the shared entry carries this group's rows"
+            );
             handle.offset_fetch_count("*", "cv-group")
         }
     })
     .await
     .unwrap();
-    assert_eq!(reads_after_reuse, after_list, "no second read: every view shares one entry");
+    assert_eq!(
+        reads_after_reuse, after_list,
+        "no second read: every view shares one entry"
+    );
 
     // and every view agrees, because they narrow the same commits
     let (_, detail) = get_json(app(state.clone()), "/api/clusters/test/groups/cv-group").await;
     assert_eq!(detail["partitions"].as_array().unwrap().len(), 1);
-    let (_, tab) = get_json(app(state.clone()), "/api/clusters/test/topics/cv-topic/consumers").await;
-    let row = tab["groups"].as_array().unwrap().iter()
-        .find(|g| g["group_id"] == "cv-group").expect("listed on its topic");
-    assert_eq!(row["total_lag"].as_i64().unwrap(), listed, "same commits, same answer");
+    let (_, tab) = get_json(
+        app(state.clone()),
+        "/api/clusters/test/topics/cv-topic/consumers",
+    )
+    .await;
+    let row = tab["groups"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|g| g["group_id"] == "cv-group")
+        .expect("listed on its topic");
+    assert_eq!(
+        row["total_lag"].as_i64().unwrap(),
+        listed,
+        "same commits, same answer"
+    );
 }
 
 /// Owner ruling 2026-08-20: the topic tab used to make its OWN group-list
@@ -1096,7 +1477,9 @@ async fn the_roster_is_read_once_and_shared_by_every_view() {
             // asserted about THIS test's group only. The roster covers the
             // whole shared broker, so a concurrent test's group (a KIP-848 one
             // has no countable members here) must not decide this.
-            let has_assignments = a.groups.iter()
+            let has_assignments = a
+                .groups
+                .iter()
                 .find(|g| g.group_id == "rr-group")
                 .is_some_and(|g| !g.member_topics.is_empty() || g.member_count == Some(0));
             ([a.as_of, b.as_of, c.as_of], listed, has_assignments)
@@ -1110,15 +1493,36 @@ async fn the_roster_is_read_once_and_shared_by_every_view() {
     assert_eq!(stamps[1], stamps[2], "and so did the third");
 
     // and both endpoints answer from it
-    let (status, tab) = get_json(app(state.clone()), "/api/clusters/test/topics/rr-topic/consumers").await;
+    let (status, tab) = get_json(
+        app(state.clone()),
+        "/api/clusters/test/topics/rr-topic/consumers",
+    )
+    .await;
     assert_eq!(status, 200, "{tab}");
-    assert!(tab["groups"].as_array().unwrap().iter().any(|g| g["group_id"] == "rr-group"), "{tab}");
+    assert!(
+        tab["groups"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|g| g["group_id"] == "rr-group"),
+        "{tab}"
+    );
     let (status, list) = get_json(app(state.clone()), "/api/clusters/test/groups").await;
     assert_eq!(status, 200);
-    assert!(list["groups"].as_array().unwrap().iter().any(|g| g["group_id"] == "rr-group"), "{list}");
+    assert!(
+        list["groups"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|g| g["group_id"] == "rr-group"),
+        "{list}"
+    );
     // the wire shape is unchanged: assignments stay internal
     let one = &list["groups"].as_array().unwrap()[0];
-    assert!(one.get("member_topics").is_none(), "assignments are not leaked to the client: {one}");
+    assert!(
+        one.get("member_topics").is_none(),
+        "assignments are not leaked to the client: {one}"
+    );
 }
 
 #[tokio::test]
@@ -1138,13 +1542,25 @@ async fn overview_reports_brokers_and_counts() {
     // The table is a capped leaderboard, so on a shared broker these two
     // topics may not make the cut: assert the CONTRACT (ranked by partitions,
     // capped, internals excluded) and the ordering only when both appear.
-    assert!(!top.is_empty() && top.len() <= 10, "a non-empty leaderboard, capped at ten: {names:?}");
+    assert!(
+        !top.is_empty() && top.len() <= 10,
+        "a non-empty leaderboard, capped at ten: {names:?}"
+    );
     // the topics this test created exist, whether or not they made the cut
     let all = body["topic_count"].as_u64().unwrap();
     assert!(all >= 2, "both created topics are counted: {all}");
-    let counts: Vec<i64> = top.iter().map(|t| t["partitions"].as_i64().unwrap()).collect();
-    assert!(counts.windows(2).all(|w| w[0] >= w[1]), "ranked by partitions: {counts:?}");
-    assert!(names.iter().all(|n| !n.starts_with("__")), "internal topics excluded: {names:?}");
+    let counts: Vec<i64> = top
+        .iter()
+        .map(|t| t["partitions"].as_i64().unwrap())
+        .collect();
+    assert!(
+        counts.windows(2).all(|w| w[0] >= w[1]),
+        "ranked by partitions: {counts:?}"
+    );
+    assert!(
+        names.iter().all(|n| !n.starts_with("__")),
+        "internal topics excluded: {names:?}"
+    );
     if let (Some(big), Some(small)) = (
         names.iter().position(|n| *n == "ov-topic"),
         names.iter().position(|n| *n == "ov-small"),
@@ -1166,7 +1582,11 @@ async fn full_app_boots_and_serves_over_tcp() {
     let health = reqwest::get(format!("{base}/healthz")).await.unwrap();
     assert_eq!(health.status(), 200);
     let clusters: serde_json::Value = reqwest::get(format!("{base}/api/clusters"))
-        .await.unwrap().json().await.unwrap();
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
     assert_eq!(clusters["clusters"][0]["status"], "healthy");
 }
 
@@ -1189,7 +1609,11 @@ async fn tail_streams_new_messages() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move { axum::serve(listener, app(state)).await.unwrap() });
-    let res = reqwest::get(format!("http://{addr}/api/clusters/test/topics/tail-topic/tail")).await.unwrap();
+    let res = reqwest::get(format!(
+        "http://{addr}/api/clusters/test/topics/tail-topic/tail"
+    ))
+    .await
+    .unwrap();
     assert_eq!(res.status(), 200);
 
     // give the tail consumer a moment to assign at end, then produce
@@ -1217,7 +1641,11 @@ async fn tail_streams_new_messages() {
             }
         }
     }
-    assert_eq!(got, vec!["v0", "v1", "v2"], "tail must stream only new messages in order");
+    assert_eq!(
+        got,
+        vec!["v0", "v1", "v2"],
+        "tail must stream only new messages in order"
+    );
 }
 
 /// End-to-end "never silently skipped" guard: a confluent-framed message
@@ -1238,7 +1666,13 @@ async fn confluent_framed_message_without_registry_surfaces_as_decode_error_ever
     // no registry to even attempt a decode against.
     let mut payload = vec![0u8, 0, 0, 3, 231];
     payload.extend_from_slice(b"not-a-real-schema-payload");
-    produce_raw(&bootstrap, "confluent-no-sr-topic", "confluent-key", &payload).await;
+    produce_raw(
+        &bootstrap,
+        "confluent-no-sr-topic",
+        "confluent-key",
+        &payload,
+    )
+    .await;
     // The "test" cluster (state_for) has no schema_registry configured.
     let state = state_for(&bootstrap, vec![]);
 
@@ -1252,9 +1686,18 @@ async fn confluent_framed_message_without_registry_surfaces_as_decode_error_ever
     let matches: Vec<_> = events.iter().filter(|(n, _)| n == "match").collect();
     assert_eq!(matches.len(), 1, "events: {events:?}");
     let v = &matches[0].1["value"];
-    assert_eq!(v["encoding"], "decode_error", "timeline must surface the decode failure, not skip it: {v:?}");
-    assert!(v["error"].as_str().is_some_and(|e| !e.is_empty()), "expected a non-empty error: {v:?}");
-    assert!(v["text"].as_str().is_some_and(|t| !t.is_empty()), "expected base64 raw bytes: {v:?}");
+    assert_eq!(
+        v["encoding"], "decode_error",
+        "timeline must surface the decode failure, not skip it: {v:?}"
+    );
+    assert!(
+        v["error"].as_str().is_some_and(|e| !e.is_empty()),
+        "expected a non-empty error: {v:?}"
+    );
+    assert!(
+        v["text"].as_str().is_some_and(|t| !t.is_empty()),
+        "expected base64 raw bytes: {v:?}"
+    );
 
     // (b) Filter on the key (which decodes fine as utf8) so the match
     // criterion doesn't depend on the value's content — the point is that a
@@ -1268,9 +1711,18 @@ async fn confluent_framed_message_without_registry_surfaces_as_decode_error_ever
     let matches: Vec<_> = events.iter().filter(|(n, _)| n == "match").collect();
     assert_eq!(matches.len(), 1, "events: {events:?}");
     let (_, m) = matches[0];
-    assert_eq!(m["value"]["encoding"], "decode_error", "filtered timeline must surface the decode failure too: {m:?}");
-    assert!(m["value"]["error"].as_str().is_some_and(|e| !e.is_empty()), "expected a non-empty error: {m:?}");
-    assert!(m["value"]["text"].as_str().is_some_and(|t| !t.is_empty()), "expected base64 raw bytes: {m:?}");
+    assert_eq!(
+        m["value"]["encoding"], "decode_error",
+        "filtered timeline must surface the decode failure too: {m:?}"
+    );
+    assert!(
+        m["value"]["error"].as_str().is_some_and(|e| !e.is_empty()),
+        "expected a non-empty error: {m:?}"
+    );
+    assert!(
+        m["value"]["text"].as_str().is_some_and(|t| !t.is_empty()),
+        "expected base64 raw bytes: {m:?}"
+    );
 }
 
 #[tokio::test]
@@ -1279,24 +1731,62 @@ async fn timeline_first_page_is_globally_ordered_and_paginates_back() {
     create_topic(&bootstrap, "tl-topic", 2).await;
     // interleaved timestamps across partitions: p0 evens, p1 odds, ts = 1000+i*10
     for i in 0..30i64 {
-        produce_at(&bootstrap, "tl-topic", (i % 2) as i32, &format!("k{i}"), &format!("v{i}"), 1000 + i * 10).await;
+        produce_at(
+            &bootstrap,
+            "tl-topic",
+            (i % 2) as i32,
+            &format!("k{i}"),
+            &format!("v{i}"),
+            1000 + i * 10,
+        )
+        .await;
     }
     let state = state_for(&bootstrap, vec![]);
-    let events = collect_sse(app(state.clone()), "/api/clusters/test/topics/tl-topic/timeline?direction=back&limit=10&anchor=latest", 200).await;
-    let matches: Vec<_> = events.iter().filter(|(n, _)| n == "match").map(|(_, m)| m.clone()).collect();
+    let events = collect_sse(
+        app(state.clone()),
+        "/api/clusters/test/topics/tl-topic/timeline?direction=back&limit=10&anchor=latest",
+        200,
+    )
+    .await;
+    let matches: Vec<_> = events
+        .iter()
+        .filter(|(n, _)| n == "match")
+        .map(|(_, m)| m.clone())
+        .collect();
     assert_eq!(matches.len(), 10);
-    let ts: Vec<i64> = matches.iter().map(|m| m["timestamp_ms"].as_i64().unwrap()).collect();
-    let mut sorted = ts.clone(); sorted.sort(); sorted.reverse();
+    let ts: Vec<i64> = matches
+        .iter()
+        .map(|m| m["timestamp_ms"].as_i64().unwrap())
+        .collect();
+    let mut sorted = ts.clone();
+    sorted.sort();
+    sorted.reverse();
     assert_eq!(ts, sorted, "page must be newest-first globally: {ts:?}");
     assert_eq!(matches[0]["value"]["text"], "v29");
     assert_eq!(matches[9]["value"]["text"], "v20");
-    let (_, end) = events.iter().find(|(n, _)| n == "page_end").unwrap().clone();
+    let (_, end) = events
+        .iter()
+        .find(|(n, _)| n == "page_end")
+        .unwrap()
+        .clone();
     assert_eq!(end["exhausted"], false);
     let cursor = end["cursor"].as_str().unwrap().to_string();
 
     // page 2 continues without gap or overlap
-    let events2 = collect_sse(app(state), &format!("/api/clusters/test/topics/tl-topic/timeline?direction=back&limit=10&cursor={}", urlencoding::encode(&cursor)), 200).await;
-    let m2: Vec<_> = events2.iter().filter(|(n, _)| n == "match").map(|(_, m)| m["value"]["text"].as_str().unwrap().to_string()).collect();
+    let events2 = collect_sse(
+        app(state),
+        &format!(
+            "/api/clusters/test/topics/tl-topic/timeline?direction=back&limit=10&cursor={}",
+            urlencoding::encode(&cursor)
+        ),
+        200,
+    )
+    .await;
+    let m2: Vec<_> = events2
+        .iter()
+        .filter(|(n, _)| n == "match")
+        .map(|(_, m)| m["value"]["text"].as_str().unwrap().to_string())
+        .collect();
     assert_eq!(m2.first().unwrap(), "v19");
     assert_eq!(m2.last().unwrap(), "v10");
 }
@@ -1305,12 +1795,30 @@ async fn timeline_first_page_is_globally_ordered_and_paginates_back() {
 async fn timeline_beginning_forward_reaches_exhaustion() {
     let bootstrap = start_kafka().await;
     create_topic(&bootstrap, "tl-fwd-topic", 1).await;
-    for i in 0..5i64 { produce_at(&bootstrap, "tl-fwd-topic", 0, &format!("k{i}"), &format!("v{i}"), 2000 + i).await; }
+    for i in 0..5i64 {
+        produce_at(
+            &bootstrap,
+            "tl-fwd-topic",
+            0,
+            &format!("k{i}"),
+            &format!("v{i}"),
+            2000 + i,
+        )
+        .await;
+    }
     let state = state_for(&bootstrap, vec![]);
     let events = collect_sse(app(state), "/api/clusters/test/topics/tl-fwd-topic/timeline?direction=forward&limit=10&anchor=beginning", 200).await;
-    let m: Vec<_> = events.iter().filter(|(n, _)| n == "match").map(|(_, v)| v["value"]["text"].as_str().unwrap().to_string()).collect();
+    let m: Vec<_> = events
+        .iter()
+        .filter(|(n, _)| n == "match")
+        .map(|(_, v)| v["value"]["text"].as_str().unwrap().to_string())
+        .collect();
     assert_eq!(m, vec!["v0", "v1", "v2", "v3", "v4"]); // forward pages are oldest-first
-    let (_, end) = events.iter().find(|(n, _)| n == "page_end").unwrap().clone();
+    let (_, end) = events
+        .iter()
+        .find(|(n, _)| n == "page_end")
+        .unwrap()
+        .clone();
     assert_eq!(end["exhausted"], true);
     assert!(end["cursor"].is_null());
 }
@@ -1328,8 +1836,13 @@ async fn timeline_bad_direction_is_an_in_stream_error_not_a_400() {
         app(state),
         "/api/clusters/test/topics/x/timeline?direction=sideways&limit=10&anchor=latest",
         20,
-    ).await;
-    let (_, err) = events.iter().find(|(n, _)| n == "app_error").unwrap_or_else(|| panic!("an in-stream error event: {events:?}")).clone();
+    )
+    .await;
+    let (_, err) = events
+        .iter()
+        .find(|(n, _)| n == "app_error")
+        .unwrap_or_else(|| panic!("an in-stream error event: {events:?}"))
+        .clone();
     assert_eq!(err["code"], "bad_request", "{err}");
 }
 
@@ -1357,28 +1870,67 @@ async fn timeline_back_ties_are_lossless_and_not_falsely_exhausted() {
     produce_at(&bootstrap, "tl-tie-topic", 1, "k", "p1o1", 400).await; // p1 offset 1 (tied with o0)
     let state = state_for(&bootstrap, vec![]);
 
-    let events1 = collect_sse(app(state.clone()), "/api/clusters/test/topics/tl-tie-topic/timeline?direction=back&limit=3&anchor=latest", 200).await;
-    let vals1: Vec<String> = events1.iter().filter(|(n, _)| n == "match")
-        .map(|(_, m)| m["value"]["text"].as_str().unwrap().to_string()).collect();
+    let events1 = collect_sse(
+        app(state.clone()),
+        "/api/clusters/test/topics/tl-tie-topic/timeline?direction=back&limit=3&anchor=latest",
+        200,
+    )
+    .await;
+    let vals1: Vec<String> = events1
+        .iter()
+        .filter(|(n, _)| n == "match")
+        .map(|(_, m)| m["value"]["text"].as_str().unwrap().to_string())
+        .collect();
     // C1: p1's tie (o0, o1 @400) resolves o1-before-o0 (offset desc); p0's
     // tie (o1, o2 @300) resolves o2-before-o1 — o1 must NOT appear yet.
-    assert_eq!(vals1, vec!["p1o1", "p1o0", "p0o2"], "back tie-break must keep the higher offset first: {vals1:?}");
-    let (_, end1) = events1.iter().find(|(n, _)| n == "page_end").unwrap().clone();
-    assert_eq!(end1["exhausted"], false, "C2: a page that couldn't fit everything must not claim exhaustion: {end1}");
+    assert_eq!(
+        vals1,
+        vec!["p1o1", "p1o0", "p0o2"],
+        "back tie-break must keep the higher offset first: {vals1:?}"
+    );
+    let (_, end1) = events1
+        .iter()
+        .find(|(n, _)| n == "page_end")
+        .unwrap()
+        .clone();
+    assert_eq!(
+        end1["exhausted"], false,
+        "C2: a page that couldn't fit everything must not claim exhaustion: {end1}"
+    );
     let cursor = end1["cursor"].as_str().unwrap().to_string();
 
-    let events2 = collect_sse(app(state), &format!("/api/clusters/test/topics/tl-tie-topic/timeline?direction=back&limit=3&cursor={}", urlencoding::encode(&cursor)), 200).await;
-    let vals2: Vec<String> = events2.iter().filter(|(n, _)| n == "match")
-        .map(|(_, m)| m["value"]["text"].as_str().unwrap().to_string()).collect();
+    let events2 = collect_sse(
+        app(state),
+        &format!(
+            "/api/clusters/test/topics/tl-tie-topic/timeline?direction=back&limit=3&cursor={}",
+            urlencoding::encode(&cursor)
+        ),
+        200,
+    )
+    .await;
+    let vals2: Vec<String> = events2
+        .iter()
+        .filter(|(n, _)| n == "match")
+        .map(|(_, m)| m["value"]["text"].as_str().unwrap().to_string())
+        .collect();
     assert_eq!(vals2, vec!["p0o1", "p0o0"]);
-    let (_, end2) = events2.iter().find(|(n, _)| n == "page_end").unwrap().clone();
+    let (_, end2) = events2
+        .iter()
+        .find(|(n, _)| n == "page_end")
+        .unwrap()
+        .clone();
     assert_eq!(end2["exhausted"], true);
 
     let mut seen: std::collections::HashSet<String> = vals1.into_iter().collect();
     seen.extend(vals2);
-    let expected: std::collections::HashSet<String> =
-        ["p0o0", "p0o1", "p0o2", "p1o0", "p1o1"].iter().map(|s| s.to_string()).collect();
-    assert_eq!(seen, expected, "every record must be emitted exactly once across pages");
+    let expected: std::collections::HashSet<String> = ["p0o0", "p0o1", "p0o2", "p1o0", "p1o1"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    assert_eq!(
+        seen, expected,
+        "every record must be emitted exactly once across pages"
+    );
 }
 
 /// Fix round 1, C3 (reviewer's exact construction): p0 = [o0@500, o1@300,
@@ -1417,20 +1969,41 @@ async fn timeline_forward_nonmonotonic_timestamps_are_lossless() {
         let events = collect_sse(app(state.clone()), &path, 200).await;
         for (name, m) in &events {
             if name == "match" {
-                seen.push((m["partition"].as_i64().unwrap(), m["offset"].as_i64().unwrap()));
+                seen.push((
+                    m["partition"].as_i64().unwrap(),
+                    m["offset"].as_i64().unwrap(),
+                ));
             }
         }
-        let (_, end) = events.iter().find(|(n, _)| n == "page_end").unwrap().clone();
+        let (_, end) = events
+            .iter()
+            .find(|(n, _)| n == "page_end")
+            .unwrap()
+            .clone();
         exhausted = end["exhausted"].as_bool().unwrap();
         cursor = end["cursor"].as_str().map(str::to_string);
-        if exhausted { break; }
+        if exhausted {
+            break;
+        }
     }
-    assert!(exhausted, "must reach exhaustion within the safety bound, not loop forever");
+    assert!(
+        exhausted,
+        "must reach exhaustion within the safety bound, not loop forever"
+    );
     let seen_set: std::collections::HashSet<(i64, i64)> = seen.iter().copied().collect();
-    assert_eq!(seen.len(), seen_set.len(), "fix round 2: contiguous selection must never re-offer an already-taken record: {seen:?}");
+    assert_eq!(
+        seen.len(),
+        seen_set.len(),
+        "fix round 2: contiguous selection must never re-offer an already-taken record: {seen:?}"
+    );
     let expected: std::collections::HashSet<(i64, i64)> =
-        [(0i64, 0i64), (0, 1), (0, 2), (1, 0), (1, 1)].into_iter().collect();
-    assert_eq!(seen_set, expected, "every (partition, offset) must be covered across pages, even with non-monotonic timestamps");
+        [(0i64, 0i64), (0, 1), (0, 2), (1, 0), (1, 1)]
+            .into_iter()
+            .collect();
+    assert_eq!(
+        seen_set, expected,
+        "every (partition, offset) must be covered across pages, even with non-monotonic timestamps"
+    );
 }
 
 /// Fix round 2, N1 (reviewer's probe H, Back direction — exact
@@ -1478,25 +2051,47 @@ async fn timeline_back_position_adjacent_drop_does_not_livelock() {
         let events = collect_sse(app(state.clone()), &path, 200).await;
         for (name, m) in &events {
             if name == "match" {
-                seen.push((m["partition"].as_i64().unwrap(), m["offset"].as_i64().unwrap()));
+                seen.push((
+                    m["partition"].as_i64().unwrap(),
+                    m["offset"].as_i64().unwrap(),
+                ));
             }
         }
-        let (_, end) = events.iter().find(|(n, _)| n == "page_end").unwrap().clone();
+        let (_, end) = events
+            .iter()
+            .find(|(n, _)| n == "page_end")
+            .unwrap()
+            .clone();
         exhausted = end["exhausted"].as_bool().unwrap();
         let next_cursor = end["cursor"].as_str().map(str::to_string);
         if let Some(c) = &next_cursor {
-            assert!(!seen_cursors.contains(c), "cursor must strictly advance, never repeat (N1 livelock): {seen_cursors:?} then {c}");
+            assert!(
+                !seen_cursors.contains(c),
+                "cursor must strictly advance, never repeat (N1 livelock): {seen_cursors:?} then {c}"
+            );
             seen_cursors.push(c.clone());
         }
         cursor = next_cursor;
-        if exhausted { break; }
+        if exhausted {
+            break;
+        }
     }
-    assert!(exhausted, "must reach exhaustion within the safety bound, not livelock");
+    assert!(
+        exhausted,
+        "must reach exhaustion within the safety bound, not livelock"
+    );
     let seen_set: std::collections::HashSet<(i64, i64)> = seen.iter().copied().collect();
-    assert_eq!(seen.len(), seen_set.len(), "contiguous selection must never duplicate: {seen:?}");
+    assert_eq!(
+        seen.len(),
+        seen_set.len(),
+        "contiguous selection must never duplicate: {seen:?}"
+    );
     let expected: std::collections::HashSet<(i64, i64)> =
         [(0i64, 0i64), (0, 1), (1, 0), (1, 1)].into_iter().collect();
-    assert_eq!(seen_set, expected, "every record must be served, with no losses");
+    assert_eq!(
+        seen_set, expected,
+        "every record must be served, with no losses"
+    );
 }
 
 /// Fix round 2, N1 (reviewer's probe I, Forward direction — mirrors probe H
@@ -1527,25 +2122,47 @@ async fn timeline_forward_position_adjacent_drop_does_not_livelock() {
         let events = collect_sse(app(state.clone()), &path, 200).await;
         for (name, m) in &events {
             if name == "match" {
-                seen.push((m["partition"].as_i64().unwrap(), m["offset"].as_i64().unwrap()));
+                seen.push((
+                    m["partition"].as_i64().unwrap(),
+                    m["offset"].as_i64().unwrap(),
+                ));
             }
         }
-        let (_, end) = events.iter().find(|(n, _)| n == "page_end").unwrap().clone();
+        let (_, end) = events
+            .iter()
+            .find(|(n, _)| n == "page_end")
+            .unwrap()
+            .clone();
         exhausted = end["exhausted"].as_bool().unwrap();
         let next_cursor = end["cursor"].as_str().map(str::to_string);
         if let Some(c) = &next_cursor {
-            assert!(!seen_cursors.contains(c), "cursor must strictly advance, never repeat (N1 livelock): {seen_cursors:?} then {c}");
+            assert!(
+                !seen_cursors.contains(c),
+                "cursor must strictly advance, never repeat (N1 livelock): {seen_cursors:?} then {c}"
+            );
             seen_cursors.push(c.clone());
         }
         cursor = next_cursor;
-        if exhausted { break; }
+        if exhausted {
+            break;
+        }
     }
-    assert!(exhausted, "must reach exhaustion within the safety bound, not livelock");
+    assert!(
+        exhausted,
+        "must reach exhaustion within the safety bound, not livelock"
+    );
     let seen_set: std::collections::HashSet<(i64, i64)> = seen.iter().copied().collect();
-    assert_eq!(seen.len(), seen_set.len(), "contiguous selection must never duplicate: {seen:?}");
+    assert_eq!(
+        seen.len(),
+        seen_set.len(),
+        "contiguous selection must never duplicate: {seen:?}"
+    );
     let expected: std::collections::HashSet<(i64, i64)> =
         [(0i64, 0i64), (0, 1), (1, 0), (1, 1)].into_iter().collect();
-    assert_eq!(seen_set, expected, "every record must be served, with no losses");
+    assert_eq!(
+        seen_set, expected,
+        "every record must be served, with no losses"
+    );
 }
 
 /// Superseded: direction now belongs to the
@@ -1579,7 +2196,9 @@ async fn timeline_direction_flip_reads_back_pages_continuation_forward_and_gets_
     let state = state_for(&bootstrap, vec![]);
 
     let expected_m: std::collections::HashSet<(i64, i64)> =
-        [(0i64, 7i64), (0, 8), (0, 9), (1, 7), (1, 8), (1, 9)].into_iter().collect();
+        [(0i64, 7i64), (0, 8), (0, 9), (1, 7), (1, 8), (1, 9)]
+            .into_iter()
+            .collect();
 
     let back = collect_sse(
         app(state.clone()),
@@ -1588,11 +2207,25 @@ async fn timeline_direction_flip_reads_back_pages_continuation_forward_and_gets_
     ).await;
     let m = offsets_of(&back);
     assert_eq!(m, expected_m, "back page: {m:?}");
-    let (_, back_end) = back.iter().find(|(n, _)| n == "page_end").expect("page_end present").clone();
-    assert_eq!(back_end["exhausted"], false, "20 records exist below the anchor, only 6 taken: {back_end}");
-    let continuation = back_end["cursor"].as_str().expect("non-exhausted page must carry a continuation cursor").to_string();
+    let (_, back_end) = back
+        .iter()
+        .find(|(n, _)| n == "page_end")
+        .expect("page_end present")
+        .clone();
+    assert_eq!(
+        back_end["exhausted"], false,
+        "20 records exist below the anchor, only 6 taken: {back_end}"
+    );
+    let continuation = back_end["cursor"]
+        .as_str()
+        .expect("non-exhausted page must carry a continuation cursor")
+        .to_string();
     let decoded = arne::message::timeline::Cursor::decode(&continuation).unwrap();
-    assert_eq!(decoded.positions, vec![(0, 7), (1, 7)], "continuation must sit at the lowest offset taken per partition");
+    assert_eq!(
+        decoded.positions,
+        vec![(0, 7), (1, 7)],
+        "continuation must sit at the lowest offset taken per partition"
+    );
 
     // The decoded blob is still tagged `direction: Back` (minted by a back
     // page) — following it with `direction=forward` must be honored, not
@@ -1600,12 +2233,22 @@ async fn timeline_direction_flip_reads_back_pages_continuation_forward_and_gets_
     assert_eq!(decoded.direction, arne::message::timeline::Direction::Back);
     let forward = collect_sse(
         app(state),
-        &format!("/api/clusters/test/topics/tl-flip-topic/timeline?direction=forward&limit=6&cursor={}", urlencoding::encode(&continuation)),
+        &format!(
+            "/api/clusters/test/topics/tl-flip-topic/timeline?direction=forward&limit=6&cursor={}",
+            urlencoding::encode(&continuation)
+        ),
         200,
-    ).await;
-    assert!(forward.iter().all(|(n, _)| n != "app_error"), "direction flip must not error: {forward:?}");
+    )
+    .await;
+    assert!(
+        forward.iter().all(|(n, _)| n != "app_error"),
+        "direction flip must not error: {forward:?}"
+    );
     let f = offsets_of(&forward);
-    assert_eq!(f, expected_m, "forward-from-the-back-page's-own-continuation-cursor must read back exactly M: {f:?}");
+    assert_eq!(
+        f, expected_m,
+        "forward-from-the-back-page's-own-continuation-cursor must read back exactly M: {f:?}"
+    );
 }
 
 /// Anchor partition property (binding acceptance test): for
@@ -1623,36 +2266,59 @@ async fn timeline_anchor_timestamp_back_and_forward_split_disjointly_and_complet
     produce_interleaved_fixture(&bootstrap, "tl-anchor-split-topic").await;
     let state = state_for(&bootstrap, vec![]);
 
-    let older_half: std::collections::HashSet<(i64, i64)> =
-        (0..2i64).flat_map(|p| (0..10i64).map(move |o| (p, o))).collect();
-    let newer_half: std::collections::HashSet<(i64, i64)> =
-        (0..2i64).flat_map(|p| (10..20i64).map(move |o| (p, o))).collect();
+    let older_half: std::collections::HashSet<(i64, i64)> = (0..2i64)
+        .flat_map(|p| (0..10i64).map(move |o| (p, o)))
+        .collect();
+    let newer_half: std::collections::HashSet<(i64, i64)> = (0..2i64)
+        .flat_map(|p| (10..20i64).map(move |o| (p, o)))
+        .collect();
 
     let back = collect_sse(
         app(state.clone()),
         "/api/clusters/test/topics/tl-anchor-split-topic/timeline?direction=back&limit=500&anchor=timestamp&ts_ms=1200",
         200,
     ).await;
-    let (_, back_end) = back.iter().find(|(n, _)| n == "page_end").expect("page_end present").clone();
+    let (_, back_end) = back
+        .iter()
+        .find(|(n, _)| n == "page_end")
+        .expect("page_end present")
+        .clone();
     assert_eq!(back_end["exhausted"], true, "back: {back_end}");
     let m = offsets_of(&back);
-    assert_eq!(m, older_half, "back(anchor) must cover exactly the records below the anchor: {m:?}");
+    assert_eq!(
+        m, older_half,
+        "back(anchor) must cover exactly the records below the anchor: {m:?}"
+    );
 
     let forward = collect_sse(
         app(state),
         "/api/clusters/test/topics/tl-anchor-split-topic/timeline?direction=forward&limit=500&anchor=timestamp&ts_ms=1200",
         200,
     ).await;
-    let (_, forward_end) = forward.iter().find(|(n, _)| n == "page_end").expect("page_end present").clone();
+    let (_, forward_end) = forward
+        .iter()
+        .find(|(n, _)| n == "page_end")
+        .expect("page_end present")
+        .clone();
     assert_eq!(forward_end["exhausted"], true, "forward: {forward_end}");
     let f = offsets_of(&forward);
-    assert_eq!(f, newer_half, "forward(anchor) must cover exactly the records at/above the anchor: {f:?}");
+    assert_eq!(
+        f, newer_half,
+        "forward(anchor) must cover exactly the records at/above the anchor: {f:?}"
+    );
 
-    assert!(f.is_disjoint(&m), "back(anchor) and forward(anchor) must not overlap: back={m:?} forward={f:?}");
+    assert!(
+        f.is_disjoint(&m),
+        "back(anchor) and forward(anchor) must not overlap: back={m:?} forward={f:?}"
+    );
     let mut union = m.clone();
     union.extend(&f);
-    let full: std::collections::HashSet<(i64, i64)> = older_half.union(&newer_half).copied().collect();
-    assert_eq!(union, full, "back(anchor) ∪ forward(anchor) must cover every fixture record exactly once: {union:?}");
+    let full: std::collections::HashSet<(i64, i64)> =
+        older_half.union(&newer_half).copied().collect();
+    assert_eq!(
+        union, full,
+        "back(anchor) ∪ forward(anchor) must cover every fixture record exactly once: {union:?}"
+    );
 }
 
 /// Owner ruling 2026-08-15: a forward offset-anchor jump aligns EVERY
@@ -1675,24 +2341,43 @@ async fn timeline_offset_anchor_forward_aligns_all_partitions_at_the_targets_tim
 
     // Same "newer half" the timestamp-anchor split test proves forward(ts=
     // 1200) covers exactly: offsets 10..19 in both partitions.
-    let expected: std::collections::HashSet<(i64, i64)> =
-        (0..2i64).flat_map(|p| (10..20i64).map(move |o| (p, o))).collect();
+    let expected: std::collections::HashSet<(i64, i64)> = (0..2i64)
+        .flat_map(|p| (10..20i64).map(move |o| (p, o)))
+        .collect();
 
     let events = collect_sse(
         app(state),
         "/api/clusters/test/topics/tl-offset-forward-align-topic/timeline?direction=forward&limit=500&anchor=offset&partition=0&offset=10",
         200,
     ).await;
-    assert!(events.iter().all(|(n, _)| n != "app_error"), "offset-anchor forward must not error: {events:?}");
-    let (_, end) = events.iter().find(|(n, _)| n == "page_end").expect("page_end present").clone();
+    assert!(
+        events.iter().all(|(n, _)| n != "app_error"),
+        "offset-anchor forward must not error: {events:?}"
+    );
+    let (_, end) = events
+        .iter()
+        .find(|(n, _)| n == "page_end")
+        .expect("page_end present")
+        .clone();
     assert_eq!(end["exhausted"], true, "{end}");
     let m = offsets_of(&events);
-    assert_eq!(m, expected, "must align exactly like a timestamp anchor at the target's own ts (nothing lost, nothing extra): {m:?}");
+    assert_eq!(
+        m, expected,
+        "must align exactly like a timestamp anchor at the target's own ts (nothing lost, nothing extra): {m:?}"
+    );
 
     // The anchored partition's own target is its OLDEST row: no partition-0
     // offset below 10 appears anywhere in the page.
-    let p0_offsets: Vec<i64> = m.iter().filter(|&&(p, _)| p == 0).map(|&(_, o)| o).collect();
-    assert_eq!(*p0_offsets.iter().min().unwrap(), 10, "partition 0's target offset must be the oldest row for its own partition");
+    let p0_offsets: Vec<i64> = m
+        .iter()
+        .filter(|&&(p, _)| p == 0)
+        .map(|&(_, o)| o)
+        .collect();
+    assert_eq!(
+        *p0_offsets.iter().min().unwrap(),
+        10,
+        "partition 0's target offset must be the oldest row for its own partition"
+    );
 }
 
 /// Review fix (M1+M2, 2026-08-15): a bad forward offset anchor (no message
@@ -1720,12 +2405,25 @@ async fn timeline_offset_anchor_forward_at_a_hole_reports_an_in_stream_error_not
         "/api/clusters/test/topics/tl-offset-forward-hole-topic/timeline?direction=forward&limit=100&anchor=offset&partition=0&offset=5",
         20,
     ).await;
-    assert!(events.iter().all(|(n, _)| n != "match"), "no message exists at the hole: {events:?}");
-    assert!(!events.iter().any(|(n, _)| n == "page_end"), "must end in error, not page_end: {events:?}");
-    let (_, err) = events.iter().find(|(n, _)| n == "app_error").unwrap_or_else(|| panic!("an in-stream error event: {events:?}")).clone();
+    assert!(
+        events.iter().all(|(n, _)| n != "match"),
+        "no message exists at the hole: {events:?}"
+    );
+    assert!(
+        !events.iter().any(|(n, _)| n == "page_end"),
+        "must end in error, not page_end: {events:?}"
+    );
+    let (_, err) = events
+        .iter()
+        .find(|(n, _)| n == "app_error")
+        .unwrap_or_else(|| panic!("an in-stream error event: {events:?}"))
+        .clone();
     assert_eq!(err["code"], "bad_request", "{err}");
     assert!(
-        err["message"].as_str().unwrap().contains("partition 0 offset 5"),
+        err["message"]
+            .as_str()
+            .unwrap()
+            .contains("partition 0 offset 5"),
         "message must honestly name the exact target: {err}",
     );
     assert_eq!(err["retriable"], false, "{err}");
@@ -1741,7 +2439,8 @@ async fn timeline_offset_anchor_forward_at_a_hole_reports_an_in_stream_error_not
 /// report the SAME honest in-stream error, never a `match` for a record the
 /// user never asked for.
 #[tokio::test]
-async fn timeline_offset_anchor_forward_past_the_high_watermark_reports_an_in_stream_error_not_a_wrong_record() {
+async fn timeline_offset_anchor_forward_past_the_high_watermark_reports_an_in_stream_error_not_a_wrong_record()
+ {
     let bootstrap = start_kafka().await;
     create_topic(&bootstrap, "tl-offset-forward-past-tail-topic", 1).await;
     produce(&bootstrap, "tl-offset-forward-past-tail-topic", 5).await; // offsets 0..4, high watermark 5
@@ -1752,11 +2451,21 @@ async fn timeline_offset_anchor_forward_past_the_high_watermark_reports_an_in_st
         "/api/clusters/test/topics/tl-offset-forward-past-tail-topic/timeline?direction=forward&limit=100&anchor=offset&partition=0&offset=5000",
         20,
     ).await;
-    assert!(events.iter().all(|(n, _)| n != "match"), "no wrong record may be silently returned: {events:?}");
-    let (_, err) = events.iter().find(|(n, _)| n == "app_error").unwrap_or_else(|| panic!("an in-stream error event: {events:?}")).clone();
+    assert!(
+        events.iter().all(|(n, _)| n != "match"),
+        "no wrong record may be silently returned: {events:?}"
+    );
+    let (_, err) = events
+        .iter()
+        .find(|(n, _)| n == "app_error")
+        .unwrap_or_else(|| panic!("an in-stream error event: {events:?}"))
+        .clone();
     assert_eq!(err["code"], "bad_request", "{err}");
     assert!(
-        err["message"].as_str().unwrap().contains("partition 0 offset 5000"),
+        err["message"]
+            .as_str()
+            .unwrap()
+            .contains("partition 0 offset 5000"),
         "message must honestly name the exact target: {err}",
     );
 }
@@ -1786,11 +2495,25 @@ async fn timeline_accepts_a_client_constructed_cursor() {
         &format!("/api/clusters/test/topics/tl-client-cursor-topic/timeline?direction=forward&limit=10&cursor={}", urlencoding::encode(&client_cursor)),
         200,
     ).await;
-    assert!(events.iter().all(|(n, _)| n != "app_error"), "hand-built cursor must be accepted: {events:?}");
-    let values: Vec<String> = events.iter().filter(|(n, _)| n == "match")
-        .map(|(_, m)| m["value"]["text"].as_str().unwrap().to_string()).collect();
-    assert_eq!(values, vec!["v5", "v6", "v7", "v8", "v9"], "must honor the hand-built position exactly: {values:?}");
-    let (_, end) = events.iter().find(|(n, _)| n == "page_end").expect("page_end present").clone();
+    assert!(
+        events.iter().all(|(n, _)| n != "app_error"),
+        "hand-built cursor must be accepted: {events:?}"
+    );
+    let values: Vec<String> = events
+        .iter()
+        .filter(|(n, _)| n == "match")
+        .map(|(_, m)| m["value"]["text"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(
+        values,
+        vec!["v5", "v6", "v7", "v8", "v9"],
+        "must honor the hand-built position exactly: {values:?}"
+    );
+    let (_, end) = events
+        .iter()
+        .find(|(n, _)| n == "page_end")
+        .expect("page_end present")
+        .clone();
     assert_eq!(end["exhausted"], true, "{end}");
 }
 
@@ -1819,11 +2542,25 @@ async fn timeline_accepts_a_client_cursor_without_direction_field() {
         &format!("/api/clusters/test/topics/tl-client-cursor-no-direction-topic/timeline?direction=forward&limit=10&cursor={}", urlencoding::encode(&client_cursor)),
         200,
     ).await;
-    assert!(events.iter().all(|(n, _)| n != "app_error"), "cursor without a direction field must be accepted: {events:?}");
-    let values: Vec<String> = events.iter().filter(|(n, _)| n == "match")
-        .map(|(_, m)| m["value"]["text"].as_str().unwrap().to_string()).collect();
-    assert_eq!(values, vec!["v5", "v6", "v7", "v8", "v9"], "must honor the position exactly even without direction: {values:?}");
-    let (_, end) = events.iter().find(|(n, _)| n == "page_end").expect("page_end present").clone();
+    assert!(
+        events.iter().all(|(n, _)| n != "app_error"),
+        "cursor without a direction field must be accepted: {events:?}"
+    );
+    let values: Vec<String> = events
+        .iter()
+        .filter(|(n, _)| n == "match")
+        .map(|(_, m)| m["value"]["text"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(
+        values,
+        vec!["v5", "v6", "v7", "v8", "v9"],
+        "must honor the position exactly even without direction: {values:?}"
+    );
+    let (_, end) = events
+        .iter()
+        .find(|(n, _)| n == "page_end")
+        .expect("page_end present")
+        .clone();
     assert_eq!(end["exhausted"], true, "{end}");
 }
 
@@ -1837,8 +2574,13 @@ async fn timeline_limit_zero_is_an_in_stream_error_not_a_400() {
         app(state),
         "/api/clusters/test/topics/x/timeline?direction=back&limit=0&anchor=latest",
         20,
-    ).await;
-    let (_, err) = events.iter().find(|(n, _)| n == "app_error").unwrap_or_else(|| panic!("an in-stream error event: {events:?}")).clone();
+    )
+    .await;
+    let (_, err) = events
+        .iter()
+        .find(|(n, _)| n == "app_error")
+        .unwrap_or_else(|| panic!("an in-stream error event: {events:?}"))
+        .clone();
     assert_eq!(err["code"], "bad_request", "{err}");
 }
 
@@ -1855,8 +2597,13 @@ async fn timeline_bad_params_on_unknown_cluster_reports_the_param_error() {
         app(state),
         "/api/clusters/ghost/topics/x/timeline?direction=sideways&limit=10&anchor=latest",
         20,
-    ).await;
-    let (_, err) = events.iter().find(|(n, _)| n == "app_error").unwrap_or_else(|| panic!("an in-stream error event: {events:?}")).clone();
+    )
+    .await;
+    let (_, err) = events
+        .iter()
+        .find(|(n, _)| n == "app_error")
+        .unwrap_or_else(|| panic!("an in-stream error event: {events:?}"))
+        .clone();
     assert_eq!(err["code"], "bad_request", "{err}");
 }
 
@@ -1871,10 +2618,18 @@ async fn timeline_bad_cursor_is_an_in_stream_error() {
         app(state),
         "/api/clusters/test/topics/x/timeline?direction=back&limit=10&cursor=not-valid-base64-json",
         20,
-    ).await;
-    let (_, err) = events.iter().find(|(n, _)| n == "app_error").unwrap_or_else(|| panic!("an in-stream error event: {events:?}")).clone();
+    )
+    .await;
+    let (_, err) = events
+        .iter()
+        .find(|(n, _)| n == "app_error")
+        .unwrap_or_else(|| panic!("an in-stream error event: {events:?}"))
+        .clone();
     assert_eq!(err["code"], "bad_request", "{err}");
-    assert!(err["message"].as_str().unwrap().contains("bad cursor"), "{err}");
+    assert!(
+        err["message"].as_str().unwrap().contains("bad cursor"),
+        "{err}"
+    );
 }
 
 /// I2: a query string axum's `Query<T>` would otherwise reject at
@@ -1890,8 +2645,13 @@ async fn timeline_non_numeric_limit_is_an_in_stream_error_not_text_plain() {
         app(state),
         "/api/clusters/test/topics/x/timeline?direction=back&limit=abc&anchor=latest",
         20,
-    ).await;
-    let (_, err) = events.iter().find(|(n, _)| n == "app_error").unwrap_or_else(|| panic!("an in-stream error event: {events:?}")).clone();
+    )
+    .await;
+    let (_, err) = events
+        .iter()
+        .find(|(n, _)| n == "app_error")
+        .unwrap_or_else(|| panic!("an in-stream error event: {events:?}"))
+        .clone();
     assert_eq!(err["code"], "bad_request", "{err}");
 }
 
@@ -1906,8 +2666,13 @@ async fn timeline_missing_direction_is_an_in_stream_error_not_text_plain() {
         app(state),
         "/api/clusters/test/topics/x/timeline?limit=5&anchor=latest",
         20,
-    ).await;
-    let (_, err) = events.iter().find(|(n, _)| n == "app_error").unwrap_or_else(|| panic!("an in-stream error event: {events:?}")).clone();
+    )
+    .await;
+    let (_, err) = events
+        .iter()
+        .find(|(n, _)| n == "app_error")
+        .unwrap_or_else(|| panic!("an in-stream error event: {events:?}"))
+        .clone();
     assert_eq!(err["code"], "bad_request", "{err}");
 }
 
@@ -1939,19 +2704,38 @@ async fn timeline_transactional_commit_hole_is_not_a_short_read() {
     produce_transactional(&bootstrap, "tl-txn-topic", 4).await;
     let state = state_for(&bootstrap, vec![]);
 
-    let back = collect_sse(app(state.clone()), "/api/clusters/test/topics/tl-txn-topic/timeline?direction=back&limit=10&anchor=latest", 200).await;
-    assert!(back.iter().all(|(n, _)| n != "app_error"), "back must not error on a legitimate transaction-commit hole: {back:?}");
+    let back = collect_sse(
+        app(state.clone()),
+        "/api/clusters/test/topics/tl-txn-topic/timeline?direction=back&limit=10&anchor=latest",
+        200,
+    )
+    .await;
+    assert!(
+        back.iter().all(|(n, _)| n != "app_error"),
+        "back must not error on a legitimate transaction-commit hole: {back:?}"
+    );
     let back_matches: Vec<_> = back.iter().filter(|(n, _)| n == "match").collect();
     assert_eq!(back_matches.len(), 4, "back: {back:?}");
-    let (_, back_end) = back.iter().find(|(n, _)| n == "page_end").expect("page_end present").clone();
+    let (_, back_end) = back
+        .iter()
+        .find(|(n, _)| n == "page_end")
+        .expect("page_end present")
+        .clone();
     assert_eq!(back_end["exhausted"], true, "back: {back_end}");
     assert!(back_end["cursor"].is_null());
 
     let forward = collect_sse(app(state), "/api/clusters/test/topics/tl-txn-topic/timeline?direction=forward&limit=10&anchor=beginning", 200).await;
-    assert!(forward.iter().all(|(n, _)| n != "app_error"), "forward must not error on a legitimate transaction-commit hole: {forward:?}");
+    assert!(
+        forward.iter().all(|(n, _)| n != "app_error"),
+        "forward must not error on a legitimate transaction-commit hole: {forward:?}"
+    );
     let forward_matches: Vec<_> = forward.iter().filter(|(n, _)| n == "match").collect();
     assert_eq!(forward_matches.len(), 4, "forward: {forward:?}");
-    let (_, forward_end) = forward.iter().find(|(n, _)| n == "page_end").expect("page_end present").clone();
+    let (_, forward_end) = forward
+        .iter()
+        .find(|(n, _)| n == "page_end")
+        .expect("page_end present")
+        .clone();
     assert_eq!(forward_end["exhausted"], true, "forward: {forward_end}");
     assert!(forward_end["cursor"].is_null());
 }
@@ -1972,17 +2756,28 @@ async fn timeline_cursor_with_unknown_partition_terminates_properly() {
     let cursor = arne::message::timeline::Cursor {
         direction: arne::message::timeline::Direction::Forward,
         positions: vec![(0, 0), (99, 5)],
-    }.encode();
+    }
+    .encode();
     let events = collect_sse(
         app(state),
         &format!("/api/clusters/test/topics/tl-unknown-partition-topic/timeline?direction=forward&limit=10&cursor={}", urlencoding::encode(&cursor)),
         200,
     ).await;
-    assert!(events.iter().all(|(n, _)| n != "app_error"), "unknown partition in cursor must not error: {events:?}");
+    assert!(
+        events.iter().all(|(n, _)| n != "app_error"),
+        "unknown partition in cursor must not error: {events:?}"
+    );
     let matches: Vec<_> = events.iter().filter(|(n, _)| n == "match").collect();
     assert_eq!(matches.len(), 3, "events: {events:?}");
-    let (_, end) = events.iter().find(|(n, _)| n == "page_end").expect("page_end present").clone();
-    assert_eq!(end["exhausted"], true, "must terminate properly, not get stuck on the phantom partition: {end}");
+    let (_, end) = events
+        .iter()
+        .find(|(n, _)| n == "page_end")
+        .expect("page_end present")
+        .clone();
+    assert_eq!(
+        end["exhausted"], true,
+        "must terminate properly, not get stuck on the phantom partition: {end}"
+    );
     assert!(end["cursor"].is_null());
 }
 
@@ -2001,7 +2796,11 @@ async fn timeline_bad_filter_params_are_an_in_stream_error() {
         "/api/clusters/test/topics/x/timeline?direction=back&limit=10&anchor=latest&filter=sideways&q=x",
         20,
     ).await;
-    let (_, err) = events.iter().find(|(n, _)| n == "app_error").unwrap_or_else(|| panic!("unknown filter kind: {events:?}")).clone();
+    let (_, err) = events
+        .iter()
+        .find(|(n, _)| n == "app_error")
+        .unwrap_or_else(|| panic!("unknown filter kind: {events:?}"))
+        .clone();
     assert_eq!(err["code"], "bad_request", "{err}");
 
     let events = collect_sse(
@@ -2009,7 +2808,11 @@ async fn timeline_bad_filter_params_are_an_in_stream_error() {
         "/api/clusters/test/topics/x/timeline?direction=back&limit=10&anchor=latest&filter=contains",
         20,
     ).await;
-    let (_, err) = events.iter().find(|(n, _)| n == "app_error").unwrap_or_else(|| panic!("missing q: {events:?}")).clone();
+    let (_, err) = events
+        .iter()
+        .find(|(n, _)| n == "app_error")
+        .unwrap_or_else(|| panic!("missing q: {events:?}"))
+        .clone();
     assert_eq!(err["code"], "bad_request", "{err}");
 
     let events = collect_sse(
@@ -2017,7 +2820,11 @@ async fn timeline_bad_filter_params_are_an_in_stream_error() {
         "/api/clusters/test/topics/x/timeline?direction=back&limit=10&anchor=latest&filter=json_eq&q=42",
         20,
     ).await;
-    let (_, err) = events.iter().find(|(n, _)| n == "app_error").unwrap_or_else(|| panic!("json_eq missing path: {events:?}")).clone();
+    let (_, err) = events
+        .iter()
+        .find(|(n, _)| n == "app_error")
+        .unwrap_or_else(|| panic!("json_eq missing path: {events:?}"))
+        .clone();
     assert_eq!(err["code"], "bad_request", "{err}");
 }
 
@@ -2027,18 +2834,33 @@ async fn timeline_filter_scans_until_limit_with_progress() {
     create_topic(&bootstrap, "tl-filter-topic", 1).await;
     let records: Vec<(String, String, i64)> = (0..200i64)
         .map(|i| {
-            let v = if i % 20 == 0 { format!("special-{i}") } else { format!("noise-{i}") };
+            let v = if i % 20 == 0 {
+                format!("special-{i}")
+            } else {
+                format!("noise-{i}")
+            };
             (format!("k{i}"), v, 3000 + i)
         })
         .collect();
     produce_at_many(&bootstrap, "tl-filter-topic", 0, &records).await;
     let state = state_for(&bootstrap, vec![]);
     let events = collect_sse(app(state), "/api/clusters/test/topics/tl-filter-topic/timeline?direction=back&limit=5&anchor=latest&filter=contains&q=special", 300).await;
-    let m: Vec<_> = events.iter().filter(|(n, _)| n == "match").map(|(_, v)| v["value"]["text"].as_str().unwrap().to_string()).collect();
+    let m: Vec<_> = events
+        .iter()
+        .filter(|(n, _)| n == "match")
+        .map(|(_, v)| v["value"]["text"].as_str().unwrap().to_string())
+        .collect();
     assert_eq!(m.len(), 5);
     assert!(m.iter().all(|t| t.starts_with("special-")));
-    assert!(events.iter().any(|(n, _)| n == "progress"), "expected progress events");
-    let (_, end) = events.iter().find(|(n, _)| n == "page_end").unwrap().clone();
+    assert!(
+        events.iter().any(|(n, _)| n == "progress"),
+        "expected progress events"
+    );
+    let (_, end) = events
+        .iter()
+        .find(|(n, _)| n == "page_end")
+        .unwrap()
+        .clone();
     assert_eq!(end["exhausted"], false);
     assert!(end["cursor"].is_string());
 }
@@ -2050,25 +2872,43 @@ async fn timeline_filter_budget_exhaustion_reports_and_continues() {
     create_topic(&bootstrap, "tl-budget-topic", 1).await;
     let records: Vec<(String, String, i64)> = (0..300i64)
         .map(|i| {
-            let v = if i == 10 { "needle".to_string() } else { format!("hay-{i}") };
+            let v = if i == 10 {
+                "needle".to_string()
+            } else {
+                format!("hay-{i}")
+            };
             (format!("k{i}"), v, 4000 + i)
         })
         .collect();
     produce_at_many(&bootstrap, "tl-budget-topic", 0, &records).await;
     let mut state = state_for(&bootstrap, vec![]);
-    state.limits = std::sync::Arc::new(Limits { timeline_scan_budget: 100, ..(*state.limits).clone() });
+    state.limits = std::sync::Arc::new(Limits {
+        timeline_scan_budget: 100,
+        ..(*state.limits).clone()
+    });
     // back from latest with budget 100: scans offsets 200..300, finds nothing, stops un-exhausted
     let events = collect_sse(app(state.clone()), "/api/clusters/test/topics/tl-budget-topic/timeline?direction=back&limit=5&anchor=latest&filter=contains&q=needle", 300).await;
     let m = events.iter().filter(|(n, _)| n == "match").count();
     assert_eq!(m, 0);
-    let (_, end) = events.iter().find(|(n, _)| n == "page_end").unwrap().clone();
+    let (_, end) = events
+        .iter()
+        .find(|(n, _)| n == "page_end")
+        .unwrap()
+        .clone();
     assert_eq!(end["exhausted"], false, "budget stop is not edge: {end}");
     let c1 = end["cursor"].as_str().unwrap().to_string();
     // two more budgeted continues reach the needle at offset 10
     let events2 = collect_sse(app(state.clone()), &format!("/api/clusters/test/topics/tl-budget-topic/timeline?direction=back&limit=5&cursor={}&filter=contains&q=needle", urlencoding::encode(&c1)), 300).await;
-    let c2 = events2.iter().find(|(n, _)| n == "page_end").unwrap().1["cursor"].as_str().unwrap().to_string();
+    let c2 = events2.iter().find(|(n, _)| n == "page_end").unwrap().1["cursor"]
+        .as_str()
+        .unwrap()
+        .to_string();
     let events3 = collect_sse(app(state), &format!("/api/clusters/test/topics/tl-budget-topic/timeline?direction=back&limit=5&cursor={}&filter=contains&q=needle", urlencoding::encode(&c2)), 300).await;
-    let found: Vec<_> = events3.iter().filter(|(n, _)| n == "match").map(|(_, v)| v["value"]["text"].as_str().unwrap().to_string()).collect();
+    let found: Vec<_> = events3
+        .iter()
+        .filter(|(n, _)| n == "match")
+        .map(|(_, v)| v["value"]["text"].as_str().unwrap().to_string())
+        .collect();
     assert_eq!(found, vec!["needle"]);
 }
 
@@ -2095,17 +2935,31 @@ async fn timeline_budget_never_overshoots_with_multiple_partitions() {
         produce_at_many(&bootstrap, "tl-budget-multi-topic", p, &records).await;
     }
     let mut state = state_for(&bootstrap, vec![]);
-    state.limits = std::sync::Arc::new(Limits { timeline_scan_budget: 4, ..(*state.limits).clone() });
+    state.limits = std::sync::Arc::new(Limits {
+        timeline_scan_budget: 4,
+        ..(*state.limits).clone()
+    });
 
     let events = collect_sse(app(state), "/api/clusters/test/topics/tl-budget-multi-topic/timeline?direction=back&limit=100&anchor=latest", 300).await;
-    let max_scanned = events.iter()
+    let max_scanned = events
+        .iter()
         .filter(|(n, _)| n == "progress")
         .map(|(_, v)| v["scanned"].as_u64().unwrap())
         .max()
         .unwrap_or(0);
-    assert!(max_scanned <= 4, "budget must never be overshot: max reported scanned = {max_scanned}, events: {events:?}");
-    let (_, end) = events.iter().find(|(n, _)| n == "page_end").unwrap().clone();
-    assert_eq!(end["exhausted"], false, "3x20 records over a budget of 4 cannot be exhausted: {end}");
+    assert!(
+        max_scanned <= 4,
+        "budget must never be overshot: max reported scanned = {max_scanned}, events: {events:?}"
+    );
+    let (_, end) = events
+        .iter()
+        .find(|(n, _)| n == "page_end")
+        .unwrap()
+        .clone();
+    assert_eq!(
+        end["exhausted"], false,
+        "3x20 records over a budget of 4 cannot be exhausted: {end}"
+    );
 }
 
 /// Empty-page contract amendment: the scan budget bounds unfiltered hole
@@ -2128,12 +2982,35 @@ async fn timeline_unfiltered_page_crosses_a_hole_in_one_request() {
     produce_transactional(&bootstrap, "tl-hole-topic", 1).await;
     let state = state_for(&bootstrap, vec![]);
 
-    let events = collect_sse(app(state), "/api/clusters/test/topics/tl-hole-topic/timeline?direction=back&limit=1&anchor=latest", 200).await;
-    assert!(events.iter().all(|(n, _)| n != "app_error"), "must not error crossing a legitimate hole region: {events:?}");
-    let m: Vec<_> = events.iter().filter(|(n, _)| n == "match").map(|(_, v)| v["value"]["text"].as_str().unwrap().to_string()).collect();
-    assert_eq!(m, vec!["v0"], "a single request must cross the trailing hole and return the real record beyond it: {events:?}");
-    let (_, end) = events.iter().find(|(n, _)| n == "page_end").unwrap().clone();
-    assert_eq!(end["exhausted"], true, "the one real record is everything in the topic: {end}");
+    let events = collect_sse(
+        app(state),
+        "/api/clusters/test/topics/tl-hole-topic/timeline?direction=back&limit=1&anchor=latest",
+        200,
+    )
+    .await;
+    assert!(
+        events.iter().all(|(n, _)| n != "app_error"),
+        "must not error crossing a legitimate hole region: {events:?}"
+    );
+    let m: Vec<_> = events
+        .iter()
+        .filter(|(n, _)| n == "match")
+        .map(|(_, v)| v["value"]["text"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(
+        m,
+        vec!["v0"],
+        "a single request must cross the trailing hole and return the real record beyond it: {events:?}"
+    );
+    let (_, end) = events
+        .iter()
+        .find(|(n, _)| n == "page_end")
+        .unwrap()
+        .clone();
+    assert_eq!(
+        end["exhausted"], true,
+        "the one real record is everything in the topic: {end}"
+    );
     assert!(end["cursor"].is_null());
 }
 
@@ -2161,17 +3038,22 @@ async fn timeline_scan_stops_on_client_disconnect() {
     let bootstrap = start_kafka().await;
     let topic = "tl-disconnect-topic";
     create_topic(&bootstrap, topic, 2).await;
-    let big: Vec<(String, String, i64)> =
-        (0..60i64).map(|i| (format!("k{i}"), format!("noise-{i}"), 6000 + i)).collect();
+    let big: Vec<(String, String, i64)> = (0..60i64)
+        .map(|i| (format!("k{i}"), format!("noise-{i}"), 6000 + i))
+        .collect();
     produce_at_many(&bootstrap, topic, 0, &big).await;
-    let small: Vec<(String, String, i64)> =
-        (0..5i64).map(|i| (format!("k{i}"), format!("noise-{i}"), 6000 + i)).collect();
+    let small: Vec<(String, String, i64)> = (0..5i64)
+        .map(|i| (format!("k{i}"), format!("noise-{i}"), 6000 + i))
+        .collect();
     produce_at_many(&bootstrap, topic, 1, &small).await;
 
     let mut state = state_for(&bootstrap, vec![]);
     // Small enough that chunk 0 leaves genuine slack (some budget unspent,
     // not exhausted) once partition 1 hits its edge — see doc comment above.
-    state.limits = std::sync::Arc::new(Limits { timeline_scan_budget: 30, ..(*state.limits).clone() });
+    state.limits = std::sync::Arc::new(Limits {
+        timeline_scan_budget: 30,
+        ..(*state.limits).clone()
+    });
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -2191,7 +3073,11 @@ async fn timeline_scan_stops_on_client_disconnect() {
     let mut stream = res.bytes_stream();
     let mut buf = String::new();
     while !buf.contains("\n\n") {
-        let chunk = stream.next().await.expect("expected at least one SSE frame before disconnect").unwrap();
+        let chunk = stream
+            .next()
+            .await
+            .expect("expected at least one SSE frame before disconnect")
+            .unwrap();
         buf.push_str(&String::from_utf8_lossy(&chunk));
     }
     drop(stream); // client disconnects mid-scan
@@ -2204,7 +3090,10 @@ async fn timeline_scan_stops_on_client_disconnect() {
     tokio::time::sleep(std::time::Duration::from_millis(400)).await;
     let after = fetch_call_count(topic);
 
-    assert!(mid > before, "sanity: the scan must have made at least one real fetch call: before={before} mid={mid}");
+    assert!(
+        mid > before,
+        "sanity: the scan must have made at least one real fetch call: before={before} mid={mid}"
+    );
     assert_eq!(
         after, mid,
         "scan must stop creating fetch consumers after client disconnect (zombie scan): before={before} mid={mid} after={after}"
@@ -2227,16 +3116,24 @@ async fn old_endpoints_are_gone() {
     let (status, body) = get_json(
         app(state.clone()),
         "/api/clusters/test/topics/x/messages?anchor=latest",
-    ).await;
-    assert_eq!(status, 404, "/messages must be gone (404 envelope), got {body}");
+    )
+    .await;
+    assert_eq!(
+        status, 404,
+        "/messages must be gone (404 envelope), got {body}"
+    );
     assert_eq!(body["code"], "not_found");
     assert_eq!(body["retriable"], false);
 
     let (status, body) = get_json(
         app(state),
         "/api/clusters/test/topics/x/search?range=last_n&n=10&filter=value_contains&q=x",
-    ).await;
-    assert_eq!(status, 404, "/search must be gone (404 envelope), got {body}");
+    )
+    .await;
+    assert_eq!(
+        status, 404,
+        "/search must be gone (404 envelope), got {body}"
+    );
     assert_eq!(body["code"], "not_found");
 }
 
@@ -2251,7 +3148,12 @@ async fn unknown_api_path_gets_404_envelope() {
     assert_eq!(status, 404);
     assert_eq!(body["code"], "not_found");
     assert_eq!(body["retriable"], false);
-    assert!(body["message"].as_str().unwrap().contains("/api/clusters/nope/definitely-not-a-route"));
+    assert!(
+        body["message"]
+            .as_str()
+            .unwrap()
+            .contains("/api/clusters/nope/definitely-not-a-route")
+    );
 }
 
 /// Probes the self-heal mechanism directly (`health_blocking`), below the
@@ -2264,11 +3166,17 @@ async fn health_self_heals_a_stale_client() {
     // bootstrap; support::cluster_cfg builds a ClusterConfig for it
     let bootstrap = start_kafka().await;
     let handle = Arc::new(ClusterHandle::connect(cluster_cfg("self-heal", &bootstrap)).unwrap());
-    assert_eq!(handle.health_blocking().status, HealthStatus::Healthy, "sanity");
+    assert_eq!(
+        handle.health_blocking().status,
+        HealthStatus::Healthy,
+        "sanity"
+    );
 
     // resident clients now point at a dead port; config still points at the
     // live broker — the stale-client wedge in miniature
-    handle.replace_clients_with_bootstrap("127.0.0.1:1").unwrap();
+    handle
+        .replace_clients_with_bootstrap("127.0.0.1:1")
+        .unwrap();
 
     // first failure stays honest (below threshold)
     let first = handle.health_blocking();
@@ -2278,7 +3186,11 @@ async fn health_self_heals_a_stale_client() {
     // second failure reaches RECOVERY_THRESHOLD: probe fresh client from
     // config, swap, and report Healthy in the same probe
     let second = handle.health_blocking();
-    assert_eq!(second.status, HealthStatus::Healthy, "self-heal must land in-probe");
+    assert_eq!(
+        second.status,
+        HealthStatus::Healthy,
+        "self-heal must land in-probe"
+    );
     assert!(second.broker_count.is_some());
 
     // healed for real: subsequent probes stay healthy, and the public
@@ -2292,10 +3204,21 @@ async fn spa_fallback_serves_html_for_unknown_paths() {
     let bootstrap = start_kafka().await;
     let state = state_for(&bootstrap, vec![]);
     let res = app(state)
-        .oneshot(axum::http::Request::builder().uri("/c/local/topics").body(axum::body::Body::empty()).unwrap())
+        .oneshot(
+            axum::http::Request::builder()
+                .uri("/c/local/topics")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
         .await
         .unwrap();
     assert_eq!(res.status(), 200);
-    let ct = res.headers().get("content-type").unwrap().to_str().unwrap().to_string();
+    let ct = res
+        .headers()
+        .get("content-type")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
     assert!(ct.starts_with("text/html"), "got content-type {ct}");
 }

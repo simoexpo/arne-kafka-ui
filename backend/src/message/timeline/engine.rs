@@ -1,26 +1,32 @@
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::mpsc;
 
 use crate::cluster::ClusterHandle;
 use crate::error::ApiError;
+use crate::message::MessageOut;
 use crate::message::fetch::{self, RawRecord};
 use crate::message::filter::{self, Filter};
 use crate::message::range::{self, PartitionRange};
-use crate::message::MessageOut;
 
 use super::cursor::{Cursor, Direction};
 use super::event::TimelineEvent;
 use super::merge::{chunk_display_order, merge_prefers};
-use super::window::{adjacent_offset, at_edge, cap_windows_to_budget, clamp_positions, page_windows};
+use super::window::{
+    adjacent_offset, at_edge, cap_windows_to_budget, clamp_positions, page_windows,
+};
 
 /// A chunk made genuinely no progress only when nothing was taken, the scan
 /// wasn't cancelled, and some window was left incomplete by
 /// `fetch_ranges_blocking`'s own deadline/cap — never when every window was
 /// merely complete-and-holes (a confirmed-empty range is not an error) or
 /// the scan was cancelled (a client disconnect is not a broker anomaly).
-fn page_made_no_progress(taken_is_empty: bool, any_incomplete_window: bool, cancelled: bool) -> bool {
+fn page_made_no_progress(
+    taken_is_empty: bool,
+    any_incomplete_window: bool,
+    cancelled: bool,
+) -> bool {
     taken_is_empty && any_incomplete_window && !cancelled
 }
 
@@ -94,10 +100,19 @@ fn chunk_span(
 ) -> u64 {
     let active_partitions = positions
         .iter()
-        .filter(|&&(p, pos)| watermarks.iter().find(|(wp, _, _)| *wp == p).is_some_and(|&(_, lo, hi)| !at_edge(pos, lo, hi, direction)))
+        .filter(|&&(p, pos)| {
+            watermarks
+                .iter()
+                .find(|(wp, _, _)| *wp == p)
+                .is_some_and(|&(_, lo, hi)| !at_edge(pos, lo, hi, direction))
+        })
         .count() as u64;
     let per_partition_share = (remaining_budget / active_partitions.max(1)).max(1);
-    let base_span = if filter.is_none() && chunk_index == 0 { limit_u64 } else { CHUNK_SPAN };
+    let base_span = if filter.is_none() && chunk_index == 0 {
+        limit_u64
+    } else {
+        CHUNK_SPAN
+    };
     base_span.min(per_partition_share).max(1)
 }
 
@@ -177,11 +192,17 @@ fn select_partition_streams(
         v.sort_by_key(|r| r.offset);
     }
 
-    let is_complete: Vec<bool> = windows.iter().map(|w| complete.contains(&w.partition)).collect();
+    let is_complete: Vec<bool> = windows
+        .iter()
+        .map(|w| complete.contains(&w.partition))
+        .collect();
     let mut streams: Vec<VecDeque<RawRecord>> = Vec::with_capacity(windows.len());
     for (w, &partition_complete) in windows.iter().zip(&is_complete) {
         let fetched = by_partition.remove(&w.partition).unwrap_or_default();
-        let trust_as_is = partition_complete || fetched.iter().any(|r| r.offset == adjacent_offset(w, direction));
+        let trust_as_is = partition_complete
+            || fetched
+                .iter()
+                .any(|r| r.offset == adjacent_offset(w, direction));
         let ordered: VecDeque<RawRecord> = if trust_as_is {
             match direction {
                 Direction::Back => fetched.into_iter().rev().collect(),
@@ -237,7 +258,15 @@ async fn merge_chunk_records(
     args: MergeChunkArgs<'_>,
     tx: &mpsc::Sender<TimelineEvent>,
 ) -> Option<ChunkTaken> {
-    let MergeChunkArgs { direction, filter, handle, limit_u64, total_matches, total_scanned, budget } = args;
+    let MergeChunkArgs {
+        direction,
+        filter,
+        handle,
+        limit_u64,
+        total_matches,
+        total_scanned,
+        budget,
+    } = args;
     let mut taken_min: Vec<Option<i64>> = vec![None; streams.len()];
     let mut taken_max: Vec<Option<i64>> = vec![None; streams.len()];
     let mut any_taken = false;
@@ -250,16 +279,24 @@ async fn merge_chunk_records(
         }
         let mut best: Option<(usize, &RawRecord)> = None;
         for (i, stream) in streams.iter().enumerate() {
-            let Some(candidate) = stream.front() else { continue };
+            let Some(candidate) = stream.front() else {
+                continue;
+            };
             best = match best {
                 None => Some((i, candidate)),
                 Some((bi, current_best)) => {
-                    if merge_prefers(direction, candidate, current_best) { Some((i, candidate)) } else { Some((bi, current_best)) }
+                    if merge_prefers(direction, candidate, current_best) {
+                        Some((i, candidate))
+                    } else {
+                        Some((bi, current_best))
+                    }
                 }
             };
         }
         let Some((i, _)) = best else { break };
-        let rec = streams[i].pop_front().expect("index i was just selected from a non-empty front() above");
+        let rec = streams[i]
+            .pop_front()
+            .expect("index i was just selected from a non-empty front() above");
         let offset = rec.offset;
         taken_min[i] = Some(taken_min[i].map_or(offset, |m| m.min(offset)));
         taken_max[i] = Some(taken_max[i].map_or(offset, |m| m.max(offset)));
@@ -273,17 +310,25 @@ async fn merge_chunk_records(
 
         records_popped_this_chunk += 1;
         if let Some(scanned) = mid_chunk_progress(total_scanned, records_popped_this_chunk)
-            && tx.send(TimelineEvent::Progress {
-                scanned,
-                matches: total_matches + chunk_matches.len() as u64,
-                budget,
-            }).await.is_err()
+            && tx
+                .send(TimelineEvent::Progress {
+                    scanned,
+                    matches: total_matches + chunk_matches.len() as u64,
+                    budget,
+                })
+                .await
+                .is_err()
         {
             return None;
         }
     }
 
-    Some(ChunkTaken { matches: chunk_matches, taken_min, taken_max, any_taken })
+    Some(ChunkTaken {
+        matches: chunk_matches,
+        taken_min,
+        taken_max,
+        any_taken,
+    })
 }
 
 /// Offset-exact cursor advance per partition — never a record count, which
@@ -313,10 +358,18 @@ fn advance_positions(
     cur_positions
         .iter()
         .map(|&(p, pos)| {
-            let Some(i) = windows.iter().position(|w| w.partition == p) else { return (p, pos) };
+            let Some(i) = windows.iter().position(|w| w.partition == p) else {
+                return (p, pos);
+            };
             let w = &windows[i];
             if is_complete[i] && streams[i].is_empty() {
-                return (p, match direction { Direction::Back => w.start, Direction::Forward => w.end });
+                return (
+                    p,
+                    match direction {
+                        Direction::Back => w.start,
+                        Direction::Forward => w.end,
+                    },
+                );
             }
             match direction {
                 Direction::Back => match taken_min[i] {
@@ -338,16 +391,27 @@ fn advance_positions(
 /// proportional to the ground it covered (otherwise an unfiltered page
 /// could cross an unbounded hole region for free).
 fn charge_budget(old_positions: &[(i32, i64)], new_positions: &[(i32, i64)]) -> u64 {
-    old_positions.iter().zip(new_positions).map(|(&(_, old), &(_, new))| old.abs_diff(new)).sum()
+    old_positions
+        .iter()
+        .zip(new_positions)
+        .map(|(&(_, old), &(_, new))| old.abs_diff(new))
+        .sum()
 }
 
 /// A page is exhausted only once every tracked partition has truly reached
 /// its low/high watermark edge in `direction` — the sole end-of-data
 /// signal; hitting `limit` or spending the budget ends the page with a
 /// resume cursor instead.
-fn all_partitions_at_edge(positions: &[(i32, i64)], watermarks: &[(i32, i64, i64)], direction: Direction) -> bool {
+fn all_partitions_at_edge(
+    positions: &[(i32, i64)],
+    watermarks: &[(i32, i64, i64)],
+    direction: Direction,
+) -> bool {
     positions.iter().all(|&(p, pos)| {
-        watermarks.iter().find(|(wp, _, _)| *wp == p).is_some_and(|&(_, lo, hi)| at_edge(pos, lo, hi, direction))
+        watermarks
+            .iter()
+            .find(|(wp, _, _)| *wp == p)
+            .is_some_and(|&(_, lo, hi)| at_edge(pos, lo, hi, direction))
     })
 }
 
@@ -370,7 +434,13 @@ async fn emit_chunk(
             return false;
         }
     }
-    tx.send(TimelineEvent::Progress { scanned: total_scanned, matches: total_matches, budget }).await.is_ok()
+    tx.send(TimelineEvent::Progress {
+        scanned: total_scanned,
+        matches: total_matches,
+        budget,
+    })
+    .await
+    .is_ok()
 }
 
 /// Runs one timeline page — filtered or not, `filter: None` behaving as
@@ -405,7 +475,14 @@ pub fn run_page(
     topic: String,
     req: PageRequest,
 ) -> (mpsc::Receiver<TimelineEvent>, Arc<AtomicBool>) {
-    let PageRequest { positions, watermarks, direction, limit, filter, budget } = req;
+    let PageRequest {
+        positions,
+        watermarks,
+        direction,
+        limit,
+        filter,
+        budget,
+    } = req;
     let (tx, rx) = mpsc::channel::<TimelineEvent>(256);
     let cancelled = Arc::new(AtomicBool::new(false));
     let cancel = cancelled.clone();
@@ -438,8 +515,22 @@ pub fn run_page(
             }
 
             let remaining_budget = budget - total_scanned;
-            let span = chunk_span(&filter, chunk_index, limit_u64, remaining_budget, &cur_positions, &watermarks, direction);
-            let windows = plan_chunk_windows(&cur_positions, &watermarks, direction, span, remaining_budget);
+            let span = chunk_span(
+                &filter,
+                chunk_index,
+                limit_u64,
+                remaining_budget,
+                &cur_positions,
+                &watermarks,
+                direction,
+            );
+            let windows = plan_chunk_windows(
+                &cur_positions,
+                &watermarks,
+                direction,
+                span,
+                remaining_budget,
+            );
             if windows.is_empty() {
                 exhausted = true;
                 break;
@@ -453,20 +544,41 @@ pub fn run_page(
                 }
             };
 
-            let (mut streams, is_complete) = select_partition_streams(outcome.records, &windows, &outcome.complete, direction);
+            let (mut streams, is_complete) =
+                select_partition_streams(outcome.records, &windows, &outcome.complete, direction);
 
-            let merge_args = MergeChunkArgs { direction, filter: &filter, handle: &handle, limit_u64, total_matches, total_scanned, budget };
+            let merge_args = MergeChunkArgs {
+                direction,
+                filter: &filter,
+                handle: &handle,
+                limit_u64,
+                total_matches,
+                total_scanned,
+                budget,
+            };
             let Some(taken) = merge_chunk_records(&mut streams, merge_args, &tx).await else {
                 return; // client gone mid-chunk
             };
 
-            let new_positions = advance_positions(&cur_positions, &windows, &is_complete, &streams, &taken.taken_min, &taken.taken_max, direction);
+            let new_positions = advance_positions(
+                &cur_positions,
+                &windows,
+                &is_complete,
+                &streams,
+                &taken.taken_min,
+                &taken.taken_max,
+                direction,
+            );
 
             // Progress guarantee, checked before committing this chunk's
             // results, so a stalled chunk never reaches the normal page_end
             // path.
             let any_incomplete_window = is_complete.iter().any(|&c| !c);
-            if page_made_no_progress(!taken.any_taken, any_incomplete_window, cancelled.load(Ordering::SeqCst)) {
+            if page_made_no_progress(
+                !taken.any_taken,
+                any_incomplete_window,
+                cancelled.load(Ordering::SeqCst),
+            ) {
                 // Truthful about WHOSE deadline this is (see
                 // `no_progress_message`'s own doc comment) — never blames
                 // Kafka for our own `fetch_ranges_blocking` cap.
@@ -480,7 +592,16 @@ pub fn run_page(
             cur_positions = new_positions;
             chunk_index += 1;
 
-            if !emit_chunk(&tx, taken.matches, direction, total_scanned, total_matches, budget).await {
+            if !emit_chunk(
+                &tx,
+                taken.matches,
+                direction,
+                total_scanned,
+                total_matches,
+                budget,
+            )
+            .await
+            {
                 return;
             }
 
@@ -489,7 +610,17 @@ pub fn run_page(
             }
         }
 
-        let cursor = if exhausted { None } else { Some(Cursor { direction, positions: cur_positions }.encode()) };
+        let cursor = if exhausted {
+            None
+        } else {
+            Some(
+                Cursor {
+                    direction,
+                    positions: cur_positions,
+                }
+                .encode(),
+            )
+        };
         let _ = tx.send(TimelineEvent::PageEnd { cursor, exhausted }).await;
     });
 
@@ -513,7 +644,10 @@ mod tests {
         assert_eq!(mid_chunk_progress(0, 3_999), None);
         let second = mid_chunk_progress(0, 4_000);
         assert_eq!(second, Some(4_000));
-        assert_ne!(first, second, "consecutive mid-chunk emissions in one chunk must not repeat the same scanned value");
+        assert_ne!(
+            first, second,
+            "consecutive mid-chunk emissions in one chunk must not repeat the same scanned value"
+        );
     }
 
     #[test]
@@ -559,7 +693,10 @@ mod tests {
     #[test]
     fn no_progress_message_blames_our_own_deadline_not_kafka() {
         let msg = no_progress_message();
-        assert_eq!(msg, "the cluster didn't return new records within the fetch deadline");
+        assert_eq!(
+            msg,
+            "the cluster didn't return new records within the fetch deadline"
+        );
         assert!(
             !msg.to_lowercase().contains("kafka"),
             "must not attribute a stall under our own deadline to Kafka going quiet: {msg:?}"

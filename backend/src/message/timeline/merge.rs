@@ -1,5 +1,5 @@
-use crate::message::fetch::RawRecord;
 use crate::message::MessageOut;
+use crate::message::fetch::RawRecord;
 
 use super::cursor::Direction;
 
@@ -8,8 +8,15 @@ use super::cursor::Direction;
 /// prefers the higher timestamp, `Forward` the lower. Ties break by
 /// partition ascending — each partition contributes at most one candidate
 /// per merge step, so a partition-level tie cannot arise.
-pub(super) fn merge_prefers(direction: Direction, candidate: &RawRecord, current_best: &RawRecord) -> bool {
-    let (ct, bt) = (candidate.timestamp_ms.unwrap_or(i64::MIN), current_best.timestamp_ms.unwrap_or(i64::MIN));
+pub(super) fn merge_prefers(
+    direction: Direction,
+    candidate: &RawRecord,
+    current_best: &RawRecord,
+) -> bool {
+    let (ct, bt) = (
+        candidate.timestamp_ms.unwrap_or(i64::MIN),
+        current_best.timestamp_ms.unwrap_or(i64::MIN),
+    );
     let ts_favors_candidate = match direction {
         Direction::Back => ct.cmp(&bt).is_gt(),
         Direction::Forward => ct.cmp(&bt).is_lt(),
@@ -26,8 +33,12 @@ pub(super) fn merge_prefers(direction: Direction, candidate: &RawRecord, current
 /// would invert same-partition offset order under non-monotonic producer
 /// timestamps — this k-way merge cannot, by construction. Mirrors the
 /// frontend store's mergeRows so both sides agree on display order.
-pub(super) fn chunk_display_order(matches: Vec<MessageOut>, direction: Direction) -> Vec<MessageOut> {
-    let mut by_partition: std::collections::BTreeMap<i32, Vec<MessageOut>> = std::collections::BTreeMap::new();
+pub(super) fn chunk_display_order(
+    matches: Vec<MessageOut>,
+    direction: Direction,
+) -> Vec<MessageOut> {
+    let mut by_partition: std::collections::BTreeMap<i32, Vec<MessageOut>> =
+        std::collections::BTreeMap::new();
     for m in matches {
         by_partition.entry(m.partition).or_default().push(m);
     }
@@ -79,11 +90,25 @@ mod tests {
     use super::*;
 
     fn raw(partition: i32, offset: i64, ts: Option<i64>) -> RawRecord {
-        RawRecord { partition, offset, timestamp_ms: ts, key: None, value: Some(b"x".to_vec()), headers: vec![] }
+        RawRecord {
+            partition,
+            offset,
+            timestamp_ms: ts,
+            key: None,
+            value: Some(b"x".to_vec()),
+            headers: vec![],
+        }
     }
 
     fn m(partition: i32, offset: i64, ts: Option<i64>) -> MessageOut {
-        MessageOut { partition, offset, timestamp_ms: ts, key: None, value: None, headers: vec![] }
+        MessageOut {
+            partition,
+            offset,
+            timestamp_ms: ts,
+            key: None,
+            value: None,
+            headers: vec![],
+        }
     }
 
     #[test]
@@ -104,7 +129,12 @@ mod tests {
     fn chunk_display_order_forward_and_ties() {
         // Forward: oldest-first. Tie on ts=70 between p0 and p2 → smaller
         // partition id wins. Null ts sorts as MIN (first, forward).
-        let matches = vec![m(2, 9, Some(70)), m(0, 3, Some(70)), m(1, 4, None), m(0, 4, Some(60))];
+        let matches = vec![
+            m(2, 9, Some(70)),
+            m(0, 3, Some(70)),
+            m(1, 4, None),
+            m(0, 4, Some(60)),
+        ];
         let out = chunk_display_order(matches, Direction::Forward);
         let got: Vec<(i32, i64)> = out.iter().map(|x| (x.partition, x.offset)).collect();
         assert_eq!(got, vec![(1, 4), (0, 3), (0, 4), (2, 9)]);
@@ -125,5 +155,4 @@ mod tests {
         assert!(merge_prefers(Direction::Forward, &older, &newer));
         assert!(!merge_prefers(Direction::Forward, &newer, &older));
     }
-
 }

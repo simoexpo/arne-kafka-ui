@@ -6,7 +6,7 @@ pub mod subjects;
 pub mod topics;
 
 use crate::state::AppState;
-use axum::{routing::get, Router};
+use axum::{Router, routing::get};
 use tower_http::compression::CompressionLayer;
 
 pub fn app(state: AppState) -> Router {
@@ -20,21 +20,54 @@ pub fn app(state: AppState) -> Router {
         .route("/api/clusters", get(clusters::list))
         .route("/api/clusters/{cluster}/overview", get(clusters::overview))
         .route("/api/clusters/{cluster}/topics", get(topics::list))
-        .route("/api/clusters/{cluster}/topics/{topic}", get(topics::detail))
-        .route("/api/clusters/{cluster}/topics/{topic}/consumers", get(topics::consumers))
-        .route("/api/clusters/{cluster}/topics/{topic}/throughput", get(topics::throughput))
-        .route("/api/clusters/{cluster}/topics/{topic}/tail", get(messages::tail_sse))
-        .route("/api/clusters/{cluster}/topics/{topic}/timeline", get(messages::timeline_sse))
+        .route(
+            "/api/clusters/{cluster}/topics/{topic}",
+            get(topics::detail),
+        )
+        .route(
+            "/api/clusters/{cluster}/topics/{topic}/consumers",
+            get(topics::consumers),
+        )
+        .route(
+            "/api/clusters/{cluster}/topics/{topic}/throughput",
+            get(topics::throughput),
+        )
+        .route(
+            "/api/clusters/{cluster}/topics/{topic}/tail",
+            get(messages::tail_sse),
+        )
+        .route(
+            "/api/clusters/{cluster}/topics/{topic}/timeline",
+            get(messages::timeline_sse),
+        )
         .route("/api/clusters/{cluster}/groups", get(groups::list))
         // distinct path, not /groups/lag: a group could legitimately be named "lag"
         .route("/api/clusters/{cluster}/group-lag", get(groups::lag))
-        .route("/api/clusters/{cluster}/broker-calls", get(clusters::broker_calls))
-        .route("/api/clusters/{cluster}/groups/{group}", get(groups::detail))
-        .route("/api/clusters/{cluster}/schema-registry", get(subjects::registry_settings))
-        .route("/api/clusters/{cluster}/schema-ids/{id}", get(subjects::subject_of_id))
+        .route(
+            "/api/clusters/{cluster}/broker-calls",
+            get(clusters::broker_calls),
+        )
+        .route(
+            "/api/clusters/{cluster}/groups/{group}",
+            get(groups::detail),
+        )
+        .route(
+            "/api/clusters/{cluster}/schema-registry",
+            get(subjects::registry_settings),
+        )
+        .route(
+            "/api/clusters/{cluster}/schema-ids/{id}",
+            get(subjects::subject_of_id),
+        )
         .route("/api/clusters/{cluster}/subjects", get(subjects::list))
-        .route("/api/clusters/{cluster}/subjects/{subject}", get(subjects::detail))
-        .route("/api/clusters/{cluster}/subjects/{subject}/strategy", get(subjects::strategy))
+        .route(
+            "/api/clusters/{cluster}/subjects/{subject}",
+            get(subjects::detail),
+        )
+        .route(
+            "/api/clusters/{cluster}/subjects/{subject}/strategy",
+            get(subjects::strategy),
+        )
         .route(
             "/api/clusters/{cluster}/subjects/{subject}/compatibility",
             get(subjects::compatibility_level).post(subjects::check_compatibility),
@@ -63,14 +96,28 @@ mod tests {
         use crate::cluster::registry::ClusterRegistry;
         use crate::config::{ClusterConfig, Limits};
         use std::sync::Arc;
-        let cfg = ClusterConfig { name: "t".into(), bootstrap: "localhost:1".into(), sasl: None, schema_registry: None, broker_call_stats_ms: 0 };
-        AppState { registry: Arc::new(ClusterRegistry::from_config(vec![cfg]).unwrap()), limits: Arc::new(Limits::default()) }
+        let cfg = ClusterConfig {
+            name: "t".into(),
+            bootstrap: "localhost:1".into(),
+            sasl: None,
+            schema_registry: None,
+            broker_call_stats_ms: 0,
+        };
+        AppState {
+            registry: Arc::new(ClusterRegistry::from_config(vec![cfg]).unwrap()),
+            limits: Arc::new(Limits::default()),
+        }
     }
 
     #[tokio::test]
     async fn healthz_returns_ok() {
         let res = app(test_state())
-            .oneshot(Request::builder().uri("/healthz").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/healthz")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::OK);
@@ -83,11 +130,19 @@ mod tests {
     #[tokio::test]
     async fn a_wrong_method_under_api_still_gets_the_404_envelope_not_a_bare_405() {
         let res = app(test_state())
-            .oneshot(Request::builder().method("POST").uri("/api/nope").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/nope")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::NOT_FOUND);
-        let body = axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap();
+        let body = axum::body::to_bytes(res.into_body(), usize::MAX)
+            .await
+            .unwrap();
         let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(v["code"], "not_found");
     }

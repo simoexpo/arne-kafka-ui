@@ -1,10 +1,10 @@
 use crate::cluster::admin;
 use crate::error::ApiError;
 use crate::state::AppState;
-use axum::extract::{Path, State};
 use axum::Json;
+use axum::extract::{Path, State};
 use futures_util::future::join_all;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 pub async fn list(State(state): State<AppState>) -> Json<Value> {
     let handles = state.registry.all();

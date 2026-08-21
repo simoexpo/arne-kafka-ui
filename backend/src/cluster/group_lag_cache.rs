@@ -13,7 +13,6 @@
 
 use super::admin::PartitionLag;
 
-
 /// Deliberately BELOW the consumers tab's 10s poll interval: an entry
 /// refreshed on one poll must be due again on the next, or a poll would
 /// serve a nearly-expired entry and the effective cadence would wobble
@@ -109,8 +108,7 @@ impl LagSnapshot {
     /// Whether this group holds any offsets on `topic` — what decides which
     /// freshness tier a topic's tab applies to the shared entry.
     pub fn covers(&self, topic: &str) -> bool {
-        self.rows.iter().any(|r| r.topic == topic)
-            || self.unknown.iter().any(|(t, _)| t == topic)
+        self.rows.iter().any(|r| r.topic == topic) || self.unknown.iter().any(|(t, _)| t == topic)
     }
 
     /// The rows for one topic, or all of them for a cluster-wide view.
@@ -197,12 +195,18 @@ mod tests {
     use super::*;
 
     fn commit(topic: &str, partition: i32, offset: i64) -> CommittedOffset {
-        CommittedOffset { topic: topic.into(), partition, offset }
+        CommittedOffset {
+            topic: topic.into(),
+            partition,
+            offset,
+        }
     }
 
     #[test]
     fn a_total_is_summed_from_the_partitions_that_were_read() {
-        let snap = lag_rows(&[commit("t", 0, 5), commit("t", 1, 8)], |_, p| Some(10 + i64::from(p)));
+        let snap = lag_rows(&[commit("t", 0, 5), commit("t", 1, 8)], |_, p| {
+            Some(10 + i64::from(p))
+        });
         assert_eq!(snap.statable_total(), Some(8));
     }
 
@@ -210,7 +214,9 @@ mod tests {
     // renders it as `>= n` because the real total can only be higher.
     #[test]
     fn an_unreadable_partition_still_yields_the_bound_the_rest_proves() {
-        let snap = lag_rows(&[commit("t", 0, 5), commit("t", 1, 8)], |_, p| (p == 0).then_some(12));
+        let snap = lag_rows(&[commit("t", 0, 5), commit("t", 1, 8)], |_, p| {
+            (p == 0).then_some(12)
+        });
         assert_eq!(snap.statable_total(), Some(7));
         assert_eq!(snap.unknown.len(), 1);
     }
@@ -275,10 +281,22 @@ mod tests {
     /// serving another view at 8s.
     #[test]
     fn a_group_showing_nothing_here_is_worth_re_reading_only_once_a_minute() {
-        assert_eq!(commits_ttl(&Classification::AssignedToTopic, false), Some(LIVE_TTL_MS));
-        assert_eq!(commits_ttl(&Classification::AssignedToTopic, true), Some(LIVE_TTL_MS));
-        assert_eq!(commits_ttl(&Classification::MustInspect, true), Some(LIVE_TTL_MS));
-        assert_eq!(commits_ttl(&Classification::MustInspect, false), Some(IDLE_TTL_MS));
+        assert_eq!(
+            commits_ttl(&Classification::AssignedToTopic, false),
+            Some(LIVE_TTL_MS)
+        );
+        assert_eq!(
+            commits_ttl(&Classification::AssignedToTopic, true),
+            Some(LIVE_TTL_MS)
+        );
+        assert_eq!(
+            commits_ttl(&Classification::MustInspect, true),
+            Some(LIVE_TTL_MS)
+        );
+        assert_eq!(
+            commits_ttl(&Classification::MustInspect, false),
+            Some(IDLE_TTL_MS)
+        );
         const { assert!(IDLE_TTL_MS > LIVE_TTL_MS) };
     }
 
@@ -292,9 +310,21 @@ mod tests {
 
     fn commits() -> Vec<CommittedOffset> {
         vec![
-            CommittedOffset { topic: "orders".into(), partition: 0, offset: 10 },
-            CommittedOffset { topic: "orders".into(), partition: 1, offset: 5 },
-            CommittedOffset { topic: "users".into(), partition: 0, offset: 7 },
+            CommittedOffset {
+                topic: "orders".into(),
+                partition: 0,
+                offset: 10,
+            },
+            CommittedOffset {
+                topic: "orders".into(),
+                partition: 1,
+                offset: 5,
+            },
+            CommittedOffset {
+                topic: "users".into(),
+                partition: 0,
+                offset: 7,
+            },
         ]
     }
 
@@ -303,7 +333,10 @@ mod tests {
         let snap = lag_rows(&commits(), |_t, p| Some(20 + i64::from(p)));
         assert_eq!(snap.rows.len(), 3);
         assert!(snap.unknown.is_empty());
-        assert_eq!(snap.rows.iter().map(|r| r.lag).sum::<i64>(), (20 - 10) + (21 - 5) + (20 - 7));
+        assert_eq!(
+            snap.rows.iter().map(|r| r.lag).sum::<i64>(),
+            (20 - 10) + (21 - 5) + (20 - 7)
+        );
     }
 
     /// The whole point of one shared entry: a topic's tab reads the same
@@ -316,7 +349,10 @@ mod tests {
         assert_eq!(narrowed[0].topic, "users");
         assert_eq!(narrowed[0].lag, 2);
         assert!(snap.covers("users") && snap.covers("orders"));
-        assert_eq!(partitions_of(&commits(), Some("users")), vec![("users".to_string(), 0)]);
+        assert_eq!(
+            partitions_of(&commits(), Some("users")),
+            vec![("users".to_string(), 0)]
+        );
         assert_eq!(partitions_of(&commits(), None).len(), 3);
     }
 
@@ -334,15 +370,31 @@ mod tests {
     fn an_unreadable_head_is_named_per_partition_not_fatal() {
         let snap = lag_rows(&commits(), |_t, p| if p == 1 { None } else { Some(50) });
         assert_eq!(snap.unknown, vec![("orders".to_string(), 1)]);
-        assert_eq!(snap.rows.len(), 2, "the readable partitions still have rows");
-        assert_eq!(snap.unreadable_on("orders"), 1, "orders states a bound, not a total");
-        assert_eq!(snap.unreadable_on("users"), 0, "users is unaffected by orders' trouble");
+        assert_eq!(
+            snap.rows.len(),
+            2,
+            "the readable partitions still have rows"
+        );
+        assert_eq!(
+            snap.unreadable_on("orders"),
+            1,
+            "orders states a bound, not a total"
+        );
+        assert_eq!(
+            snap.unreadable_on("users"),
+            0,
+            "users is unaffected by orders' trouble"
+        );
     }
 
     #[test]
     fn rows_come_back_in_a_stable_order() {
         let snap = lag_rows(&commits(), |_t, _p| Some(99));
-        let keys: Vec<(String, i32)> = snap.rows.iter().map(|r| (r.topic.clone(), r.partition)).collect();
+        let keys: Vec<(String, i32)> = snap
+            .rows
+            .iter()
+            .map(|r| (r.topic.clone(), r.partition))
+            .collect();
         let mut sorted = keys.clone();
         sorted.sort();
         assert_eq!(keys, sorted);

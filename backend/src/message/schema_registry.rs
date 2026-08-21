@@ -17,7 +17,11 @@ struct NegativeEntry {
 }
 
 #[derive(Debug, PartialEq, Clone, Copy)]
-pub enum SchemaType { Avro, Protobuf, Json }
+pub enum SchemaType {
+    Avro,
+    Protobuf,
+    Json,
+}
 
 #[derive(Debug)]
 pub struct RegisteredSchema {
@@ -131,10 +135,13 @@ impl SchemaRegistry {
     /// as the error, so every fallible exit from `schema` goes through the
     /// same negative-caching path.
     async fn fail(&self, id: i32, message: String) -> Result<Arc<RegisteredSchema>, String> {
-        self.negative_cache.write().await.insert(id, NegativeEntry {
-            until: Instant::now() + NEGATIVE_TTL,
-            message: message.clone(),
-        });
+        self.negative_cache.write().await.insert(
+            id,
+            NegativeEntry {
+                until: Instant::now() + NEGATIVE_TTL,
+                message: message.clone(),
+            },
+        );
         Err(message)
     }
 
@@ -150,22 +157,48 @@ impl SchemaRegistry {
         let url = format!("{}/schemas/ids/{id}", self.base);
         let res = match self.http.get(&url).send().await {
             Ok(r) => r,
-            Err(e) => return self.fail(id, format!("schema registry unreachable fetching id {id}: {e}")).await,
+            Err(e) => {
+                return self
+                    .fail(
+                        id,
+                        format!("schema registry unreachable fetching id {id}: {e}"),
+                    )
+                    .await;
+            }
         };
         if !res.status().is_success() {
-            return self.fail(id, format!("schema registry returned {} for schema id {id}", res.status())).await;
+            return self
+                .fail(
+                    id,
+                    format!(
+                        "schema registry returned {} for schema id {id}",
+                        res.status()
+                    ),
+                )
+                .await;
         }
         let body: SrResponse = match res.json().await {
             Ok(b) => b,
-            Err(e) => return self.fail(id, format!("schema registry bad body for id {id}: {e}")).await,
+            Err(e) => {
+                return self
+                    .fail(id, format!("schema registry bad body for id {id}: {e}"))
+                    .await;
+            }
         };
         let schema_type = match body.schema_type.as_deref() {
             None | Some("AVRO") => SchemaType::Avro,
             Some("PROTOBUF") => SchemaType::Protobuf,
             Some("JSON") => SchemaType::Json,
-            Some(other) => return self.fail(id, format!("unsupported schema type '{other}' for id {id}")).await,
+            Some(other) => {
+                return self
+                    .fail(id, format!("unsupported schema type '{other}' for id {id}"))
+                    .await;
+            }
         };
-        let entry = Arc::new(RegisteredSchema { schema_type, schema: body.schema });
+        let entry = Arc::new(RegisteredSchema {
+            schema_type,
+            schema: body.schema,
+        });
         self.cache.write().await.insert(id, entry.clone());
         Ok(entry)
     }
@@ -181,7 +214,10 @@ impl SchemaRegistry {
             .await
             .map_err(|e| SubjectError::Registry(format!("schema registry unreachable: {e}")))?;
         if !res.status().is_success() {
-            return Err(SubjectError::Registry(format!("schema registry returned {}", res.status())));
+            return Err(SubjectError::Registry(format!(
+                "schema registry returned {}",
+                res.status()
+            )));
         }
         res.json()
             .await
@@ -193,7 +229,9 @@ impl SchemaRegistry {
     /// returns the registry's first. Uncached, same reasoning as
     /// `subjects`.
     pub async fn subject_of_id(&self, id: i32) -> Result<SubjectOfId, SubjectError> {
-        let versions: Vec<SubjectOfId> = self.get_subject_json(&format!("schemas/ids/{id}/versions")).await?;
+        let versions: Vec<SubjectOfId> = self
+            .get_subject_json(&format!("schemas/ids/{id}/versions"))
+            .await?;
         versions.into_iter().next().ok_or(SubjectError::NotFound)
     }
 
@@ -205,7 +243,10 @@ impl SchemaRegistry {
         schema: &str,
         schema_type: &str,
     ) -> Result<CompatibilityCheck, SubjectError> {
-        let url = format!("{}/compatibility/subjects/{subject}/versions/latest?verbose=true", self.base);
+        let url = format!(
+            "{}/compatibility/subjects/{subject}/versions/latest?verbose=true",
+            self.base
+        );
         let res = self
             .http
             .post(&url)
@@ -217,7 +258,10 @@ impl SchemaRegistry {
             return Err(SubjectError::NotFound);
         }
         if !res.status().is_success() {
-            return Err(SubjectError::Registry(format!("schema registry returned {}", res.status())));
+            return Err(SubjectError::Registry(format!(
+                "schema registry returned {}",
+                res.status()
+            )));
         }
         res.json()
             .await
@@ -228,7 +272,10 @@ impl SchemaRegistry {
     /// one exists, else the registry's global level (a 404 on
     /// `/config/{subject}` is the registry's way of saying "no override").
     pub async fn subject_compatibility_level(&self, subject: &str) -> Result<String, SubjectError> {
-        match self.get_subject_json::<SrConfigResponse>(&format!("config/{subject}")).await {
+        match self
+            .get_subject_json::<SrConfigResponse>(&format!("config/{subject}"))
+            .await
+        {
             Ok(config) => Ok(config.compatibility_level),
             Err(SubjectError::NotFound) => Ok(self.registry_settings().await?.compatibility_level),
             Err(other) => Err(other),
@@ -241,17 +288,27 @@ impl SchemaRegistry {
     pub async fn registry_settings(&self) -> Result<RegistrySettings, SubjectError> {
         let config: SrConfigResponse = self.get_subject_json("config").await?;
         let mode: SrModeResponse = self.get_subject_json("mode").await?;
-        Ok(RegistrySettings { compatibility_level: config.compatibility_level, mode: mode.mode })
+        Ok(RegistrySettings {
+            compatibility_level: config.compatibility_level,
+            mode: mode.mode,
+        })
     }
 
     /// The subject's version list plus ONE version's schema — the requested
     /// one, or the registry's latest when `None` — so the detail page is a
     /// single query. Uncached, same reasoning as `subjects`.
-    pub async fn subject_detail(&self, subject: &str, version: Option<i32>) -> Result<SubjectDetail, SubjectError> {
-        let versions: Vec<i32> = self.get_subject_json(&format!("subjects/{subject}/versions")).await?;
+    pub async fn subject_detail(
+        &self,
+        subject: &str,
+        version: Option<i32>,
+    ) -> Result<SubjectDetail, SubjectError> {
+        let versions: Vec<i32> = self
+            .get_subject_json(&format!("subjects/{subject}/versions"))
+            .await?;
         let selector = version.map_or_else(|| "latest".to_string(), |v| v.to_string());
-        let body: SubjectVersionResponse =
-            self.get_subject_json(&format!("subjects/{subject}/versions/{selector}")).await?;
+        let body: SubjectVersionResponse = self
+            .get_subject_json(&format!("subjects/{subject}/versions/{selector}"))
+            .await?;
         Ok(SubjectDetail {
             subject: subject.to_string(),
             versions,
@@ -263,7 +320,10 @@ impl SchemaRegistry {
         })
     }
 
-    async fn get_subject_json<T: serde::de::DeserializeOwned>(&self, path: &str) -> Result<T, SubjectError> {
+    async fn get_subject_json<T: serde::de::DeserializeOwned>(
+        &self,
+        path: &str,
+    ) -> Result<T, SubjectError> {
         let res = self
             .http
             .get(format!("{}/{path}", self.base))
@@ -274,7 +334,10 @@ impl SchemaRegistry {
             return Err(SubjectError::NotFound);
         }
         if !res.status().is_success() {
-            return Err(SubjectError::Registry(format!("schema registry returned {}", res.status())));
+            return Err(SubjectError::Registry(format!(
+                "schema registry returned {}",
+                res.status()
+            )));
         }
         res.json()
             .await
@@ -294,9 +357,16 @@ impl SchemaRegistry {
         }
         let schema = self.schema(id).await?;
         let parsed = match schema.schema_type {
-            SchemaType::Avro => crate::message::avro::parse_schema(&schema.schema).map(ParsedSchema::Avro)?,
-            SchemaType::Protobuf => crate::message::proto::build_descriptor(&schema.schema).map(ParsedSchema::Protobuf)?,
-            SchemaType::Json => return Err(format!("schema id {id} is JSON-typed and has no parsed artifact")),
+            SchemaType::Avro => {
+                crate::message::avro::parse_schema(&schema.schema).map(ParsedSchema::Avro)?
+            }
+            SchemaType::Protobuf => crate::message::proto::build_descriptor(&schema.schema)
+                .map(ParsedSchema::Protobuf)?,
+            SchemaType::Json => {
+                return Err(format!(
+                    "schema id {id} is JSON-typed and has no parsed artifact"
+                ));
+            }
         };
         let entry = Arc::new(parsed);
         self.parsed_cache.write().await.insert(id, entry.clone());
@@ -307,9 +377,9 @@ impl SchemaRegistry {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use axum::{extract::Path, routing::get, Json, Router};
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use axum::{Json, Router, extract::Path, routing::get};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     pub(crate) async fn mock_sr_for_decode() -> String {
         let hits = Arc::new(AtomicUsize::new(0));
@@ -406,7 +476,10 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn lists_subjects() {
         let sr = SchemaRegistry::new(&mock_sr(Arc::new(AtomicUsize::new(0))).await);
-        assert_eq!(sr.subjects().await.unwrap(), vec!["sr-avro-value", "sr-json-value"]);
+        assert_eq!(
+            sr.subjects().await.unwrap(),
+            vec!["sr-avro-value", "sr-json-value"]
+        );
     }
 
     /// One call returns the version list AND the requested version's schema
@@ -444,7 +517,10 @@ pub(crate) mod tests {
         let hit = sr.subject_of_id(42).await.unwrap();
         assert_eq!(hit.subject, "sr-avro-value");
         assert_eq!(hit.version, 3);
-        assert!(matches!(sr.subject_of_id(99).await.unwrap_err(), SubjectError::NotFound));
+        assert!(matches!(
+            sr.subject_of_id(99).await.unwrap_err(),
+            SubjectError::NotFound
+        ));
     }
 
     /// Compatibility checks run against the registry itself (its verdict,
@@ -453,10 +529,16 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn checks_a_candidate_schema_against_the_latest_version() {
         let sr = SchemaRegistry::new(&mock_sr(Arc::new(AtomicUsize::new(0))).await);
-        let ok = sr.check_compatibility("sr-avro-value", r#"{"type":"long"}"#, "AVRO").await.unwrap();
+        let ok = sr
+            .check_compatibility("sr-avro-value", r#"{"type":"long"}"#, "AVRO")
+            .await
+            .unwrap();
         assert!(ok.is_compatible);
         assert!(ok.messages.is_empty());
-        let bad = sr.check_compatibility("sr-avro-value", r#"{"type":"string"}"#, "AVRO").await.unwrap();
+        let bad = sr
+            .check_compatibility("sr-avro-value", r#"{"type":"string"}"#, "AVRO")
+            .await
+            .unwrap();
         assert!(!bad.is_compatible);
         assert_eq!(bad.messages, vec!["READER_FIELD_MISSING_DEFAULT_VALUE"]);
     }
@@ -464,10 +546,20 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn subject_level_falls_back_to_global_when_unset() {
         let sr = SchemaRegistry::new(&mock_sr(Arc::new(AtomicUsize::new(0))).await);
-        assert_eq!(sr.subject_compatibility_level("sr-avro-value").await.unwrap(), "FULL");
+        assert_eq!(
+            sr.subject_compatibility_level("sr-avro-value")
+                .await
+                .unwrap(),
+            "FULL"
+        );
         // The stub 404s unknown subjects' config — the registry's way of
         // saying "no override"; the global level answers instead.
-        assert_eq!(sr.subject_compatibility_level("sr-json-value").await.unwrap(), "BACKWARD");
+        assert_eq!(
+            sr.subject_compatibility_level("sr-json-value")
+                .await
+                .unwrap(),
+            "BACKWARD"
+        );
     }
 
     #[tokio::test]
@@ -487,14 +579,21 @@ pub(crate) mod tests {
         assert_eq!(s1.schema_type, SchemaType::Avro);
         assert_eq!(s1.schema, "\"string\"");
         let _s2 = sr.schema(7).await.unwrap();
-        assert_eq!(hits.load(Ordering::SeqCst), 1, "second lookup must hit the cache");
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            1,
+            "second lookup must hit the cache"
+        );
     }
 
     #[tokio::test]
     async fn fetches_protobuf_type() {
         let hits = Arc::new(AtomicUsize::new(0));
         let sr = SchemaRegistry::new(&mock_sr(hits).await);
-        assert_eq!(sr.schema(8).await.unwrap().schema_type, SchemaType::Protobuf);
+        assert_eq!(
+            sr.schema(8).await.unwrap().schema_type,
+            SchemaType::Protobuf
+        );
     }
 
     #[tokio::test]
@@ -517,7 +616,10 @@ pub(crate) mod tests {
         let sr = SchemaRegistry::new(&mock_sr_for_decode().await);
         let p1 = sr.parsed(7).await.unwrap();
         let p2 = sr.parsed(7).await.unwrap();
-        assert!(Arc::ptr_eq(&p1, &p2), "parsed avro schema must be cached, not reparsed each call");
+        assert!(
+            Arc::ptr_eq(&p1, &p2),
+            "parsed avro schema must be cached, not reparsed each call"
+        );
         assert!(matches!(&*p1, ParsedSchema::Avro(_)));
     }
 
@@ -526,7 +628,10 @@ pub(crate) mod tests {
         let sr = SchemaRegistry::new(&mock_sr_for_decode().await);
         let p1 = sr.parsed(8).await.unwrap();
         let p2 = sr.parsed(8).await.unwrap();
-        assert!(Arc::ptr_eq(&p1, &p2), "parsed protobuf descriptor must be cached, not reparsed each call");
+        assert!(
+            Arc::ptr_eq(&p1, &p2),
+            "parsed protobuf descriptor must be cached, not reparsed each call"
+        );
         assert!(matches!(&*p1, ParsedSchema::Protobuf(_)));
     }
 
@@ -541,7 +646,11 @@ pub(crate) mod tests {
         let sr = SchemaRegistry::new(&mock_sr(hits.clone()).await);
         let err1 = sr.schema(999).await.unwrap_err();
         let err2 = sr.schema(999).await.unwrap_err();
-        assert_eq!(hits.load(Ordering::SeqCst), 1, "second lookup within TTL must not hit the registry again");
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            1,
+            "second lookup within TTL must not hit the registry again"
+        );
         assert_eq!(err1, err2);
     }
 }

@@ -13,7 +13,8 @@ async fn main() -> anyhow::Result<()> {
         )
         .init();
 
-    let path: PathBuf = std::env::args().nth(1)
+    let path: PathBuf = std::env::args()
+        .nth(1)
         .or_else(|| std::env::var("BETRACHTUNG_CONFIG").ok())
         .unwrap_or_else(|| "config.yaml".into())
         .into();
@@ -23,7 +24,10 @@ async fn main() -> anyhow::Result<()> {
     // `GET /throughput` samples the topic it was asked about, so an idle
     // cluster is never touched. See cluster::sampler.
     let registry = Arc::new(ClusterRegistry::from_config(config.clusters.clone())?);
-    let state = AppState { registry, limits: Arc::new(config.limits.clone()) };
+    let state = AppState {
+        registry,
+        limits: Arc::new(config.limits.clone()),
+    };
 
     let listener = tokio::net::TcpListener::bind(("0.0.0.0", config.server.port)).await?;
     tracing::info!("arne listening on port {}", config.server.port);

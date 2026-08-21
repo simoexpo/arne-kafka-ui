@@ -30,8 +30,8 @@
 
 use rdkafka::Statistics;
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Which client a tally came from. Kept per role and summed on read, so a
 /// second resident client would be accounted for without changing a reader.
@@ -70,15 +70,23 @@ impl CallStats {
             // node id and sends nothing of its own worth attributing.
             .filter(|b| b.nodeid >= 0)
             .map(|b| {
-                let calls = b.req.iter()
+                let calls = b
+                    .req
+                    .iter()
                     .filter(|(_, sent)| **sent > 0)
                     .map(|(api, sent)| (api.clone(), *sent as u64))
                     .collect();
                 (b.nodename.clone(), calls)
             })
             .collect();
-        let tally = Tally { sampled_at: stats.time * 1_000, per_broker };
-        self.tallies.lock().expect("call stats lock poisoned").insert(role, tally);
+        let tally = Tally {
+            sampled_at: stats.time * 1_000,
+            per_broker,
+        };
+        self.tallies
+            .lock()
+            .expect("call stats lock poisoned")
+            .insert(role, tally);
         self.recorded.fetch_add(1, Ordering::Relaxed);
     }
 
@@ -90,7 +98,10 @@ impl CallStats {
 
     pub fn client_replaced(&self) {
         self.generation.fetch_add(1, Ordering::Relaxed);
-        self.tallies.lock().expect("call stats lock poisoned").clear();
+        self.tallies
+            .lock()
+            .expect("call stats lock poisoned")
+            .clear();
     }
 
     /// The latest tally from every client, summed. `sampled_at` is the OLDEST
@@ -102,7 +113,8 @@ impl CallStats {
         let mut brokers: BTreeMap<String, BTreeMap<String, u64>> = BTreeMap::new();
         let mut sampled_at: Option<i64> = None;
         for tally in tallies.values() {
-            sampled_at = Some(sampled_at.map_or(tally.sampled_at, |o: i64| o.min(tally.sampled_at)));
+            sampled_at =
+                Some(sampled_at.map_or(tally.sampled_at, |o: i64| o.min(tally.sampled_at)));
             for (broker, calls) in &tally.per_broker {
                 let entry = brokers.entry(broker.clone()).or_default();
                 for (api, sent) in calls {
@@ -121,7 +133,8 @@ impl CallStats {
             recorded: self.recorded.load(Ordering::Relaxed),
             generation: self.generation.load(Ordering::Relaxed),
             totals,
-            brokers: brokers.into_iter()
+            brokers: brokers
+                .into_iter()
                 .map(|(broker, calls)| BrokerCalls { broker, calls })
                 .collect(),
         }
@@ -200,18 +213,35 @@ mod tests {
         let stats = CallStats::default();
         stats.record(
             CONSUMER,
-            &stats_of(&[("b1", 1, &[("ListGroups", 1)]), ("b2", 2, &[("ListGroups", 1)]), ("b3", 3, &[("ListGroups", 1)])]),
+            &stats_of(&[
+                ("b1", 1, &[("ListGroups", 1)]),
+                ("b2", 2, &[("ListGroups", 1)]),
+                ("b3", 3, &[("ListGroups", 1)]),
+            ]),
         );
         let report = stats.report();
-        assert_eq!(report.totals["ListGroups"], 3, "one call from us, three requests");
-        assert_eq!(report.brokers.len(), 3, "and the fan-out is named broker by broker");
+        assert_eq!(
+            report.totals["ListGroups"], 3,
+            "one call from us, three requests"
+        );
+        assert_eq!(
+            report.brokers.len(),
+            3,
+            "and the fan-out is named broker by broker"
+        );
     }
 
     /// (node name, node id, that broker's request counts)
     type BrokerSpec<'a> = (&'a str, i32, &'a [(&'a str, i64)]);
 
     fn stats_of(brokers: &[BrokerSpec<'_>]) -> Statistics {
-        stats_at(1_000, brokers.iter().map(|(n, id, req)| broker(n, *id, req)).collect())
+        stats_at(
+            1_000,
+            brokers
+                .iter()
+                .map(|(n, id, req)| broker(n, *id, req))
+                .collect(),
+        )
     }
 
     /// Both resident clients count only their own requests, so a page's cost
@@ -219,8 +249,17 @@ mod tests {
     #[test]
     fn the_clients_are_summed_and_stamped_with_the_oldest_tally() {
         let stats = CallStats::default();
-        stats.record(CONSUMER, &stats_at(9, vec![broker("b1", 1, &[("Metadata", 4)])]));
-        stats.record(ADMIN, &stats_at(5, vec![broker("b1", 1, &[("Metadata", 1), ("DescribeGroups", 2)])]));
+        stats.record(
+            CONSUMER,
+            &stats_at(9, vec![broker("b1", 1, &[("Metadata", 4)])]),
+        );
+        stats.record(
+            ADMIN,
+            &stats_at(
+                5,
+                vec![broker("b1", 1, &[("Metadata", 1), ("DescribeGroups", 2)])],
+            ),
+        );
         let report = stats.report();
         assert_eq!(report.totals["Metadata"], 5);
         assert_eq!(report.totals["DescribeGroups"], 2);
@@ -232,7 +271,13 @@ mod tests {
     #[test]
     fn logical_brokers_are_not_counted() {
         let stats = CallStats::default();
-        stats.record(CONSUMER, &stats_of(&[("bootstrap", -1, &[("Metadata", 7)]), ("b1", 1, &[("Metadata", 2)])]));
+        stats.record(
+            CONSUMER,
+            &stats_of(&[
+                ("bootstrap", -1, &[("Metadata", 7)]),
+                ("b1", 1, &[("Metadata", 2)]),
+            ]),
+        );
         assert_eq!(stats.report().totals["Metadata"], 2);
     }
 
@@ -247,8 +292,14 @@ mod tests {
         stats.client_replaced();
         let report = stats.report();
         assert_eq!(report.generation, 1);
-        assert_eq!(report.recorded, 1, "the count of tallies seen is not itself reset");
-        assert!(report.totals.is_empty(), "the old client's counts are gone with it");
+        assert_eq!(
+            report.recorded, 1,
+            "the count of tallies seen is not itself reset"
+        );
+        assert!(
+            report.totals.is_empty(),
+            "the old client's counts are gone with it"
+        );
         assert_eq!(report.sampled_at, None);
     }
 }

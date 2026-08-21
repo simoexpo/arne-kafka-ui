@@ -1,6 +1,6 @@
+use axum::Json;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::Json;
 use rdkafka::error::{KafkaError, RDKafkaErrorCode};
 use serde_json::json;
 
@@ -15,19 +15,31 @@ pub struct ApiError {
 
 impl ApiError {
     pub fn cluster_not_found(name: &str) -> Self {
-        Self { status: StatusCode::NOT_FOUND, code: "cluster_not_found",
-               message: format!("no cluster named '{name}' is configured"),
-               cluster: Some(name.into()), retriable: false }
+        Self {
+            status: StatusCode::NOT_FOUND,
+            code: "cluster_not_found",
+            message: format!("no cluster named '{name}' is configured"),
+            cluster: Some(name.into()),
+            retriable: false,
+        }
     }
     pub fn topic_not_found(cluster: &str, topic: &str) -> Self {
-        Self { status: StatusCode::NOT_FOUND, code: "topic_not_found",
-               message: format!("topic '{topic}' does not exist"),
-               cluster: Some(cluster.into()), retriable: false }
+        Self {
+            status: StatusCode::NOT_FOUND,
+            code: "topic_not_found",
+            message: format!("topic '{topic}' does not exist"),
+            cluster: Some(cluster.into()),
+            retriable: false,
+        }
     }
     pub fn group_not_found(cluster: &str, group: &str) -> Self {
-        Self { status: StatusCode::NOT_FOUND, code: "group_not_found",
-               message: format!("consumer group '{group}' does not exist"),
-               cluster: Some(cluster.into()), retriable: false }
+        Self {
+            status: StatusCode::NOT_FOUND,
+            code: "group_not_found",
+            message: format!("consumer group '{group}' does not exist"),
+            cluster: Some(cluster.into()),
+            retriable: false,
+        }
     }
     /// A request under `/api/*` that matches no route — a backend routing
     /// bug or a frontend API typo, never a page to render. This gets the
@@ -35,37 +47,67 @@ impl ApiError {
     /// fallback, so it never reaches the frontend as an HTML body
     /// masquerading as a 200 JSON response.
     pub fn not_found_route(path: &str) -> Self {
-        Self { status: StatusCode::NOT_FOUND, code: "not_found",
-               message: format!("no such endpoint '{path}'"),
-               cluster: None, retriable: false }
+        Self {
+            status: StatusCode::NOT_FOUND,
+            code: "not_found",
+            message: format!("no such endpoint '{path}'"),
+            cluster: None,
+            retriable: false,
+        }
     }
     pub fn no_schema_registry(cluster: &str) -> Self {
-        Self { status: StatusCode::BAD_REQUEST, code: "no_schema_registry",
-               message: format!("no schema registry configured for cluster '{cluster}'"),
-               cluster: Some(cluster.into()), retriable: false }
+        Self {
+            status: StatusCode::BAD_REQUEST,
+            code: "no_schema_registry",
+            message: format!("no schema registry configured for cluster '{cluster}'"),
+            cluster: Some(cluster.into()),
+            retriable: false,
+        }
     }
     pub fn subject_not_found(cluster: &str, subject: &str) -> Self {
-        Self { status: StatusCode::NOT_FOUND, code: "subject_not_found",
-               message: format!("subject '{subject}' does not exist"),
-               cluster: Some(cluster.into()), retriable: false }
+        Self {
+            status: StatusCode::NOT_FOUND,
+            code: "subject_not_found",
+            message: format!("subject '{subject}' does not exist"),
+            cluster: Some(cluster.into()),
+            retriable: false,
+        }
     }
     pub fn schema_id_not_found(cluster: &str, id: i32) -> Self {
-        Self { status: StatusCode::NOT_FOUND, code: "schema_id_not_found",
-               message: format!("no subject registered schema id {id}"),
-               cluster: Some(cluster.into()), retriable: false }
+        Self {
+            status: StatusCode::NOT_FOUND,
+            code: "schema_id_not_found",
+            message: format!("no subject registered schema id {id}"),
+            cluster: Some(cluster.into()),
+            retriable: false,
+        }
     }
     pub fn schema_registry(cluster: &str, message: impl Into<String>) -> Self {
-        Self { status: StatusCode::BAD_GATEWAY, code: "schema_registry_error",
-               message: message.into(), cluster: Some(cluster.into()), retriable: true }
+        Self {
+            status: StatusCode::BAD_GATEWAY,
+            code: "schema_registry_error",
+            message: message.into(),
+            cluster: Some(cluster.into()),
+            retriable: true,
+        }
     }
     pub fn bad_request(message: impl Into<String>) -> Self {
-        Self { status: StatusCode::BAD_REQUEST, code: "bad_request",
-               message: message.into(), cluster: None, retriable: false }
+        Self {
+            status: StatusCode::BAD_REQUEST,
+            code: "bad_request",
+            message: message.into(),
+            cluster: None,
+            retriable: false,
+        }
     }
     pub fn kafka_timeout(cluster: &str, what: &str) -> Self {
-        Self { status: StatusCode::GATEWAY_TIMEOUT, code: "kafka_timeout",
-               message: format!("{what} timed out"),
-               cluster: Some(cluster.into()), retriable: true }
+        Self {
+            status: StatusCode::GATEWAY_TIMEOUT,
+            code: "kafka_timeout",
+            message: format!("{what} timed out"),
+            cluster: Some(cluster.into()),
+            retriable: true,
+        }
     }
     /// A scan stalled under OUR OWN read deadline (see the timeline
     /// engine's `no_progress_message`) — deliberately not `kafka`/
@@ -73,16 +115,31 @@ impl ApiError {
     /// unreachable": that headline would blame the broker for a limit this
     /// service imposes, directly above a message saying so.
     pub fn fetch_deadline(cluster: &str, message: impl Into<String>) -> Self {
-        Self { status: StatusCode::GATEWAY_TIMEOUT, code: "fetch_deadline",
-               message: message.into(), cluster: Some(cluster.into()), retriable: true }
+        Self {
+            status: StatusCode::GATEWAY_TIMEOUT,
+            code: "fetch_deadline",
+            message: message.into(),
+            cluster: Some(cluster.into()),
+            retriable: true,
+        }
     }
     pub fn kafka(cluster: &str, message: impl Into<String>) -> Self {
-        Self { status: StatusCode::BAD_GATEWAY, code: "kafka_error",
-               message: message.into(), cluster: Some(cluster.into()), retriable: true }
+        Self {
+            status: StatusCode::BAD_GATEWAY,
+            code: "kafka_error",
+            message: message.into(),
+            cluster: Some(cluster.into()),
+            retriable: true,
+        }
     }
     pub fn internal(message: impl Into<String>) -> Self {
-        Self { status: StatusCode::INTERNAL_SERVER_ERROR, code: "internal",
-               message: message.into(), cluster: None, retriable: false }
+        Self {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            code: "internal",
+            message: message.into(),
+            cluster: None,
+            retriable: false,
+        }
     }
     /// A `spawn_blocking`/`JoinHandle` failed to join (the blocking task
     /// panicked or was cancelled) — never a Kafka-side failure, so this is
@@ -150,7 +207,8 @@ mod tests {
     /// survive into `ApiError.message`, only a fixed, generic sentence.
     #[tokio::test]
     async fn task_join_never_leaks_the_panic_payload_onto_the_wire() {
-        let handle = tokio::spawn(async { panic!("some very specific internal detail nobody should see") });
+        let handle =
+            tokio::spawn(async { panic!("some very specific internal detail nobody should see") });
         let join_err = handle.await.unwrap_err();
         let err = ApiError::task_join(join_err);
         assert_eq!(err.message, "something went wrong completing the request");

@@ -23,7 +23,11 @@ pub fn page_windows(
                 Direction::Back => ((pos - span).max(lo), pos),
                 Direction::Forward => (pos, (pos + span).min(hi)),
             };
-            (end > start).then_some(range::PartitionRange { partition, start, end })
+            (end > start).then_some(range::PartitionRange {
+                partition,
+                start,
+                end,
+            })
         })
         .collect()
 }
@@ -69,11 +73,17 @@ pub(super) fn at_edge(pos: i64, lo: i64, hi: i64, direction: Direction) -> bool 
 /// tracked partition to be at its edge) could never be satisfied for it —
 /// the page's `exhausted` would be stuck at `false` forever, even once every
 /// real partition genuinely finished.
-pub(super) fn clamp_positions(positions: &[(i32, i64)], watermarks: &[(i32, i64, i64)]) -> Vec<(i32, i64)> {
+pub(super) fn clamp_positions(
+    positions: &[(i32, i64)],
+    watermarks: &[(i32, i64, i64)],
+) -> Vec<(i32, i64)> {
     positions
         .iter()
         .filter_map(|&(partition, pos)| {
-            watermarks.iter().find(|(p, _, _)| *p == partition).map(|&(_, lo, hi)| (partition, pos.clamp(lo, hi)))
+            watermarks
+                .iter()
+                .find(|(p, _, _)| *p == partition)
+                .map(|&(_, lo, hi)| (partition, pos.clamp(lo, hi)))
         })
         .collect()
 }
@@ -112,7 +122,10 @@ pub(super) fn adjacent_offset(w: &PartitionRange, direction: Direction) -> i64 {
 /// 3, not 1. The scan budget is a hard per-request cap, not an approximate
 /// target — `chunk_scanned` (bounded above by each window's own span) must
 /// never be able to exceed what was actually left.
-pub(super) fn cap_windows_to_budget(windows: Vec<PartitionRange>, budget_cap: u64) -> Vec<PartitionRange> {
+pub(super) fn cap_windows_to_budget(
+    windows: Vec<PartitionRange>,
+    budget_cap: u64,
+) -> Vec<PartitionRange> {
     let mut total = 0u64;
     let mut out = Vec::with_capacity(windows.len());
     for w in windows {
@@ -129,26 +142,48 @@ pub(super) fn cap_windows_to_budget(windows: Vec<PartitionRange>, budget_cap: u6
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::message::timeline::anchor::{initial_positions, Anchor};
+    use crate::message::timeline::anchor::{Anchor, initial_positions};
 
     const WM: &[(i32, i64, i64)] = &[(0, 10, 110), (1, 0, 5)];
 
     #[test]
     fn back_windows_take_span_below_position() {
         let w = page_windows(&[(0, 110), (1, 5)], WM, Direction::Back, 50);
-        assert_eq!(w, vec![
-            range::PartitionRange { partition: 0, start: 60, end: 110 },
-            range::PartitionRange { partition: 1, start: 0, end: 5 },
-        ]);
+        assert_eq!(
+            w,
+            vec![
+                range::PartitionRange {
+                    partition: 0,
+                    start: 60,
+                    end: 110
+                },
+                range::PartitionRange {
+                    partition: 1,
+                    start: 0,
+                    end: 5
+                },
+            ]
+        );
     }
 
     #[test]
     fn forward_windows_take_span_above_position() {
         let w = page_windows(&[(0, 10), (1, 0)], WM, Direction::Forward, 3);
-        assert_eq!(w, vec![
-            range::PartitionRange { partition: 0, start: 10, end: 13 },
-            range::PartitionRange { partition: 1, start: 0, end: 3 },
-        ]);
+        assert_eq!(
+            w,
+            vec![
+                range::PartitionRange {
+                    partition: 0,
+                    start: 10,
+                    end: 13
+                },
+                range::PartitionRange {
+                    partition: 1,
+                    start: 0,
+                    end: 3
+                },
+            ]
+        );
     }
 
     /// Guards the bound semantics away from the watermarks. Every other
@@ -163,18 +198,43 @@ mod tests {
     fn page_windows_mid_range_position_back_and_forward() {
         let wm: &[(i32, i64, i64)] = &[(0, 0, 100)];
         let back = page_windows(&[(0, 60)], wm, Direction::Back, 10);
-        assert_eq!(back, vec![range::PartitionRange { partition: 0, start: 50, end: 60 }]);
+        assert_eq!(
+            back,
+            vec![range::PartitionRange {
+                partition: 0,
+                start: 50,
+                end: 60
+            }]
+        );
         let forward = page_windows(&[(0, 60)], wm, Direction::Forward, 10);
-        assert_eq!(forward, vec![range::PartitionRange { partition: 0, start: 60, end: 70 }]);
+        assert_eq!(
+            forward,
+            vec![range::PartitionRange {
+                partition: 0,
+                start: 60,
+                end: 70
+            }]
+        );
     }
 
     #[test]
     fn back_window_reaching_the_low_watermark_is_flagged_at_edge() {
         let w = page_windows(&[(0, 60), (1, 5)], WM, Direction::Back, 100);
-        assert_eq!(w, vec![
-            range::PartitionRange { partition: 0, start: 10, end: 60 },
-            range::PartitionRange { partition: 1, start: 0, end: 5 },
-        ]);
+        assert_eq!(
+            w,
+            vec![
+                range::PartitionRange {
+                    partition: 0,
+                    start: 10,
+                    end: 60
+                },
+                range::PartitionRange {
+                    partition: 1,
+                    start: 0,
+                    end: 5
+                },
+            ]
+        );
         // consuming each window fully lands exactly on its low watermark —
         // this is the boundary `run_page`'s cursor math advances to.
         assert!(at_edge(w[0].start, 10, 110, Direction::Back));
@@ -185,9 +245,19 @@ mod tests {
     fn forward_window_reaching_the_high_watermark_is_flagged_at_edge() {
         let w = page_windows(&[(0, 100), (1, 5)], WM, Direction::Forward, 50);
         // partition 1 is already at its high watermark: page_windows omits it entirely
-        assert_eq!(w, vec![range::PartitionRange { partition: 0, start: 100, end: 110 }]);
+        assert_eq!(
+            w,
+            vec![range::PartitionRange {
+                partition: 0,
+                start: 100,
+                end: 110
+            }]
+        );
         assert!(at_edge(w[0].end, 10, 110, Direction::Forward));
-        assert!(at_edge(5, 0, 5, Direction::Forward), "partition 1's untouched position is already at its edge");
+        assert!(
+            at_edge(5, 0, 5, Direction::Forward),
+            "partition 1's untouched position is already at its edge"
+        );
     }
 
     #[test]
@@ -195,8 +265,18 @@ mod tests {
         let wm: &[(i32, i64, i64)] = &[(0, 0, 1_000_000)];
         let positions = initial_positions(wm, &Anchor::Latest);
         let w = page_windows(&positions, wm, Direction::Back, 100);
-        assert_eq!(w, vec![range::PartitionRange { partition: 0, start: 999_900, end: 1_000_000 }]);
-        assert!(!at_edge(w[0].start, 0, 1_000_000, Direction::Back), "plenty of room left below this window");
+        assert_eq!(
+            w,
+            vec![range::PartitionRange {
+                partition: 0,
+                start: 999_900,
+                end: 1_000_000
+            }]
+        );
+        assert!(
+            !at_edge(w[0].start, 0, 1_000_000, Direction::Back),
+            "plenty of room left below this window"
+        );
     }
 
     #[test]
@@ -204,16 +284,40 @@ mod tests {
         let wm: &[(i32, i64, i64)] = &[(0, 0, 1000), (1, 0, 5)];
         let positions = initial_positions(wm, &Anchor::Latest);
         let w = page_windows(&positions, wm, Direction::Back, 100);
-        assert_eq!(w, vec![
-            range::PartitionRange { partition: 0, start: 900, end: 1000 },
-            range::PartitionRange { partition: 1, start: 0, end: 5 },
-        ]);
-        assert!(!at_edge(w[0].start, 0, 1000, Direction::Back), "partition 0 still has plenty of room left");
-        assert!(at_edge(w[1].start, 0, 5, Direction::Back), "partition 1's window already reaches its low watermark");
+        assert_eq!(
+            w,
+            vec![
+                range::PartitionRange {
+                    partition: 0,
+                    start: 900,
+                    end: 1000
+                },
+                range::PartitionRange {
+                    partition: 1,
+                    start: 0,
+                    end: 5
+                },
+            ]
+        );
+        assert!(
+            !at_edge(w[0].start, 0, 1000, Direction::Back),
+            "partition 0 still has plenty of room left"
+        );
+        assert!(
+            at_edge(w[1].start, 0, 5, Direction::Back),
+            "partition 1's window already reaches its low watermark"
+        );
 
         // continuing from partition 0's new position with a big-enough span reaches its edge too
         let w2 = page_windows(&[(0, w[0].start)], wm, Direction::Back, 1000);
-        assert_eq!(w2, vec![range::PartitionRange { partition: 0, start: 0, end: 900 }]);
+        assert_eq!(
+            w2,
+            vec![range::PartitionRange {
+                partition: 0,
+                start: 0,
+                end: 900
+            }]
+        );
         assert!(at_edge(w2[0].start, 0, 1000, Direction::Back));
     }
 
@@ -230,16 +334,26 @@ mod tests {
         let forged = vec![(0, -5)];
 
         let positions = clamp_positions(&forged, wm);
-        assert_eq!(positions, vec![(0, 0)], "position must be clamped into [lo, hi]");
+        assert_eq!(
+            positions,
+            vec![(0, 0)],
+            "position must be clamped into [lo, hi]"
+        );
 
         let windows = page_windows(&positions, wm, Direction::Back, 5);
-        assert!(windows.is_empty(), "already at the low watermark: nothing to fetch");
+        assert!(
+            windows.is_empty(),
+            "already at the low watermark: nothing to fetch"
+        );
 
         // a partition with no window keeps its (already-clamped) position
         // unchanged, so that position itself must already be at the edge —
         // otherwise the unchanged cursor would be re-encoded and handed back
         // forever.
-        assert!(at_edge(positions[0].1, 0, 10, Direction::Back), "clamped position at the edge must report exhausted, not loop forever");
+        assert!(
+            at_edge(positions[0].1, 0, 10, Direction::Back),
+            "clamped position at the edge must report exhausted, not loop forever"
+        );
     }
 
     /// Anchor partition property (binding acceptance test),
@@ -258,13 +372,28 @@ mod tests {
         assert_eq!(positions, vec![(0, 0), (1, 0)]);
 
         let back = page_windows(&positions, wm, Direction::Back, 500);
-        assert!(back.is_empty(), "back(beginning) must fetch nothing: already at the low watermark");
+        assert!(
+            back.is_empty(),
+            "back(beginning) must fetch nothing: already at the low watermark"
+        );
 
         let forward = page_windows(&positions, wm, Direction::Forward, 500);
-        assert_eq!(forward, vec![
-            range::PartitionRange { partition: 0, start: 0, end: 20 },
-            range::PartitionRange { partition: 1, start: 0, end: 20 },
-        ], "forward(beginning) must cover the entire topic");
+        assert_eq!(
+            forward,
+            vec![
+                range::PartitionRange {
+                    partition: 0,
+                    start: 0,
+                    end: 20
+                },
+                range::PartitionRange {
+                    partition: 1,
+                    start: 0,
+                    end: 20
+                },
+            ],
+            "forward(beginning) must cover the entire topic"
+        );
     }
 
     /// Symmetric case: `Anchor::Latest` — `forward(anchor)` has nothing to
@@ -277,13 +406,28 @@ mod tests {
         assert_eq!(positions, vec![(0, 20), (1, 20)]);
 
         let forward = page_windows(&positions, wm, Direction::Forward, 500);
-        assert!(forward.is_empty(), "forward(latest) must fetch nothing: already at the high watermark");
+        assert!(
+            forward.is_empty(),
+            "forward(latest) must fetch nothing: already at the high watermark"
+        );
 
         let back = page_windows(&positions, wm, Direction::Back, 500);
-        assert_eq!(back, vec![
-            range::PartitionRange { partition: 0, start: 0, end: 20 },
-            range::PartitionRange { partition: 1, start: 0, end: 20 },
-        ], "back(latest) must cover the entire topic");
+        assert_eq!(
+            back,
+            vec![
+                range::PartitionRange {
+                    partition: 0,
+                    start: 0,
+                    end: 20
+                },
+                range::PartitionRange {
+                    partition: 1,
+                    start: 0,
+                    end: 20
+                },
+            ],
+            "back(latest) must cover the entire topic"
+        );
     }
 
     /// Sanity check: a position already inside range is left untouched.
@@ -308,13 +452,21 @@ mod tests {
 
     #[test]
     fn adjacent_offset_back_is_top_of_window() {
-        let w = range::PartitionRange { partition: 0, start: 5, end: 10 };
+        let w = range::PartitionRange {
+            partition: 0,
+            start: 5,
+            end: 10,
+        };
         assert_eq!(adjacent_offset(&w, Direction::Back), 9);
     }
 
     #[test]
     fn adjacent_offset_forward_is_bottom_of_window() {
-        let w = range::PartitionRange { partition: 0, start: 5, end: 10 };
+        let w = range::PartitionRange {
+            partition: 0,
+            start: 5,
+            end: 10,
+        };
         assert_eq!(adjacent_offset(&w, Direction::Forward), 5);
     }
 }

@@ -1,7 +1,7 @@
 use super::{DecodedPayload, Encoding};
-use base64::Engine as _;
 use crate::message::schema_registry::{ParsedSchema, SchemaRegistry, SchemaType};
 use crate::message::{avro, proto};
+use base64::Engine as _;
 
 pub fn confluent_schema_id(bytes: &[u8]) -> Option<i32> {
     (bytes.len() >= 5 && bytes[0] == 0)
@@ -11,9 +11,19 @@ pub fn confluent_schema_id(bytes: &[u8]) -> Option<i32> {
 pub fn decode_plain(bytes: &[u8]) -> DecodedPayload {
     if let Ok(text) = std::str::from_utf8(bytes) {
         if serde_json::from_str::<serde_json::Value>(text).is_ok() {
-            return DecodedPayload { encoding: Encoding::Json, text: text.to_string(), schema_id: None, error: None };
+            return DecodedPayload {
+                encoding: Encoding::Json,
+                text: text.to_string(),
+                schema_id: None,
+                error: None,
+            };
         }
-        return DecodedPayload { encoding: Encoding::Utf8, text: text.to_string(), schema_id: None, error: None };
+        return DecodedPayload {
+            encoding: Encoding::Utf8,
+            text: text.to_string(),
+            schema_id: None,
+            error: None,
+        };
     }
     DecodedPayload {
         encoding: Encoding::Bytes,
@@ -32,14 +42,22 @@ fn decode_error(bytes: &[u8], schema_id: Option<i32>, error: String) -> DecodedP
     }
 }
 
-pub async fn decode_payload(bytes: Option<&[u8]>, sr: Option<&SchemaRegistry>) -> Option<DecodedPayload> {
+pub async fn decode_payload(
+    bytes: Option<&[u8]>,
+    sr: Option<&SchemaRegistry>,
+) -> Option<DecodedPayload> {
     let bytes = bytes?;
     let Some(schema_id) = confluent_schema_id(bytes) else {
         return Some(decode_plain(bytes));
     };
     let Some(sr) = sr else {
-        return Some(decode_error(bytes, Some(schema_id),
-            format!("message carries schema id {schema_id} but no schema registry is configured for this cluster")));
+        return Some(decode_error(
+            bytes,
+            Some(schema_id),
+            format!(
+                "message carries schema id {schema_id} but no schema registry is configured for this cluster"
+            ),
+        ));
     };
     let schema = match sr.schema(schema_id).await {
         Ok(s) => s,
@@ -53,8 +71,12 @@ pub async fn decode_payload(bytes: Option<&[u8]>, sr: Option<&SchemaRegistry>) -
         SchemaType::Avro | SchemaType::Protobuf => match sr.parsed(schema_id).await {
             Err(e) => Err(e),
             Ok(parsed) => match &*parsed {
-                ParsedSchema::Avro(s) => avro::decode_with_schema(s, body).map(|text| (Encoding::Avro, text)),
-                ParsedSchema::Protobuf(fd) => proto::decode_with_descriptor(fd, body).map(|text| (Encoding::Protobuf, text)),
+                ParsedSchema::Avro(s) => {
+                    avro::decode_with_schema(s, body).map(|text| (Encoding::Avro, text))
+                }
+                ParsedSchema::Protobuf(fd) => {
+                    proto::decode_with_descriptor(fd, body).map(|text| (Encoding::Protobuf, text))
+                }
             },
         },
         SchemaType::Json => {
@@ -73,7 +95,12 @@ pub async fn decode_payload(bytes: Option<&[u8]>, sr: Option<&SchemaRegistry>) -
         }
     };
     Some(match result {
-        Ok((encoding, text)) => DecodedPayload { encoding, text, schema_id: Some(schema_id), error: None },
+        Ok((encoding, text)) => DecodedPayload {
+            encoding,
+            text,
+            schema_id: Some(schema_id),
+            error: None,
+        },
         Err(e) => decode_error(bytes, Some(schema_id), e),
     })
 }
@@ -149,7 +176,9 @@ mod tests {
 
     #[tokio::test]
     async fn json_schema_type_with_valid_json_body_decodes_as_json() {
-        let sr = SchemaRegistry::new(&crate::message::schema_registry::tests::mock_sr_for_decode().await);
+        let sr = SchemaRegistry::new(
+            &crate::message::schema_registry::tests::mock_sr_for_decode().await,
+        );
         let mut bytes = vec![0u8, 0, 0, 0, 9];
         bytes.extend_from_slice(br#"{"a":1}"#);
         let p = decode_payload(Some(&bytes), Some(&sr)).await.unwrap();
@@ -164,20 +193,28 @@ mod tests {
     /// silently mislabels the payload; it must surface as a decode error.
     #[tokio::test]
     async fn json_schema_type_with_invalid_json_body_is_decode_error() {
-        let sr = SchemaRegistry::new(&crate::message::schema_registry::tests::mock_sr_for_decode().await);
+        let sr = SchemaRegistry::new(
+            &crate::message::schema_registry::tests::mock_sr_for_decode().await,
+        );
         let mut bytes = vec![0u8, 0, 0, 0, 9];
         bytes.extend_from_slice(b"not json at all");
         let p = decode_payload(Some(&bytes), Some(&sr)).await.unwrap();
         assert_eq!(p.encoding, Encoding::DecodeError);
         assert_eq!(p.schema_id, Some(9));
-        assert!(p.error.as_ref().unwrap().contains("JSON"), "got: {:?}", p.error);
+        assert!(
+            p.error.as_ref().unwrap().contains("JSON"),
+            "got: {:?}",
+            p.error
+        );
         assert!(!p.text.is_empty());
     }
 
     #[tokio::test]
     async fn avro_via_registry_decodes() {
         // mock SR serving schema id 7 as avro "string"; datum "hi" = [0x04, b'h', b'i']
-        let sr = SchemaRegistry::new(&crate::message::schema_registry::tests::mock_sr_for_decode().await);
+        let sr = SchemaRegistry::new(
+            &crate::message::schema_registry::tests::mock_sr_for_decode().await,
+        );
         let mut bytes = vec![0u8, 0, 0, 0, 7];
         bytes.extend_from_slice(&[0x04, b'h', b'i']);
         let p = decode_payload(Some(&bytes), Some(&sr)).await.unwrap();

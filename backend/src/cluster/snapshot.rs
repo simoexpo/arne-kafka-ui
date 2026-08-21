@@ -10,7 +10,7 @@
 //! `as_of` they were built with, so a shared answer states its own age rather
 //! than pretending to be new.
 
-use super::single_flight::{SingleFlight, MAX_WAIT};
+use super::single_flight::{MAX_WAIT, SingleFlight};
 use crate::error::ApiError;
 use crate::util::now_ms;
 use std::sync::Mutex;
@@ -21,7 +21,9 @@ pub struct SnapshotCache<T> {
 
 impl<T> Default for SnapshotCache<T> {
     fn default() -> Self {
-        Self { inner: Mutex::new(None) }
+        Self {
+            inner: Mutex::new(None),
+        }
     }
 }
 
@@ -33,12 +35,19 @@ impl<T: Clone> SnapshotCache<T> {
     /// The cached value if it is younger than `ttl_ms`.
     pub fn fresh(&self, ttl_ms: i64, now: i64) -> Option<T> {
         let guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        guard.as_ref().filter(|(_, at)| now - at < ttl_ms).map(|(v, _)| v.clone())
+        guard
+            .as_ref()
+            .filter(|(_, at)| now - at < ttl_ms)
+            .map(|(v, _)| v.clone())
     }
 
     /// Whatever is cached, regardless of age.
     pub fn any(&self) -> Option<T> {
-        self.inner.lock().unwrap_or_else(|e| e.into_inner()).as_ref().map(|(v, _)| v.clone())
+        self.inner
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .map(|(v, _)| v.clone())
     }
 
     pub fn put(&self, value: T, now: i64) {
@@ -84,8 +93,8 @@ pub fn cached_or_refresh<T: Clone>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
     fn flight() -> SingleFlight<&'static str> {
@@ -101,9 +110,19 @@ mod tests {
             calls.fetch_add(1, Ordering::SeqCst);
             Ok::<_, ApiError>("value".to_string())
         };
-        assert_eq!(cached_or_refresh(&cache, &sf, "k", 10_000, refresh).unwrap(), "value");
-        assert_eq!(cached_or_refresh(&cache, &sf, "k", 10_000, refresh).unwrap(), "value");
-        assert_eq!(calls.load(Ordering::SeqCst), 1, "the second caller read memory");
+        assert_eq!(
+            cached_or_refresh(&cache, &sf, "k", 10_000, refresh).unwrap(),
+            "value"
+        );
+        assert_eq!(
+            cached_or_refresh(&cache, &sf, "k", 10_000, refresh).unwrap(),
+            "value"
+        );
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "the second caller read memory"
+        );
     }
 
     #[test]
@@ -111,7 +130,8 @@ mod tests {
         let cache = SnapshotCache::new();
         let sf = flight();
         cache.put("old".to_string(), now_ms() - 5_000);
-        let value = cached_or_refresh(&cache, &sf, "k", 1_000, || Ok::<_, ApiError>("new".into())).unwrap();
+        let value =
+            cached_or_refresh(&cache, &sf, "k", 1_000, || Ok::<_, ApiError>("new".into())).unwrap();
         assert_eq!(value, "new");
     }
 
@@ -137,7 +157,11 @@ mod tests {
         for t in threads {
             assert_eq!(t.join().unwrap(), "value", "every caller is served");
         }
-        assert_eq!(calls.load(Ordering::SeqCst), 1, "one refresh served all eight");
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "one refresh served all eight"
+        );
     }
 
     /// A cache HIT must hand out the SAME payload, not a copy of it: a
@@ -152,8 +176,15 @@ mod tests {
         let build = || Ok::<_, ApiError>(Arc::new(vec![1, 2, 3]));
         let first = cached_or_refresh(&cache, &sf, "k", 10_000, build).unwrap();
         let second = cached_or_refresh(&cache, &sf, "k", 10_000, build).unwrap();
-        assert!(Arc::ptr_eq(&first, &second), "both readers hold the same allocation");
-        assert_eq!(Arc::strong_count(&first), 3, "cache plus two readers, one payload");
+        assert!(
+            Arc::ptr_eq(&first, &second),
+            "both readers hold the same allocation"
+        );
+        assert_eq!(
+            Arc::strong_count(&first),
+            3,
+            "cache plus two readers, one payload"
+        );
     }
 
     /// A failed refresh must reach the client rather than being hidden behind
@@ -168,6 +199,10 @@ mod tests {
         })
         .unwrap_err();
         assert!(err.message.contains("broker said no"));
-        assert_eq!(cache.any().unwrap(), "old", "the old snapshot is still there for the next caller");
+        assert_eq!(
+            cache.any().unwrap(),
+            "old",
+            "the old snapshot is still there for the next caller"
+        );
     }
 }

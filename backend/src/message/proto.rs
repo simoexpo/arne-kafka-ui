@@ -75,11 +75,7 @@ pub fn message_fqn(proto_src: &str) -> Option<String> {
 pub fn build_descriptor(proto_src: &str) -> Result<FileDescriptor, String> {
     // protobuf-parse reads files from disk; write the SR schema text to a temp file
     let call_id = CALL_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let dir = std::env::temp_dir().join(format!(
-        "arne-proto-{}-{}",
-        std::process::id(),
-        call_id
-    ));
+    let dir = std::env::temp_dir().join(format!("arne-proto-{}-{}", std::process::id(), call_id));
     std::fs::create_dir_all(&dir).map_err(|e| format!("tmp dir: {e}"))?;
     let _dir_guard = TempDirGuard(dir.clone());
     let path = dir.join("schema.proto");
@@ -108,7 +104,10 @@ pub fn build_descriptor(proto_src: &str) -> Result<FileDescriptor, String> {
 /// Decodes `payload_after_header` (the confluent-framed body past the
 /// magic byte + schema id + message indexes) using an already-parsed
 /// `FileDescriptor`. Cheap: no re-parsing of the `.proto` source.
-pub fn decode_with_descriptor(fd: &FileDescriptor, payload_after_header: &[u8]) -> Result<String, String> {
+pub fn decode_with_descriptor(
+    fd: &FileDescriptor,
+    payload_after_header: &[u8],
+) -> Result<String, String> {
     let (indexes, body) = read_message_indexes(payload_after_header)?;
     if indexes != [0] {
         return Err(format!(

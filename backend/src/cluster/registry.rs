@@ -22,11 +22,17 @@ impl ClusterRegistry {
     }
 
     pub fn get(&self, name: &str) -> Result<Arc<ClusterHandle>, ApiError> {
-        self.map.get(name).cloned().ok_or_else(|| ApiError::cluster_not_found(name))
+        self.map
+            .get(name)
+            .cloned()
+            .ok_or_else(|| ApiError::cluster_not_found(name))
     }
 
     pub fn all(&self) -> Vec<Arc<ClusterHandle>> {
-        self.order.iter().filter_map(|n| self.map.get(n).cloned()).collect()
+        self.order
+            .iter()
+            .filter_map(|n| self.map.get(n).cloned())
+            .collect()
     }
 }
 
@@ -36,7 +42,13 @@ mod tests {
     use crate::config::ClusterConfig;
 
     fn cfg(name: &str) -> ClusterConfig {
-        ClusterConfig { name: name.into(), bootstrap: "localhost:19092".into(), sasl: None, schema_registry: None, broker_call_stats_ms: 0 }
+        ClusterConfig {
+            name: name.into(),
+            bootstrap: "localhost:19092".into(),
+            sasl: None,
+            schema_registry: None,
+            broker_call_stats_ms: 0,
+        }
     }
 
     #[test]

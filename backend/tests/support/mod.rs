@@ -1,17 +1,17 @@
-use axum::body::Body;
-use axum::http::{Request, StatusCode};
-use axum::Router;
 use arne::cluster::registry::ClusterRegistry;
 use arne::config::{ClusterConfig, Limits};
 use arne::state::AppState;
+use axum::Router;
+use axum::body::Body;
+use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
+use rdkafka::ClientConfig;
 use rdkafka::admin::{AdminClient, AdminOptions, NewTopic, TopicReplication};
 use rdkafka::consumer::{BaseConsumer, CommitMode, Consumer};
 use rdkafka::producer::{FutureProducer, FutureRecord, Producer};
-use rdkafka::ClientConfig;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
-use std::collections::BTreeMap;
 use testcontainers_modules::kafka::apache::Kafka;
 use testcontainers_modules::testcontainers::runners::AsyncRunner;
 use testcontainers_modules::testcontainers::{ContainerAsync, ImageExt, ReuseDirective};
@@ -87,13 +87,17 @@ async fn wait_until_broker_ready(bootstrap: &str) {
                 let mut cc = client(&bootstrap);
                 cc.set("group.id", "readiness-probe");
                 let gc: BaseConsumer = cc.create().ok()?;
-                gc.committed_offsets(rdkafka::TopicPartitionList::new(), Duration::from_secs(2)).ok()?;
+                gc.committed_offsets(rdkafka::TopicPartitionList::new(), Duration::from_secs(2))
+                    .ok()?;
                 Some(())
             })();
             if ready.is_some() {
                 return;
             }
-            assert!(std::time::Instant::now() < deadline, "kafka broker not ready within 60s");
+            assert!(
+                std::time::Instant::now() < deadline,
+                "kafka broker not ready within 60s"
+            );
             std::thread::sleep(Duration::from_millis(250));
         }
     })
@@ -108,12 +112,18 @@ async fn reset_cluster_state(bootstrap: &str) {
         let bootstrap = bootstrap.to_string();
         tokio::task::spawn_blocking(move || {
             let consumer: BaseConsumer = client(&bootstrap).create().unwrap();
-            let md = consumer.fetch_metadata(None, Duration::from_secs(10)).unwrap();
-            let topics: Vec<String> = md.topics().iter()
+            let md = consumer
+                .fetch_metadata(None, Duration::from_secs(10))
+                .unwrap();
+            let topics: Vec<String> = md
+                .topics()
+                .iter()
                 .map(|t| t.name().to_string())
                 .filter(|n| !n.starts_with("__"))
                 .collect();
-            let gl = consumer.fetch_group_list(None, Duration::from_secs(10)).unwrap();
+            let gl = consumer
+                .fetch_group_list(None, Duration::from_secs(10))
+                .unwrap();
             let groups: Vec<String> = gl.groups().iter().map(|g| g.name().to_string()).collect();
             (topics, groups)
         })
@@ -138,11 +148,20 @@ async fn reset_cluster_state(bootstrap: &str) {
             let consumer: BaseConsumer = client(&bootstrap).create().unwrap();
             let deadline = std::time::Instant::now() + Duration::from_secs(30);
             loop {
-                let md = consumer.fetch_metadata(None, Duration::from_secs(5)).unwrap();
-                if md.topics().iter().all(|t| t.name().starts_with("__") || !topics.contains(&t.name().to_string())) {
+                let md = consumer
+                    .fetch_metadata(None, Duration::from_secs(5))
+                    .unwrap();
+                if md
+                    .topics()
+                    .iter()
+                    .all(|t| t.name().starts_with("__") || !topics.contains(&t.name().to_string()))
+                {
                     return;
                 }
-                assert!(std::time::Instant::now() < deadline, "stale topics not deleted within 30s");
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "stale topics not deleted within 30s"
+                );
                 std::thread::sleep(Duration::from_millis(200));
             }
         })
@@ -189,7 +208,10 @@ pub async fn broker_calls(state: &AppState) -> BTreeMap<String, u64> {
         if report.sampled_at.is_some() {
             return report.totals;
         }
-        assert!(std::time::Instant::now() < deadline, "no tally arrived — are stats enabled?");
+        assert!(
+            std::time::Instant::now() < deadline,
+            "no tally arrived — are stats enabled?"
+        );
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
 }
@@ -199,7 +221,10 @@ pub async fn broker_calls(state: &AppState) -> BTreeMap<String, u64> {
 /// necessarily includes every request it made. (Waiting on librdkafka's own
 /// stamp does not work: it has one-second granularity, so a "newer" tally can
 /// still predate the action.)
-pub async fn calls_since(state: &AppState, before: &BTreeMap<String, u64>) -> BTreeMap<String, u64> {
+pub async fn calls_since(
+    state: &AppState,
+    before: &BTreeMap<String, u64>,
+) -> BTreeMap<String, u64> {
     let handle = state.registry.get("test").unwrap();
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
     handle.serve_client_events();
@@ -217,7 +242,10 @@ pub async fn calls_since(state: &AppState, before: &BTreeMap<String, u64>) -> BT
             }
             return delta;
         }
-        assert!(std::time::Instant::now() < deadline, "no fresh tally after the action");
+        assert!(
+            std::time::Instant::now() < deadline,
+            "no fresh tally after the action"
+        );
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
 }
@@ -340,7 +368,11 @@ pub fn spawn_live_consumer(bootstrap: &str, topic: &str, group: &str) -> LiveCon
 
 /// Joined and assigned, but never commits — the "actively consuming, position
 /// unknown until it commits" case.
-pub fn spawn_live_consumer_without_commits(bootstrap: &str, topic: &str, group: &str) -> LiveConsumer {
+pub fn spawn_live_consumer_without_commits(
+    bootstrap: &str,
+    topic: &str,
+    group: &str,
+) -> LiveConsumer {
     spawn_live_consumer_inner(bootstrap, topic, group, false)
 }
 
@@ -348,11 +380,26 @@ pub fn spawn_live_consumer_without_commits(bootstrap: &str, topic: &str, group: 
 /// clients toward. Such a group carries no assignment blob and the legacy
 /// DescribeGroups reports it as `Dead` with no members, so only a
 /// coordinator-side describe can tell the truth about it.
-pub fn spawn_live_next_protocol_consumer(bootstrap: &str, topic: &str, group: &str) -> LiveConsumer {
-    spawn_live_consumer_configured(bootstrap, topic, group, true, &[("group.protocol", "consumer")])
+pub fn spawn_live_next_protocol_consumer(
+    bootstrap: &str,
+    topic: &str,
+    group: &str,
+) -> LiveConsumer {
+    spawn_live_consumer_configured(
+        bootstrap,
+        topic,
+        group,
+        true,
+        &[("group.protocol", "consumer")],
+    )
 }
 
-fn spawn_live_consumer_inner(bootstrap: &str, topic: &str, group: &str, commit: bool) -> LiveConsumer {
+fn spawn_live_consumer_inner(
+    bootstrap: &str,
+    topic: &str,
+    group: &str,
+    commit: bool,
+) -> LiveConsumer {
     spawn_live_consumer_configured(bootstrap, topic, group, commit, &[])
 }
 
@@ -365,10 +412,16 @@ fn spawn_live_consumer_configured(
 ) -> LiveConsumer {
     let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let stop_flag = stop.clone();
-    let (label, bootstrap, topic, group) =
-        (format!("{topic}/{group}"), bootstrap.to_string(), topic.to_string(), group.to_string());
-    let extra: Vec<(String, String)> =
-        extra.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+    let (label, bootstrap, topic, group) = (
+        format!("{topic}/{group}"),
+        bootstrap.to_string(),
+        topic.to_string(),
+        group.to_string(),
+    );
+    let extra: Vec<(String, String)> = extra
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
     // The thread reports whether it got as far as subscribing, so a setup
     // failure surfaces here instead of leaving the caller to time out waiting
     // for a consumer that never existed.
@@ -403,7 +456,10 @@ fn spawn_live_consumer_configured(
         Ok(Err(e)) => panic!("live consumer {label} failed to start: {e}"),
         Err(e) => panic!("live consumer {label} never reported startup: {e}"),
     }
-    LiveConsumer { stop, thread: Some(thread) }
+    LiveConsumer {
+        stop,
+        thread: Some(thread),
+    }
 }
 
 /// Start `app` on an ephemeral port and collect SSE events (name, json) from
@@ -429,10 +485,16 @@ pub async fn collect_sse(app: Router, path: &str, max: usize) -> Vec<(String, se
             let mut name = String::new();
             let mut data = String::new();
             for line in frame.lines() {
-                if let Some(v) = line.strip_prefix("event: ") { name = v.to_string(); }
-                if let Some(v) = line.strip_prefix("data: ") { data.push_str(v); }
+                if let Some(v) = line.strip_prefix("event: ") {
+                    name = v.to_string();
+                }
+                if let Some(v) = line.strip_prefix("data: ") {
+                    data.push_str(v);
+                }
             }
-            if name.is_empty() { continue; } // keep-alive comments
+            if name.is_empty() {
+                continue;
+            } // keep-alive comments
             let json = serde_json::from_str(&data).unwrap_or(serde_json::Value::Null);
             let terminal = name == "app_error";
             events.push((name, json));
@@ -450,7 +512,10 @@ pub async fn collect_sse(app: Router, path: &str, max: usize) -> Vec<(String, se
 pub async fn produce_raw(bootstrap: &str, topic: &str, key: &str, value: &[u8]) {
     let producer: FutureProducer = client(bootstrap).create().unwrap();
     producer
-        .send(FutureRecord::to(topic).key(key).payload(value), Duration::from_secs(10))
+        .send(
+            FutureRecord::to(topic).key(key).payload(value),
+            Duration::from_secs(10),
+        )
         .await
         .unwrap();
 }
@@ -459,11 +524,22 @@ pub async fn produce_raw(bootstrap: &str, topic: &str, key: &str, value: &[u8]) 
 /// by timeline tests to construct interleaved, known cross-partition
 /// timestamps (mirrors `produce`'s string values, but pins `.partition()` and
 /// `.timestamp()` instead of leaving them to the producer's defaults).
-pub async fn produce_at(bootstrap: &str, topic: &str, partition: i32, key: &str, value: &str, ts_ms: i64) {
+pub async fn produce_at(
+    bootstrap: &str,
+    topic: &str,
+    partition: i32,
+    key: &str,
+    value: &str,
+    ts_ms: i64,
+) {
     let producer: FutureProducer = client(bootstrap).create().unwrap();
     producer
         .send(
-            FutureRecord::to(topic).key(key).payload(value).partition(partition).timestamp(ts_ms),
+            FutureRecord::to(topic)
+                .key(key)
+                .payload(value)
+                .partition(partition)
+                .timestamp(ts_ms),
             Duration::from_secs(10),
         )
         .await
@@ -488,12 +564,21 @@ pub async fn produce_at(bootstrap: &str, topic: &str, partition: i32, key: &str,
 /// vanish before it ever reads them back. Reusing one producer keeps a
 /// several-hundred-message setup down to low single-digit seconds, safely
 /// under that window.
-pub async fn produce_at_many(bootstrap: &str, topic: &str, partition: i32, records: &[(String, String, i64)]) {
+pub async fn produce_at_many(
+    bootstrap: &str,
+    topic: &str,
+    partition: i32,
+    records: &[(String, String, i64)],
+) {
     let producer: FutureProducer = client(bootstrap).create().unwrap();
     for (key, value, ts_ms) in records {
         producer
             .send(
-                FutureRecord::to(topic).key(key).payload(value).partition(partition).timestamp(*ts_ms),
+                FutureRecord::to(topic)
+                    .key(key)
+                    .payload(value)
+                    .partition(partition)
+                    .timestamp(*ts_ms),
                 Duration::from_secs(10),
             )
             .await
@@ -518,7 +603,10 @@ pub async fn produce_at_many(bootstrap: &str, topic: &str, partition: i32, recor
 /// across the container's reused lifetime (see `start_kafka`'s reuse
 /// comment) risks fencing a still-open transaction from a previous run.
 pub async fn produce_transactional(bootstrap: &str, topic: &str, count: usize) {
-    let unique = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
     let txn_id = format!("arne-test-txn-{}-{unique}", std::process::id());
     let mut cc = client(bootstrap);
     cc.set("transactional.id", &txn_id);
@@ -533,7 +621,9 @@ pub async fn produce_transactional(bootstrap: &str, topic: &str, count: usize) {
     loop {
         match producer.init_transactions(Duration::from_secs(10)) {
             Ok(()) => break,
-            Err(rdkafka::error::KafkaError::Transaction(e)) if e.is_retriable() && std::time::Instant::now() < deadline => {
+            Err(rdkafka::error::KafkaError::Transaction(e))
+                if e.is_retriable() && std::time::Instant::now() < deadline =>
+            {
                 std::thread::sleep(Duration::from_millis(500));
             }
             Err(e) => panic!("init_transactions failed: {e}"),
@@ -544,14 +634,19 @@ pub async fn produce_transactional(bootstrap: &str, topic: &str, count: usize) {
         let key = format!("k{i}");
         let value = format!("v{i}");
         producer
-            .send(FutureRecord::to(topic).key(&key).payload(&value), Duration::from_secs(10))
+            .send(
+                FutureRecord::to(topic).key(&key).payload(&value),
+                Duration::from_secs(10),
+            )
             .await
             .unwrap();
     }
     loop {
         match producer.commit_transaction(Duration::from_secs(10)) {
             Ok(()) => break,
-            Err(rdkafka::error::KafkaError::Transaction(e)) if e.is_retriable() && std::time::Instant::now() < deadline => {
+            Err(rdkafka::error::KafkaError::Transaction(e))
+                if e.is_retriable() && std::time::Instant::now() < deadline =>
+            {
                 std::thread::sleep(Duration::from_millis(500));
             }
             Err(e) => panic!("commit_transaction failed: {e}"),
@@ -565,10 +660,12 @@ pub async fn produce_transactional(bootstrap: &str, topic: &str, count: usize) {
 /// fully determined (descending ts strictly alternates p1,p0 for equal
 /// offsets). Assumes `topic` already has (at least) 2 partitions.
 pub async fn produce_interleaved_fixture(bootstrap: &str, topic: &str) {
-    let p0: Vec<(String, String, i64)> =
-        (0..20i64).map(|o| (format!("p0k{o}"), format!("p0v{o}"), 1000 + 20 * o)).collect();
-    let p1: Vec<(String, String, i64)> =
-        (0..20i64).map(|o| (format!("p1k{o}"), format!("p1v{o}"), 1010 + 20 * o)).collect();
+    let p0: Vec<(String, String, i64)> = (0..20i64)
+        .map(|o| (format!("p0k{o}"), format!("p0v{o}"), 1000 + 20 * o))
+        .collect();
+    let p1: Vec<(String, String, i64)> = (0..20i64)
+        .map(|o| (format!("p1k{o}"), format!("p1v{o}"), 1010 + 20 * o))
+        .collect();
     produce_at_many(bootstrap, topic, 0, &p0).await;
     produce_at_many(bootstrap, topic, 1, &p1).await;
 }
@@ -576,8 +673,15 @@ pub async fn produce_interleaved_fixture(bootstrap: &str, topic: &str) {
 /// Extracts the `(partition, offset)` set of every `match` event in an SSE
 /// event list collected by `collect_sse`.
 pub fn offsets_of(events: &[(String, serde_json::Value)]) -> std::collections::HashSet<(i64, i64)> {
-    events.iter().filter(|(n, _)| n == "match")
-        .map(|(_, m)| (m["partition"].as_i64().unwrap(), m["offset"].as_i64().unwrap()))
+    events
+        .iter()
+        .filter(|(n, _)| n == "match")
+        .map(|(_, m)| {
+            (
+                m["partition"].as_i64().unwrap(),
+                m["offset"].as_i64().unwrap(),
+            )
+        })
         .collect()
 }
 
@@ -587,7 +691,10 @@ pub async fn produce(bootstrap: &str, topic: &str, count: usize) {
         let key = format!("k{i}");
         let value = format!("v{i}");
         producer
-            .send(FutureRecord::to(topic).key(&key).payload(&value), Duration::from_secs(10))
+            .send(
+                FutureRecord::to(topic).key(&key).payload(&value),
+                Duration::from_secs(10),
+            )
             .await
             .unwrap();
     }

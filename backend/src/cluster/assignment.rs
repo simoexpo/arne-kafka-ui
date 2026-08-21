@@ -100,9 +100,6 @@ mod tests {
         );
     }
 
-
-
-
     #[test]
     fn trailing_userdata_is_ignored() {
         let b = blob(0, &[("t", &[0])], &[0xff, 0x00, 0x42, 0x01]);

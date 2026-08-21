@@ -1,9 +1,9 @@
 use crate::cluster::{admin, sampler, single_flight};
 use crate::error::ApiError;
-use crate::util::now_ms;
 use crate::state::AppState;
-use axum::extract::{Path, State};
+use crate::util::now_ms;
 use axum::Json;
+use axum::extract::{Path, State};
 use serde_json::json;
 
 pub async fn list(
@@ -31,7 +31,10 @@ pub async fn throughput(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let handle = state.registry.get(&cluster)?;
     let interval_ms = (state.limits.sampler_interval_secs as i64) * 1000;
-    let due = handle.sampler.age(&topic, now_ms()).is_none_or(|age| age >= interval_ms);
+    let due = handle
+        .sampler
+        .age(&topic, now_ms())
+        .is_none_or(|age| age >= interval_ms);
     if due {
         let sample_handle = handle.clone();
         let sample_topic = topic.clone();
@@ -41,7 +44,10 @@ pub async fn throughput(
             let _flight = sample_handle
                 .sampler_flight
                 .begin_or_wait(sample_topic.clone(), single_flight::MAX_WAIT)?;
-            Some(sampler::sample_topic_blocking(&sample_handle, &sample_topic))
+            Some(sampler::sample_topic_blocking(
+                &sample_handle,
+                &sample_topic,
+            ))
         })
         .await
         .map_err(ApiError::task_join)?;
@@ -57,7 +63,9 @@ pub async fn throughput(
     }
     let samples = handle.sampler.rate_points(&topic, interval_ms);
     let as_of = handle.sampler.as_of(&topic);
-    Ok(Json(json!({ "topic": topic, "samples": samples, "as_of": as_of })))
+    Ok(Json(
+        json!({ "topic": topic, "samples": samples, "as_of": as_of }),
+    ))
 }
 
 pub async fn consumers(

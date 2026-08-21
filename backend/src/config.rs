@@ -85,7 +85,11 @@ pub struct ServerConfig {
     pub port: u16,
 }
 impl Default for ServerConfig {
-    fn default() -> Self { Self { port: default_port() } }
+    fn default() -> Self {
+        Self {
+            port: default_port(),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize, Clone, PartialEq)]
@@ -109,10 +113,18 @@ impl Default for Limits {
     }
 }
 
-fn default_true() -> bool { true }
-fn default_port() -> u16 { 8080 }
-fn default_sampler_interval() -> u64 { 10 }
-fn default_timeline_scan_budget() -> u64 { 250_000 }
+fn default_true() -> bool {
+    true
+}
+fn default_port() -> u16 {
+    8080
+}
+fn default_sampler_interval() -> u64 {
+    10
+}
+fn default_timeline_scan_budget() -> u64 {
+    250_000
+}
 
 fn interpolate(raw: &str, lookup: &dyn Fn(&str) -> Option<String>) -> Result<String, ConfigError> {
     let mut out = String::with_capacity(raw.len());
@@ -243,22 +255,32 @@ fn find_comment_start(line: &str) -> usize {
 impl Config {
     pub fn validate(&self) -> Result<(), ConfigError> {
         if self.clusters.is_empty() {
-            return Err(ConfigError::Invalid("clusters: at least one cluster is required".into()));
+            return Err(ConfigError::Invalid(
+                "clusters: at least one cluster is required".into(),
+            ));
         }
         let mut seen = HashSet::new();
         for (i, c) in self.clusters.iter().enumerate() {
             let name_ok = !c.name.is_empty()
-                && c.name.chars().all(|ch| ch.is_ascii_alphanumeric() || "._-".contains(ch));
+                && c.name
+                    .chars()
+                    .all(|ch| ch.is_ascii_alphanumeric() || "._-".contains(ch));
             if !name_ok {
                 return Err(ConfigError::Invalid(format!(
-                    "clusters[{i}].name: must be non-empty and contain only [a-zA-Z0-9._-], got '{}'", c.name
+                    "clusters[{i}].name: must be non-empty and contain only [a-zA-Z0-9._-], got '{}'",
+                    c.name
                 )));
             }
             if !seen.insert(c.name.clone()) {
-                return Err(ConfigError::Invalid(format!("clusters[{i}].name: duplicate name '{}'", c.name)));
+                return Err(ConfigError::Invalid(format!(
+                    "clusters[{i}].name: duplicate name '{}'",
+                    c.name
+                )));
             }
             if c.bootstrap.trim().is_empty() {
-                return Err(ConfigError::Invalid(format!("clusters[{i}].bootstrap: must not be empty")));
+                return Err(ConfigError::Invalid(format!(
+                    "clusters[{i}].bootstrap: must not be empty"
+                )));
             }
         }
         Ok(())
@@ -268,7 +290,8 @@ impl Config {
         let raw = std::fs::read_to_string(path)
             .map_err(|e| ConfigError::Io(path.display().to_string(), e))?;
         let interpolated = interpolate_outside_comments(&raw, &|v| std::env::var(v).ok())?;
-        let cfg: Config = serde_yaml::from_str(&interpolated).map_err(|e| ConfigError::Parse(e.to_string()))?;
+        let cfg: Config =
+            serde_yaml::from_str(&interpolated).map_err(|e| ConfigError::Parse(e.to_string()))?;
         cfg.validate()?;
         Ok(cfg)
     }
@@ -299,7 +322,10 @@ limits: { sampler_interval_secs: 5 }
             tls: true,
         };
         let debug = format!("{sasl:?}");
-        assert!(!debug.contains("s3cret"), "password must never appear in Debug output: {debug}");
+        assert!(
+            !debug.contains("s3cret"),
+            "password must never appear in Debug output: {debug}"
+        );
         assert!(debug.contains("<redacted>"), "got: {debug}");
     }
 
@@ -307,8 +333,8 @@ limits: { sampler_interval_secs: 5 }
         let interpolated = interpolate_outside_comments(yaml, &|v| {
             (v == "TEST_KAFKA_PW").then(|| "s3cret".to_string())
         })?;
-        let cfg: Config = serde_yaml::from_str(&interpolated)
-            .map_err(|e| ConfigError::Parse(e.to_string()))?;
+        let cfg: Config =
+            serde_yaml::from_str(&interpolated).map_err(|e| ConfigError::Parse(e.to_string()))?;
         cfg.validate()?;
         Ok(cfg)
     }
@@ -344,7 +370,10 @@ limits: { sampler_interval_secs: 5 }
     fn unknown_sasl_mechanism_fails_parse() {
         let yaml = "clusters:\n  - name: a\n    bootstrap: x\n    sasl: { mechanism: MAGIC, username: u, password: p }\n";
         let err = parse(yaml).unwrap_err();
-        assert!(err.to_string().contains("MAGIC") || err.to_string().contains("unknown variant"), "got: {err}");
+        assert!(
+            err.to_string().contains("MAGIC") || err.to_string().contains("unknown variant"),
+            "got: {err}"
+        );
     }
 
     #[test]
@@ -355,7 +384,8 @@ limits: { sampler_interval_secs: 5 }
 
     #[test]
     fn duplicate_names_rejected() {
-        let err = parse("clusters:\n  - {name: a, bootstrap: x}\n  - {name: a, bootstrap: y}\n").unwrap_err();
+        let err = parse("clusters:\n  - {name: a, bootstrap: x}\n  - {name: a, bootstrap: y}\n")
+            .unwrap_err();
         assert!(err.to_string().contains("duplicate"), "got: {err}");
     }
 

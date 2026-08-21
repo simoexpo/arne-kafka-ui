@@ -39,7 +39,7 @@ mod event;
 mod merge;
 mod window;
 
-pub use anchor::{resolve_positions_blocking, TimelineAnchorInput};
+pub use anchor::{TimelineAnchorInput, resolve_positions_blocking};
 pub use cursor::{Cursor, Direction};
-pub use engine::{run_page, PageRequest};
+pub use engine::{PageRequest, run_page};
 pub use event::TimelineEvent;

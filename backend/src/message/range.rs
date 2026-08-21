@@ -18,8 +18,16 @@ mod tests {
     #[test]
     fn total_sums_spans() {
         let r = vec![
-            PartitionRange { partition: 0, start: 60, end: 110 },
-            PartitionRange { partition: 1, start: 0, end: 5 },
+            PartitionRange {
+                partition: 0,
+                start: 60,
+                end: 110,
+            },
+            PartitionRange {
+                partition: 1,
+                start: 0,
+                end: 5,
+            },
         ];
         assert_eq!(total(&r), 55);
     }

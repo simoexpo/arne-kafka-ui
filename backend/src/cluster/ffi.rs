@@ -9,8 +9,8 @@
 //! librdkafka outlives this module, so callers never touch a raw pointer.
 
 use super::ClusterHandle;
-use crate::error::ApiError;
 use super::call_stats::StatsContext;
+use crate::error::ApiError;
 use rdkafka::consumer::BaseConsumer;
 use rdkafka_sys as rd;
 use std::ffi::{CStr, CString};
@@ -59,7 +59,12 @@ impl AdminCall {
                 rd::rd_kafka_queue_destroy(queue);
                 return Err(ApiError::kafka(cluster, cstr_to_string(errbuf.as_ptr())));
             }
-            Ok(Self { _client: client, rk, queue, options })
+            Ok(Self {
+                _client: client,
+                rk,
+                queue,
+                options,
+            })
         }
     }
 
@@ -139,7 +144,10 @@ pub fn describe_cluster_blocking(
     unsafe {
         let result = rd::rd_kafka_event_DescribeCluster_result(event.0);
         if result.is_null() {
-            return Err(ApiError::kafka(&handle.name, "describe cluster: unexpected result type"));
+            return Err(ApiError::kafka(
+                &handle.name,
+                "describe cluster: unexpected result type",
+            ));
         }
         let mut count = 0usize;
         let nodes = rd::rd_kafka_DescribeCluster_result_nodes(result, &mut count);
@@ -159,7 +167,10 @@ pub fn describe_cluster_blocking(
             // -1 is librdkafka's "unknown controller"
             Some(rd::rd_kafka_Node_id(controller)).filter(|id| *id >= 0)
         };
-        Ok(ClusterDescription { brokers, controller_id })
+        Ok(ClusterDescription {
+            brokers,
+            controller_id,
+        })
     }
 }
 
@@ -189,7 +200,10 @@ pub fn list_offsets_blocking(
     unsafe {
         let result = rd::rd_kafka_event_ListOffsets_result(event.0);
         if result.is_null() {
-            return Err(ApiError::kafka(&handle.name, "list offsets: unexpected result type"));
+            return Err(ApiError::kafka(
+                &handle.name,
+                "list offsets: unexpected result type",
+            ));
         }
         let mut count = 0usize;
         let infos = rd::rd_kafka_ListOffsets_result_infos(result, &mut count);
@@ -206,7 +220,9 @@ pub fn list_offsets_blocking(
                 offset: tp.offset,
                 // Per-partition failures are reported in the entry itself: a
                 // leader election in flight must not fail the whole batch.
-                error: if tp.err as i32 == rd::rd_kafka_resp_err_t::RD_KAFKA_RESP_ERR_NO_ERROR as i32 {
+                error: if tp.err as i32
+                    == rd::rd_kafka_resp_err_t::RD_KAFKA_RESP_ERR_NO_ERROR as i32
+                {
                     None
                 } else {
                     Some(cstr_to_string(rd::rd_kafka_err2str(tp.err)))
@@ -263,9 +279,15 @@ pub fn committed_offsets_blocking(
         rd::rd_kafka_admin_op_t::RD_KAFKA_ADMIN_OP_LISTCONSUMERGROUPOFFSETS,
         timeout,
     )?;
-    let tpl = partitions.map(|p| OwnedTpl::build(p, OffsetSpec::Invalid)).transpose()?;
-    let group_id = CString::new(group)
-        .map_err(|_| ApiError::kafka(&handle.name, format!("group id contains a NUL byte: {group:?}")))?;
+    let tpl = partitions
+        .map(|p| OwnedTpl::build(p, OffsetSpec::Invalid))
+        .transpose()?;
+    let group_id = CString::new(group).map_err(|_| {
+        ApiError::kafka(
+            &handle.name,
+            format!("group id contains a NUL byte: {group:?}"),
+        )
+    })?;
     // SAFETY: the request object owns nothing we free early; `tpl` outlives the
     // call, and the request is destroyed before returning.
     unsafe {
@@ -275,13 +297,22 @@ pub fn committed_offsets_blocking(
             tpl.as_ref().map_or(std::ptr::null(), |t| t.0),
         );
         let mut requests = [request];
-        rd::rd_kafka_ListConsumerGroupOffsets(call.rk, requests.as_mut_ptr(), 1, call.options, call.queue);
+        rd::rd_kafka_ListConsumerGroupOffsets(
+            call.rk,
+            requests.as_mut_ptr(),
+            1,
+            call.options,
+            call.queue,
+        );
         let event = call.wait(timeout, &handle.name, "fetch committed offsets");
         rd::rd_kafka_ListConsumerGroupOffsets_destroy(request);
         let event = event?;
         let result = rd::rd_kafka_event_ListConsumerGroupOffsets_result(event.0);
         if result.is_null() {
-            return Err(ApiError::kafka(&handle.name, "fetch committed offsets: unexpected result type"));
+            return Err(ApiError::kafka(
+                &handle.name,
+                "fetch committed offsets: unexpected result type",
+            ));
         }
         let mut count = 0usize;
         let groups = rd::rd_kafka_ListConsumerGroupOffsets_result_groups(result, &mut count);
@@ -293,7 +324,10 @@ pub fn committed_offsets_blocking(
                 let code = rd::rd_kafka_error_code(err);
                 if code as i32 != rd::rd_kafka_resp_err_t::RD_KAFKA_RESP_ERR_NO_ERROR as i32 {
                     let detail = cstr_to_string(rd::rd_kafka_error_string(err));
-                    return Err(ApiError::kafka(&handle.name, format!("fetch committed offsets: {detail}")));
+                    return Err(ApiError::kafka(
+                        &handle.name,
+                        format!("fetch committed offsets: {detail}"),
+                    ));
                 }
             }
             let tpl = rd::rd_kafka_group_result_partitions(group_result);
@@ -410,17 +444,30 @@ pub fn describe_consumer_group_blocking(
         rd::rd_kafka_admin_op_t::RD_KAFKA_ADMIN_OP_DESCRIBECONSUMERGROUPS,
         timeout,
     )?;
-    let group_id = CString::new(group)
-        .map_err(|_| ApiError::kafka(&handle.name, format!("group id contains a NUL byte: {group:?}")))?;
+    let group_id = CString::new(group).map_err(|_| {
+        ApiError::kafka(
+            &handle.name,
+            format!("group id contains a NUL byte: {group:?}"),
+        )
+    })?;
     // SAFETY: one group name, alive for the whole call; every pointer read out
     // of the result is copied before the event drops.
     unsafe {
         let mut names = [group_id.as_ptr()];
-        rd::rd_kafka_DescribeConsumerGroups(call.rk, names.as_mut_ptr(), 1, call.options, call.queue);
+        rd::rd_kafka_DescribeConsumerGroups(
+            call.rk,
+            names.as_mut_ptr(),
+            1,
+            call.options,
+            call.queue,
+        );
         let event = call.wait(timeout, &handle.name, "describe group")?;
         let result = rd::rd_kafka_event_DescribeConsumerGroups_result(event.0);
         if result.is_null() {
-            return Err(ApiError::kafka(&handle.name, "describe group: unexpected result type"));
+            return Err(ApiError::kafka(
+                &handle.name,
+                "describe group: unexpected result type",
+            ));
         }
         let mut count = 0usize;
         let groups = rd::rd_kafka_DescribeConsumerGroups_result_groups(result, &mut count);
@@ -438,7 +485,10 @@ pub fn describe_consumer_group_blocking(
                     return Ok(None);
                 }
                 let detail = cstr_to_string(rd::rd_kafka_error_string(err));
-                return Err(ApiError::kafka(&handle.name, format!("describe group: {detail}")));
+                return Err(ApiError::kafka(
+                    &handle.name,
+                    format!("describe group: {detail}"),
+                ));
             }
         }
         let member_count = rd::rd_kafka_ConsumerGroupDescription_member_count(desc);
@@ -473,7 +523,9 @@ pub fn describe_consumer_group_blocking(
             group_type: cstr_to_string(rd::rd_kafka_consumer_group_type_name(
                 rd::rd_kafka_ConsumerGroupDescription_type(desc),
             )),
-            assignor: cstr_to_string(rd::rd_kafka_ConsumerGroupDescription_partition_assignor(desc)),
+            assignor: cstr_to_string(rd::rd_kafka_ConsumerGroupDescription_partition_assignor(
+                desc,
+            )),
             members,
         }))
     }
@@ -513,7 +565,10 @@ pub fn list_consumer_groups_blocking(
         let event = call.wait(timeout, &handle.name, "list groups")?;
         let result = rd::rd_kafka_event_ListConsumerGroups_result(event.0);
         if result.is_null() {
-            return Err(ApiError::kafka(&handle.name, "list groups: unexpected result type"));
+            return Err(ApiError::kafka(
+                &handle.name,
+                "list groups: unexpected result type",
+            ));
         }
         // A fan-out can succeed on some brokers and fail on others. A partial
         // group list would silently hide groups, so any broker's failure fails
@@ -522,7 +577,10 @@ pub fn list_consumer_groups_blocking(
         let errors = rd::rd_kafka_ListConsumerGroups_result_errors(result, &mut error_count);
         if error_count > 0 {
             let detail = cstr_to_string(rd::rd_kafka_error_string(*errors));
-            return Err(ApiError::kafka(&handle.name, format!("list groups: {detail}")));
+            return Err(ApiError::kafka(
+                &handle.name,
+                format!("list groups: {detail}"),
+            ));
         }
         let mut count = 0usize;
         let listings = rd::rd_kafka_ListConsumerGroups_result_valid(result, &mut count);
@@ -564,8 +622,12 @@ pub fn describe_topic_config_blocking(
         rd::rd_kafka_admin_op_t::RD_KAFKA_ADMIN_OP_DESCRIBECONFIGS,
         timeout,
     )?;
-    let name = CString::new(topic)
-        .map_err(|_| ApiError::kafka(&handle.name, format!("topic name contains a NUL byte: {topic:?}")))?;
+    let name = CString::new(topic).map_err(|_| {
+        ApiError::kafka(
+            &handle.name,
+            format!("topic name contains a NUL byte: {topic:?}"),
+        )
+    })?;
     // SAFETY: the resource is destroyed on every path below before returning,
     // and every string is copied out of the result before the event drops.
     unsafe {
@@ -574,7 +636,10 @@ pub fn describe_topic_config_blocking(
             name.as_ptr(),
         );
         if resource.is_null() {
-            return Err(ApiError::kafka(&handle.name, "describe configs: invalid topic resource"));
+            return Err(ApiError::kafka(
+                &handle.name,
+                "describe configs: invalid topic resource",
+            ));
         }
         let mut resources = [resource];
         rd::rd_kafka_DescribeConfigs(call.rk, resources.as_mut_ptr(), 1, call.options, call.queue);
@@ -583,7 +648,10 @@ pub fn describe_topic_config_blocking(
         let event = event?;
         let result = rd::rd_kafka_event_DescribeConfigs_result(event.0);
         if result.is_null() {
-            return Err(ApiError::kafka(&handle.name, "describe configs: unexpected result type"));
+            return Err(ApiError::kafka(
+                &handle.name,
+                "describe configs: unexpected result type",
+            ));
         }
         let mut count = 0usize;
         let described = rd::rd_kafka_DescribeConfigs_result_resources(result, &mut count);
@@ -593,7 +661,10 @@ pub fn describe_topic_config_blocking(
             let err = rd::rd_kafka_ConfigResource_error(res);
             if err as i32 != rd::rd_kafka_resp_err_t::RD_KAFKA_RESP_ERR_NO_ERROR as i32 {
                 let detail = cstr_to_string(rd::rd_kafka_ConfigResource_error_string(res));
-                return Err(ApiError::kafka(&handle.name, format!("describe configs: {detail}")));
+                return Err(ApiError::kafka(
+                    &handle.name,
+                    format!("describe configs: {detail}"),
+                ));
             }
             let mut entry_count = 0usize;
             let entries = rd::rd_kafka_ConfigResource_configs(res, &mut entry_count);

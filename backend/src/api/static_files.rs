@@ -1,5 +1,5 @@
 use crate::error::ApiError;
-use axum::http::{header, StatusCode, Uri};
+use axum::http::{StatusCode, Uri, header};
 use axum::response::{Html, IntoResponse, Response};
 use rust_embed::RustEmbed;
 
@@ -7,8 +7,7 @@ use rust_embed::RustEmbed;
 #[folder = "../frontend/dist/"]
 struct Assets;
 
-const PLACEHOLDER: &str =
-    "<!doctype html><html><body><h1>arne</h1><p>frontend not built — run `npm run build` in frontend/ and rebuild.</p></body></html>";
+const PLACEHOLDER: &str = "<!doctype html><html><body><h1>arne</h1><p>frontend not built — run `npm run build` in frontend/ and rebuild.</p></body></html>";
 
 /// Router-wide fallback for any request matching no declared route.
 ///
@@ -27,7 +26,11 @@ pub async fn spa_fallback(uri: Uri) -> Response {
         && let Some(asset) = Assets::get(path)
     {
         let mime = mime_guess::from_path(path).first_or_octet_stream();
-        return ([(header::CONTENT_TYPE, mime.as_ref().to_string())], asset.data).into_response();
+        return (
+            [(header::CONTENT_TYPE, mime.as_ref().to_string())],
+            asset.data,
+        )
+            .into_response();
     }
     match Assets::get("index.html") {
         Some(index) => Html(index.data).into_response(),

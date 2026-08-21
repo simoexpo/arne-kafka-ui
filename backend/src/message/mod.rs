@@ -12,7 +12,14 @@ use serde::Serialize;
 
 #[derive(Debug, Serialize, PartialEq, Clone, Copy)]
 #[serde(rename_all = "snake_case")]
-pub enum Encoding { Avro, Protobuf, Json, Utf8, Bytes, DecodeError }
+pub enum Encoding {
+    Avro,
+    Protobuf,
+    Json,
+    Utf8,
+    Bytes,
+    DecodeError,
+}
 
 #[derive(Debug, Serialize)]
 pub struct DecodedPayload {

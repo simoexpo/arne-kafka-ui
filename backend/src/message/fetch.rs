@@ -1,13 +1,13 @@
 use super::range::PartitionRange;
 use super::schema_registry::SchemaRegistry;
-use super::{decode, HeaderOut, MessageOut};
-use crate::cluster::{build_client_config, ffi, throwaway_group_id, ClusterHandle, ADMIN_TIMEOUT};
+use super::{HeaderOut, MessageOut, decode};
+use crate::cluster::{ADMIN_TIMEOUT, ClusterHandle, build_client_config, ffi, throwaway_group_id};
 use crate::config::ClusterConfig;
 use crate::error::ApiError;
+use rdkafka::Offset;
 use rdkafka::consumer::{BaseConsumer, Consumer};
 use rdkafka::message::{BorrowedMessage, Headers, Message};
 use rdkafka::topic_partition_list::TopicPartitionList;
-use rdkafka::Offset;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
@@ -30,7 +30,10 @@ fn record_fetch_call(topic: &str) {
 }
 
 pub fn fetch_call_count(topic: &str) -> u64 {
-    FETCH_CALLS.get().and_then(|m| m.lock().unwrap().get(topic).copied()).unwrap_or(0)
+    FETCH_CALLS
+        .get()
+        .and_then(|m| m.lock().unwrap().get(topic).copied())
+        .unwrap_or(0)
 }
 
 /// Hard wall-clock bound on one `fetch_ranges_blocking` call — unrelated to
@@ -56,7 +59,11 @@ impl RawRecord {
     pub fn from_borrowed(msg: &BorrowedMessage) -> Self {
         let headers = msg
             .headers()
-            .map(|hs| hs.iter().map(|h| (h.key.to_string(), h.value.unwrap_or_default().to_vec())).collect())
+            .map(|hs| {
+                hs.iter()
+                    .map(|h| (h.key.to_string(), h.value.unwrap_or_default().to_vec()))
+                    .collect()
+            })
             .unwrap_or_default();
         RawRecord {
             partition: msg.partition(),
@@ -75,16 +82,26 @@ impl RawRecord {
 /// copy. `api::messages` calls it once per timeline request and hands the
 /// result to `message::timeline::run_page`, which never re-reads it
 /// mid-page.
-pub fn watermarks_blocking(handle: &ClusterHandle, topic: &str) -> Result<Vec<(i32, i64, i64)>, ApiError> {
-    let md = handle.consumer()
+pub fn watermarks_blocking(
+    handle: &ClusterHandle,
+    topic: &str,
+) -> Result<Vec<(i32, i64, i64)>, ApiError> {
+    let md = handle
+        .consumer()
         .fetch_metadata(Some(topic), ADMIN_TIMEOUT)
         .map_err(|e| crate::error::from_kafka(&handle.name, "fetch metadata", &e))?;
-    let t = md.topics().iter()
+    let t = md
+        .topics()
+        .iter()
         .find(|t| t.name() == topic && !t.partitions().is_empty())
         .ok_or_else(|| ApiError::topic_not_found(&handle.name, topic))?;
     // Two batched ListOffsets for the topic instead of a round trip per
     // partition (the messages tab pays this on every window fetch).
-    let wanted: Vec<(String, i32)> = t.partitions().iter().map(|p| (topic.to_string(), p.id())).collect();
+    let wanted: Vec<(String, i32)> = t
+        .partitions()
+        .iter()
+        .map(|p| (topic.to_string(), p.id()))
+        .collect();
     let lo = ffi::offsets_by_partition(handle, &wanted, ffi::OffsetSpec::Earliest, ADMIN_TIMEOUT)?;
     // A scan decides whether a partition is exhausted by comparing against the
     // head, so this caller cannot accept a cached one — a stale value would
@@ -154,13 +171,20 @@ pub fn fetch_ranges_blocking(
     // e.g. an offset beyond the high watermark) has nothing to fetch and is
     // trivially complete: there's no ambiguity about what's in an empty
     // range.
-    let trivially_complete: HashSet<i32> = ranges.iter().filter(|r| r.start >= r.end).map(|r| r.partition).collect();
+    let trivially_complete: HashSet<i32> = ranges
+        .iter()
+        .filter(|r| r.start >= r.end)
+        .map(|r| r.partition)
+        .collect();
     // Ranges with start >= end have nothing to fetch — drop them before
     // assigning so the poll loop's `done` map only tracks partitions that
     // can actually terminate.
     let ranges: Vec<PartitionRange> = ranges.iter().filter(|r| r.start < r.end).cloned().collect();
     if ranges.is_empty() {
-        return Ok(FetchOutcome { records: Vec::new(), complete: trivially_complete });
+        return Ok(FetchOutcome {
+            records: Vec::new(),
+            complete: trivially_complete,
+        });
     }
     record_fetch_call(topic);
     let consumer: BaseConsumer = build_client_config(cfg)
@@ -174,7 +198,9 @@ pub fn fetch_ranges_blocking(
         tpl.add_partition_offset(topic, r.partition, Offset::Offset(r.start))
             .map_err(|e| crate::error::from_kafka(&cfg.name, "assign partition offsets", &e))?;
     }
-    consumer.assign(&tpl).map_err(|e| crate::error::from_kafka(&cfg.name, "assign partitions", &e))?;
+    consumer
+        .assign(&tpl)
+        .map_err(|e| crate::error::from_kafka(&cfg.name, "assign partitions", &e))?;
 
     let targets: HashMap<i32, i64> = ranges.iter().map(|r| (r.partition, r.end)).collect();
     let mut done: HashMap<i32, bool> = ranges.iter().map(|r| (r.partition, false)).collect();
@@ -210,9 +236,16 @@ pub fn fetch_ranges_blocking(
             Some(Err(_)) | None => {} // transient; deadline bounds us
         }
     }
-    let mut complete: HashSet<i32> = done.into_iter().filter(|&(_, d)| d).map(|(p, _)| p).collect();
+    let mut complete: HashSet<i32> = done
+        .into_iter()
+        .filter(|&(_, d)| d)
+        .map(|(p, _)| p)
+        .collect();
     complete.extend(trivially_complete);
-    Ok(FetchOutcome { records: out, complete })
+    Ok(FetchOutcome {
+        records: out,
+        complete,
+    })
 }
 
 /// Fetches exactly one record at `(partition, offset)` — a bounded,
@@ -232,7 +265,11 @@ pub fn fetch_one_record_blocking(
     offset: i64,
 ) -> Result<Option<RawRecord>, ApiError> {
     let cancelled = AtomicBool::new(false);
-    let range = PartitionRange { partition, start: offset, end: offset + 1 };
+    let range = PartitionRange {
+        partition,
+        start: offset,
+        end: offset + 1,
+    };
     let outcome = fetch_ranges_blocking(cfg, topic, std::slice::from_ref(&range), 1, &cancelled)?;
     Ok(outcome.records.into_iter().next())
 }
@@ -247,9 +284,13 @@ pub async fn to_one_message_out(r: RawRecord, sr: Option<&SchemaRegistry>) -> Me
         timestamp_ms: r.timestamp_ms,
         key: decode::decode_payload(r.key.as_deref(), sr).await,
         value: decode::decode_payload(r.value.as_deref(), sr).await,
-        headers: r.headers.into_iter().map(|(key, v)| HeaderOut {
-            key,
-            value: String::from_utf8_lossy(&v).into_owned(),
-        }).collect(),
+        headers: r
+            .headers
+            .into_iter()
+            .map(|(key, v)| HeaderOut {
+                key,
+                value: String::from_utf8_lossy(&v).into_owned(),
+            })
+            .collect(),
     }
 }

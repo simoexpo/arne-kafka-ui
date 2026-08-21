@@ -8,11 +8,11 @@ use axum::extract::{Path, Query, State};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use futures_util::stream::Stream;
 use serde::Deserialize;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::mpsc;
-use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::StreamExt as _;
+use tokio_stream::wrappers::ReceiverStream;
 
 /// Sets the cancel flag when the SSE stream is dropped (client disconnected),
 /// stopping every partition scanner at its next poll iteration — no zombie
@@ -70,12 +70,16 @@ pub struct RawTimelineParams {
 /// Parses one optional numeric string field, producing a precise
 /// `bad_request` (naming the field) rather than the generic serde message
 /// axum's own `Query` rejection would have produced.
-fn parse_numeric_field<T: std::str::FromStr>(field: &str, raw: Option<&str>) -> Result<Option<T>, ApiError> {
+fn parse_numeric_field<T: std::str::FromStr>(
+    field: &str,
+    raw: Option<&str>,
+) -> Result<Option<T>, ApiError> {
     match raw {
         None => Ok(None),
-        Some(s) => s.parse::<T>().map(Some).map_err(|_| {
-            ApiError::bad_request(format!("{field}: invalid number '{s}'"))
-        }),
+        Some(s) => s
+            .parse::<T>()
+            .map(Some)
+            .map_err(|_| ApiError::bad_request(format!("{field}: invalid number '{s}'"))),
     }
 }
 
@@ -107,13 +111,16 @@ fn parse_anchor_input(params: &TimelineParams) -> Result<TimelineAnchorInput, Ap
         Some("latest") => Ok(TimelineAnchorInput::Latest),
         Some("beginning") => Ok(TimelineAnchorInput::Beginning),
         Some("offset") => Ok(TimelineAnchorInput::Offset {
-            partition: params.partition
+            partition: params
+                .partition
                 .ok_or_else(|| ApiError::bad_request("anchor=offset requires partition"))?,
-            offset: params.offset
+            offset: params
+                .offset
                 .ok_or_else(|| ApiError::bad_request("anchor=offset requires offset"))?,
         }),
         Some("timestamp") => Ok(TimelineAnchorInput::Timestamp {
-            ts_ms: params.ts_ms
+            ts_ms: params
+                .ts_ms
                 .ok_or_else(|| ApiError::bad_request("anchor=timestamp requires ts_ms"))?,
         }),
         Some(other) => Err(ApiError::bad_request(format!("unknown anchor '{other}'"))),
@@ -138,7 +145,9 @@ fn parse_direction(params: &TimelineParams) -> Result<timeline::Direction, ApiEr
         // `parse_raw`'s comment) — "direction is required" says what's
         // actually wrong; "unknown direction ''" would read as confusing.
         "" => Err(ApiError::bad_request("direction is required")),
-        other => Err(ApiError::bad_request(format!("unknown direction '{other}'"))),
+        other => Err(ApiError::bad_request(format!(
+            "unknown direction '{other}'"
+        ))),
     }
 }
 
@@ -157,8 +166,14 @@ fn parse_limit(params: &TimelineParams) -> Result<usize, ApiError> {
 fn parse_filter(params: &TimelineParams) -> Result<Option<Filter>, ApiError> {
     match &params.filter {
         Some(kind) => {
-            let q = params.q.as_deref().ok_or_else(|| ApiError::bad_request("filter requires q"))?;
-            Ok(Some(Filter::parse(kind, q, params.path.as_deref(), params.op.as_deref()).map_err(ApiError::bad_request)?))
+            let q = params
+                .q
+                .as_deref()
+                .ok_or_else(|| ApiError::bad_request("filter requires q"))?;
+            Ok(Some(
+                Filter::parse(kind, q, params.path.as_deref(), params.op.as_deref())
+                    .map_err(ApiError::bad_request)?,
+            ))
         }
         None => Ok(None),
     }
@@ -201,33 +216,36 @@ pub async fn timeline_sse(
     // `Query<TimelineParams>` extractor argument — see `RawTimelineParams`'s
     // doc comment for why: an extractor-level rejection bypasses this
     // whole mechanism and answers with axum's own `text/plain` body.
-    let validated: Result<(timeline::Direction, usize, PositionSource, Option<Filter>), ApiError> = (|| {
-        let params = parse_raw(&raw)?;
-        let direction = parse_direction(&params)?;
-        let limit = parse_limit(&params)?;
-        if params.cursor.is_some() == params.anchor.is_some() {
-            return Err(ApiError::bad_request("exactly one of cursor or anchor is required"));
-        }
-        let filter = parse_filter(&params)?;
-        let source = match &params.cursor {
-            Some(cursor) => {
-                let decoded = timeline::Cursor::decode(cursor)
-                    .map_err(|e| ApiError::bad_request(format!("bad cursor: {e}")))?;
-                // v1.6 owner ruling: direction belongs to the REQUEST, not the
-                // cursor blob. `decoded.direction` (the direction the cursor was
-                // *minted* in) is intentionally never compared against `direction`
-                // here — the request's own `direction` param is authoritative for
-                // how `decoded.positions` are read this time (see `Cursor`'s doc
-                // comment for the exact bound semantics). This is what makes the
-                // sliding window's "re-read a trimmed region by following an edge
-                // cursor in the opposite direction" a supported, well-defined
-                // request rather than a version mismatch to reject.
-                PositionSource::FromCursor(decoded.positions)
+    let validated: Result<(timeline::Direction, usize, PositionSource, Option<Filter>), ApiError> =
+        (|| {
+            let params = parse_raw(&raw)?;
+            let direction = parse_direction(&params)?;
+            let limit = parse_limit(&params)?;
+            if params.cursor.is_some() == params.anchor.is_some() {
+                return Err(ApiError::bad_request(
+                    "exactly one of cursor or anchor is required",
+                ));
             }
-            None => PositionSource::FromAnchor(parse_anchor_input(&params)?),
-        };
-        Ok((direction, limit, source, filter))
-    })();
+            let filter = parse_filter(&params)?;
+            let source = match &params.cursor {
+                Some(cursor) => {
+                    let decoded = timeline::Cursor::decode(cursor)
+                        .map_err(|e| ApiError::bad_request(format!("bad cursor: {e}")))?;
+                    // v1.6 owner ruling: direction belongs to the REQUEST, not the
+                    // cursor blob. `decoded.direction` (the direction the cursor was
+                    // *minted* in) is intentionally never compared against `direction`
+                    // here — the request's own `direction` param is authoritative for
+                    // how `decoded.positions` are read this time (see `Cursor`'s doc
+                    // comment for the exact bound semantics). This is what makes the
+                    // sliding window's "re-read a trimmed region by following an edge
+                    // cursor in the opposite direction" a supported, well-defined
+                    // request rather than a version mismatch to reject.
+                    PositionSource::FromCursor(decoded.positions)
+                }
+                None => PositionSource::FromAnchor(parse_anchor_input(&params)?),
+            };
+            Ok((direction, limit, source, filter))
+        })();
 
     // Both branches below feed the same `mpsc::Receiver<TimelineEvent>`
     // shape, so `Sse<impl Stream<...>>`'s single concrete return type is
@@ -269,18 +287,27 @@ pub async fn timeline_sse(
                     let wm = fetch::watermarks_blocking(&handle, &topic)?;
                     let positions = match source {
                         PositionSource::FromCursor(positions) => positions,
-                        PositionSource::FromAnchor(input) => {
-                            timeline::resolve_positions_blocking(&handle, &topic, &wm, input, direction)?
-                        }
+                        PositionSource::FromAnchor(input) => timeline::resolve_positions_blocking(
+                            &handle, &topic, &wm, input, direction,
+                        )?,
                     };
                     Ok((positions, wm))
-                }).await.map_err(ApiError::task_join)?
+                })
+                .await
+                .map_err(ApiError::task_join)?
             };
 
             match resolved {
                 Ok((positions, watermarks)) => {
                     let budget = state.limits.timeline_scan_budget;
-                    let req = timeline::PageRequest { positions, watermarks, direction, limit, filter, budget };
+                    let req = timeline::PageRequest {
+                        positions,
+                        watermarks,
+                        direction,
+                        limit,
+                        filter,
+                        budget,
+                    };
                     let (rx, cancel) = timeline::run_page(handle, topic, req);
                     (rx, CancelOnDrop(cancel))
                 }
@@ -290,7 +317,9 @@ pub async fn timeline_sse(
     };
     let stream = ReceiverStream::new(rx).map(move |event: TimelineEvent| {
         let _hold = &guard; // move the guard into the stream: dropped on disconnect
-        Ok(Event::default().event(event.name()).data(serde_json::to_string(&event).unwrap_or_default()))
+        Ok(Event::default()
+            .event(event.name())
+            .data(serde_json::to_string(&event).unwrap_or_default()))
     });
     Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
 }
@@ -304,7 +333,9 @@ pub async fn tail_sse(
     let guard = CancelOnDrop(cancel);
     let stream = ReceiverStream::new(rx).map(move |event: tail::TailEvent| {
         let _hold = &guard; // move the guard into the stream: dropped on disconnect
-        Ok(Event::default().event(event.name()).data(serde_json::to_string(&event).unwrap_or_default()))
+        Ok(Event::default()
+            .event(event.name())
+            .data(serde_json::to_string(&event).unwrap_or_default()))
     });
     Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
 }
@@ -331,13 +362,31 @@ mod tests {
 
     #[test]
     fn parse_direction_accepts_back_and_forward() {
-        assert_eq!(parse_direction(&TimelineParams { direction: "back".into(), ..params() }).unwrap(), timeline::Direction::Back);
-        assert_eq!(parse_direction(&TimelineParams { direction: "forward".into(), ..params() }).unwrap(), timeline::Direction::Forward);
+        assert_eq!(
+            parse_direction(&TimelineParams {
+                direction: "back".into(),
+                ..params()
+            })
+            .unwrap(),
+            timeline::Direction::Back
+        );
+        assert_eq!(
+            parse_direction(&TimelineParams {
+                direction: "forward".into(),
+                ..params()
+            })
+            .unwrap(),
+            timeline::Direction::Forward
+        );
     }
 
     #[test]
     fn parse_direction_rejects_anything_else() {
-        let err = parse_direction(&TimelineParams { direction: "sideways".into(), ..params() }).unwrap_err();
+        let err = parse_direction(&TimelineParams {
+            direction: "sideways".into(),
+            ..params()
+        })
+        .unwrap_err();
         assert_eq!(err.code, "bad_request");
         assert_eq!(err.message, "unknown direction 'sideways'");
     }
@@ -348,7 +397,11 @@ mod tests {
     /// what's wrong.
     #[test]
     fn parse_direction_names_a_missing_direction_as_required_not_unknown() {
-        let err = parse_direction(&TimelineParams { direction: String::new(), ..params() }).unwrap_err();
+        let err = parse_direction(&TimelineParams {
+            direction: String::new(),
+            ..params()
+        })
+        .unwrap_err();
         assert_eq!(err.code, "bad_request");
         assert_eq!(err.message, "direction is required");
     }
@@ -360,13 +413,24 @@ mod tests {
 
     #[test]
     fn parse_limit_rejects_zero() {
-        let err = parse_limit(&TimelineParams { limit: Some(0), ..params() }).unwrap_err();
+        let err = parse_limit(&TimelineParams {
+            limit: Some(0),
+            ..params()
+        })
+        .unwrap_err();
         assert_eq!(err.code, "bad_request");
     }
 
     #[test]
     fn parse_limit_caps_at_500() {
-        assert_eq!(parse_limit(&TimelineParams { limit: Some(10_000), ..params() }).unwrap(), 500);
+        assert_eq!(
+            parse_limit(&TimelineParams {
+                limit: Some(10_000),
+                ..params()
+            })
+            .unwrap(),
+            500
+        );
     }
 
     #[test]
@@ -376,13 +440,22 @@ mod tests {
 
     #[test]
     fn parse_filter_requires_q() {
-        let err = parse_filter(&TimelineParams { filter: Some("contains".into()), ..params() }).unwrap_err();
+        let err = parse_filter(&TimelineParams {
+            filter: Some("contains".into()),
+            ..params()
+        })
+        .unwrap_err();
         assert_eq!(err.code, "bad_request");
     }
 
     #[test]
     fn parse_filter_builds_a_real_filter() {
-        let parsed = parse_filter(&TimelineParams { filter: Some("contains".into()), q: Some("needle".into()), ..params() }).unwrap();
+        let parsed = parse_filter(&TimelineParams {
+            filter: Some("contains".into()),
+            q: Some("needle".into()),
+            ..params()
+        })
+        .unwrap();
         assert!(parsed.is_some());
     }
 }

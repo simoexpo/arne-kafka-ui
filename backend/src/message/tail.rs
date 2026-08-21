@@ -1,12 +1,12 @@
-use super::{fetch, MessageOut};
-use crate::cluster::{throwaway_group_id, ClusterHandle};
+use super::{MessageOut, fetch};
+use crate::cluster::{ClusterHandle, throwaway_group_id};
 use crate::error::ApiError;
 use rdkafka::consumer::{BaseConsumer, Consumer};
 use rdkafka::topic_partition_list::TopicPartitionList;
 use rdkafka::{ClientConfig, Offset};
 use serde::Serialize;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 
@@ -24,7 +24,12 @@ const STALL_TIMEOUT: Duration = Duration::from_secs(10);
 #[serde(untagged)]
 pub enum TailEvent {
     Message(Box<MessageOut>),
-    Error { code: String, message: String, cluster: String, retriable: bool },
+    Error {
+        code: String,
+        message: String,
+        cluster: String,
+        retriable: bool,
+    },
 }
 
 impl TailEvent {
@@ -129,12 +134,17 @@ fn run_consumer_blocking(
     out: mpsc::Sender<fetch::RawRecord>,
     stall_timeout: Duration,
 ) -> Result<(), String> {
-    let consumer: BaseConsumer = cc.create().map_err(|e| format!("start reading live messages: {e}"))?;
+    let consumer: BaseConsumer = cc
+        .create()
+        .map_err(|e| format!("start reading live messages: {e}"))?;
     let mut tpl = TopicPartitionList::new();
     for &(p, _, _) in watermarks {
-        tpl.add_partition_offset(topic, p, Offset::End).map_err(|e| format!("prepare partitions to read: {e}"))?;
+        tpl.add_partition_offset(topic, p, Offset::End)
+            .map_err(|e| format!("prepare partitions to read: {e}"))?;
     }
-    consumer.assign(&tpl).map_err(|e| format!("begin reading live messages: {e}"))?;
+    consumer
+        .assign(&tpl)
+        .map_err(|e| format!("begin reading live messages: {e}"))?;
 
     drive_tail_poll(
         || match consumer.poll(Duration::from_millis(200)) {
@@ -175,8 +185,16 @@ pub async fn run(
         let poll_wm = wm.clone();
         let scan = tokio::task::spawn_blocking(move || {
             let mut cc = crate::cluster::build_client_config(&cfg);
-            cc.set("group.id", throwaway_group_id("tail")).set("enable.auto.commit", "false");
-            run_consumer_blocking(cc, &poll_topic, &poll_wm, &poll_cancel, raw_tx, STALL_TIMEOUT)
+            cc.set("group.id", throwaway_group_id("tail"))
+                .set("enable.auto.commit", "false");
+            run_consumer_blocking(
+                cc,
+                &poll_topic,
+                &poll_wm,
+                &poll_cancel,
+                raw_tx,
+                STALL_TIMEOUT,
+            )
         });
 
         while let Some(record) = raw_rx.recv().await {
@@ -213,7 +231,14 @@ mod tests {
     use super::*;
 
     fn dummy_record(offset: i64) -> fetch::RawRecord {
-        fetch::RawRecord { partition: 0, offset, timestamp_ms: Some(0), key: None, value: Some(b"x".to_vec()), headers: vec![] }
+        fetch::RawRecord {
+            partition: 0,
+            offset,
+            timestamp_ms: Some(0),
+            key: None,
+            value: Some(b"x".to_vec()),
+            headers: vec![],
+        }
     }
 
     /// A poll loop that only ever errors (dead broker, "Unknown topic or
@@ -233,7 +258,8 @@ mod tests {
             &tx,
             stall_timeout,
         );
-        let err = result.expect_err("persistent poll errors must eventually surface as a terminal error");
+        let err =
+            result.expect_err("persistent poll errors must eventually surface as a terminal error");
         assert!(err.contains("stalled"), "got: {err}");
         assert!(err.contains("broker transport failure"), "got: {err}");
         // Sanity bound so a broken implementation that never stalls doesn't
@@ -269,7 +295,10 @@ mod tests {
             &tx,
             stall_timeout,
         );
-        assert!(result.is_ok(), "a quiet topic must never be reported as stalled: {result:?}");
+        assert!(
+            result.is_ok(),
+            "a quiet topic must never be reported as stalled: {result:?}"
+        );
     }
 
     /// A successfully received message must reset the error streak: a flaky
@@ -300,11 +329,18 @@ mod tests {
             &tx,
             stall_timeout,
         );
-        assert!(result.is_err(), "sustained errors after the reset must still eventually stall");
+        assert!(
+            result.is_err(),
+            "sustained errors after the reset must still eventually stall"
+        );
         // If the pre-reset errors had counted, this would trip almost
         // immediately; asserting it takes close to a full stall_timeout
         // proves the reset happened.
-        assert!(start.elapsed() >= stall_timeout, "elapsed: {:?}", start.elapsed());
+        assert!(
+            start.elapsed() >= stall_timeout,
+            "elapsed: {:?}",
+            start.elapsed()
+        );
         drop(rx);
     }
 
@@ -348,14 +384,19 @@ mod tests {
             &tx,
             stall_timeout,
         );
-        assert!(result.is_err(), "sustained errors after the quiet gap must still eventually stall");
+        assert!(
+            result.is_err(),
+            "sustained errors after the quiet gap must still eventually stall"
+        );
         // Must take (at least) the quiet sleep PLUS a fresh stall_timeout —
         // proving the quiet poll reset the streak instead of letting it
         // carry through from before the quiet gap.
         assert!(
             start.elapsed() >= stall_timeout * 3,
             "elapsed: {:?} (expected roughly the quiet sleep {:?} plus a fresh stall_timeout {:?})",
-            start.elapsed(), stall_timeout * 2, stall_timeout
+            start.elapsed(),
+            stall_timeout * 2,
+            stall_timeout
         );
         drop(rx);
     }
@@ -375,13 +416,21 @@ mod tests {
         let err = run_consumer_blocking(cc, "topic", &[], &cancel, tx, Duration::from_millis(50))
             .expect_err("consumer creation must fail loudly on invalid config, not be swallowed");
         assert!(err.contains("start reading live messages"), "got: {err}");
-        assert!(!err.to_lowercase().contains("consumer"), "must not name the internal Kafka client type: {err}");
+        assert!(
+            !err.to_lowercase().contains("consumer"),
+            "must not name the internal Kafka client type: {err}"
+        );
     }
 
     #[test]
     fn tail_event_names_and_shapes_error_like_the_api_envelope() {
         let msg_event = TailEvent::Message(Box::new(MessageOut {
-            partition: 0, offset: 0, timestamp_ms: None, key: None, value: None, headers: vec![],
+            partition: 0,
+            offset: 0,
+            timestamp_ms: None,
+            key: None,
+            value: None,
+            headers: vec![],
         }));
         assert_eq!(msg_event.name(), "message");
 
@@ -400,7 +449,8 @@ mod tests {
     /// to the log instead.
     #[tokio::test]
     async fn tail_join_error_never_leaks_the_panic_payload() {
-        let handle = tokio::spawn(async { panic!("some very specific internal detail nobody should see") });
+        let handle =
+            tokio::spawn(async { panic!("some very specific internal detail nobody should see") });
         let join_err = handle.await.unwrap_err();
         let err = tail_join_error(join_err);
         assert_eq!(err.message, "the live stream stopped unexpectedly");

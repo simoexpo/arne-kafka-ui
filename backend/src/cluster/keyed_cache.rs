@@ -32,29 +32,46 @@ pub struct KeyedCache<K, V> {
 
 impl<K: Eq + Hash + Clone, V: Clone> KeyedCache<K, V> {
     pub fn new(horizon_ms: i64) -> Self {
-        Self { inner: RwLock::new(HashMap::new()), horizon_ms }
+        Self {
+            inner: RwLock::new(HashMap::new()),
+            horizon_ms,
+        }
     }
 
     /// When this key was last sampled — a freshness probe that never clones
     /// the value.
     pub fn sampled_at(&self, key: &K) -> Option<i64> {
-        self.inner.read().unwrap_or_else(|e| e.into_inner()).get(key).map(|e| e.sampled_at)
+        self.inner
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(key)
+            .map(|e| e.sampled_at)
     }
 
     /// Asks a question OF the stored value without copying it. Cloning a
     /// group's whole row set just to test a boolean is the kind of waste that
     /// scales with cluster size.
     pub fn with<R>(&self, key: &K, f: impl FnOnce(&V) -> R) -> Option<R> {
-        self.inner.read().unwrap_or_else(|e| e.into_inner()).get(key).map(|e| f(&e.value))
+        self.inner
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(key)
+            .map(|e| f(&e.value))
     }
 
     pub fn get(&self, key: &K) -> Option<Stamped<V>> {
-        self.inner.read().unwrap_or_else(|e| e.into_inner()).get(key).cloned()
+        self.inner
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(key)
+            .cloned()
     }
 
     /// The value only if it is younger than `ttl_ms`.
     pub fn fresh(&self, key: &K, ttl_ms: i64, now: i64) -> Option<V> {
-        self.get(key).filter(|e| now - e.sampled_at < ttl_ms).map(|e| e.value)
+        self.get(key)
+            .filter(|e| now - e.sampled_at < ttl_ms)
+            .map(|e| e.value)
     }
 
     pub fn insert(&self, key: K, value: V, now: i64) {
@@ -68,7 +85,13 @@ impl<K: Eq + Hash + Clone, V: Clone> KeyedCache<K, V> {
         let mut map = self.inner.write().unwrap_or_else(|e| e.into_inner());
         map.retain(|_, e| now - e.sampled_at < self.horizon_ms);
         for (key, value) in entries {
-            map.insert(key, Stamped { value, sampled_at: now });
+            map.insert(
+                key,
+                Stamped {
+                    value,
+                    sampled_at: now,
+                },
+            );
         }
     }
 
@@ -99,8 +122,14 @@ mod tests {
         let cache: KeyedCache<String, &str> = KeyedCache::new(600_000);
         cache.insert("orders".into(), "orders-data", 1_000);
         cache.insert("users".into(), "users-data", 1_000);
-        assert_eq!(cache.fresh(&"orders".to_string(), 10_000, 1_500), Some("orders-data"));
-        assert_eq!(cache.fresh(&"users".to_string(), 10_000, 1_500), Some("users-data"));
+        assert_eq!(
+            cache.fresh(&"orders".to_string(), 10_000, 1_500),
+            Some("orders-data")
+        );
+        assert_eq!(
+            cache.fresh(&"users".to_string(), 10_000, 1_500),
+            Some("users-data")
+        );
     }
 
     #[test]
@@ -108,9 +137,21 @@ mod tests {
         let cache: KeyedCache<&str, i32> = KeyedCache::new(600_000);
         cache.insert("k", 7, 0);
         assert_eq!(cache.fresh(&"k", 5_000, 4_999), Some(7));
-        assert_eq!(cache.fresh(&"k", 5_000, 5_000), None, "expired under a 5s policy");
-        assert_eq!(cache.fresh(&"k", 60_000, 5_000), Some(7), "still fine under a 60s one");
-        assert_eq!(cache.sampled_at(&"k"), Some(0), "the probe never needs the value");
+        assert_eq!(
+            cache.fresh(&"k", 5_000, 5_000),
+            None,
+            "expired under a 5s policy"
+        );
+        assert_eq!(
+            cache.fresh(&"k", 60_000, 5_000),
+            Some(7),
+            "still fine under a 60s one"
+        );
+        assert_eq!(
+            cache.sampled_at(&"k"),
+            Some(0),
+            "the probe never needs the value"
+        );
     }
 
     #[test]

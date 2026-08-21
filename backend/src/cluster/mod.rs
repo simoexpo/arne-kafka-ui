@@ -11,9 +11,9 @@ pub mod snapshot;
 
 use crate::config::{ClusterConfig, SaslMechanism};
 use crate::message::schema_registry::SchemaRegistry;
+use rdkafka::ClientConfig;
 use rdkafka::consumer::{BaseConsumer, Consumer};
 use rdkafka::error::KafkaResult;
-use rdkafka::ClientConfig;
 use serde::Serialize;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
@@ -53,17 +53,28 @@ pub fn build_client_config(cfg: &ClusterConfig) -> ClientConfig {
     cc.set("allow.auto.create.topics", "false");
     cc.set("socket.keepalive.enable", "true");
     if cfg.broker_call_stats_ms > 0 {
-        cc.set("statistics.interval.ms", cfg.broker_call_stats_ms.to_string());
+        cc.set(
+            "statistics.interval.ms",
+            cfg.broker_call_stats_ms.to_string(),
+        );
     }
     match &cfg.sasl {
-        None => { cc.set("security.protocol", "plaintext"); }
+        None => {
+            cc.set("security.protocol", "plaintext");
+        }
         Some(s) => {
-            cc.set("security.protocol", if s.tls { "sasl_ssl" } else { "sasl_plaintext" });
-            cc.set("sasl.mechanism", match s.mechanism {
-                SaslMechanism::Plain => "PLAIN",
-                SaslMechanism::ScramSha256 => "SCRAM-SHA-256",
-                SaslMechanism::ScramSha512 => "SCRAM-SHA-512",
-            });
+            cc.set(
+                "security.protocol",
+                if s.tls { "sasl_ssl" } else { "sasl_plaintext" },
+            );
+            cc.set(
+                "sasl.mechanism",
+                match s.mechanism {
+                    SaslMechanism::Plain => "PLAIN",
+                    SaslMechanism::ScramSha256 => "SCRAM-SHA-256",
+                    SaslMechanism::ScramSha512 => "SCRAM-SHA-512",
+                },
+            );
             cc.set("sasl.username", &s.username);
             cc.set("sasl.password", &s.password);
         }
@@ -83,7 +94,11 @@ static THROWAWAY_SEQ: AtomicU64 = AtomicU64::new(0);
 /// debugging; the id itself is otherwise arbitrary and never reused.
 pub fn throwaway_group_id(kind: &str) -> String {
     let seq = THROWAWAY_SEQ.fetch_add(1, Ordering::Relaxed);
-    format!("arne-{kind}-{}-{}-{seq}", std::process::id(), crate::util::now_ms())
+    format!(
+        "arne-{kind}-{}-{}-{seq}",
+        std::process::id(),
+        crate::util::now_ms()
+    )
 }
 
 pub struct ClusterHandle {
@@ -146,13 +161,18 @@ pub struct ClusterHandle {
 
 impl std::fmt::Debug for ClusterHandle {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ClusterHandle").field("name", &self.name).finish_non_exhaustive()
+        f.debug_struct("ClusterHandle")
+            .field("name", &self.name)
+            .finish_non_exhaustive()
     }
 }
 
 #[derive(Debug, Serialize, PartialEq, Clone)]
 #[serde(rename_all = "lowercase")]
-pub enum HealthStatus { Healthy, Unreachable }
+pub enum HealthStatus {
+    Healthy,
+    Unreachable,
+}
 
 #[derive(Debug, Serialize, Clone)]
 pub struct ClusterHealth {
@@ -165,9 +185,14 @@ impl ClusterHandle {
     pub fn connect(config: ClusterConfig) -> KafkaResult<Self> {
         let cc = build_client_config(&config);
         let call_stats = Arc::new(call_stats::CallStats::default());
-        let consumer: BaseConsumer<_> =
-            cc.create_with_context(call_stats::StatsContext::new(call_stats.clone(), call_stats::CONSUMER))?;
-        let schema_registry = config.schema_registry.as_ref().map(|sr| Arc::new(SchemaRegistry::new(&sr.url)));
+        let consumer: BaseConsumer<_> = cc.create_with_context(call_stats::StatsContext::new(
+            call_stats.clone(),
+            call_stats::CONSUMER,
+        ))?;
+        let schema_registry = config
+            .schema_registry
+            .as_ref()
+            .map(|sr| Arc::new(SchemaRegistry::new(&sr.url)));
         Ok(Self {
             name: config.name.clone(),
             config,
@@ -239,7 +264,10 @@ impl ClusterHandle {
     }
 
     pub fn consumer(&self) -> Arc<BaseConsumer<call_stats::StatsContext>> {
-        self.consumer.read().expect("consumer lock poisoned").clone()
+        self.consumer
+            .read()
+            .expect("consumer lock poisoned")
+            .clone()
     }
 
     fn swap_clients(&self, consumer: BaseConsumer<call_stats::StatsContext>) {
@@ -262,8 +290,10 @@ impl ClusterHandle {
         let mut cfg = self.config.clone();
         cfg.bootstrap = bootstrap.to_string();
         let cc = build_client_config(&cfg);
-        let consumer: BaseConsumer<_> =
-            cc.create_with_context(call_stats::StatsContext::new(self.call_stats.clone(), call_stats::CONSUMER))?;
+        let consumer: BaseConsumer<_> = cc.create_with_context(call_stats::StatsContext::new(
+            self.call_stats.clone(),
+            call_stats::CONSUMER,
+        ))?;
         self.swap_clients(consumer);
         Ok(())
     }
@@ -288,8 +318,16 @@ impl ClusterHandle {
         .await;
         match res {
             Ok(Ok(health)) => health,
-            Ok(Err(e)) => ClusterHealth { status: HealthStatus::Unreachable, broker_count: None, error: Some(e.message) },
-            Err(e) => ClusterHealth { status: HealthStatus::Unreachable, broker_count: None, error: Some(e.to_string()) },
+            Ok(Err(e)) => ClusterHealth {
+                status: HealthStatus::Unreachable,
+                broker_count: None,
+                error: Some(e.message),
+            },
+            Err(e) => ClusterHealth {
+                status: HealthStatus::Unreachable,
+                broker_count: None,
+                error: Some(e.to_string()),
+            },
         }
     }
 
@@ -330,7 +368,9 @@ impl ClusterHandle {
     /// saturation just keeps probing at every subsequent check.
     pub(crate) fn record_shared_failure(&self) -> u32 {
         self.health_failures
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| Some(n.saturating_add(1)))
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
+                Some(n.saturating_add(1))
+            })
             .expect("closure never returns None")
             .saturating_add(1)
     }
@@ -357,7 +397,8 @@ impl ClusterHandle {
     /// outage. Single-flight; runs on the blocking pool (caller is inside
     /// spawn_blocking). Returns the fresh broker count when it healed.
     fn try_recover(&self) -> Option<usize> {
-        if self.probe_in_flight
+        if self
+            .probe_in_flight
             .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
             .is_err()
         {
@@ -369,9 +410,17 @@ impl ClusterHandle {
         // `probe_in_flight` at `true` forever, silently disabling self-heal.
         let _guard = ProbeGuard(&self.probe_in_flight);
         let cc = build_client_config(&self.config);
-        let consumer: BaseConsumer<call_stats::StatsContext> =
-            cc.create_with_context(call_stats::StatsContext::new(self.call_stats.clone(), call_stats::CONSUMER)).ok()?;
-        let brokers = consumer.fetch_metadata(None, HEALTH_TIMEOUT).ok()?.brokers().len();
+        let consumer: BaseConsumer<call_stats::StatsContext> = cc
+            .create_with_context(call_stats::StatsContext::new(
+                self.call_stats.clone(),
+                call_stats::CONSUMER,
+            ))
+            .ok()?;
+        let brokers = consumer
+            .fetch_metadata(None, HEALTH_TIMEOUT)
+            .ok()?
+            .brokers()
+            .len();
         self.swap_clients(consumer);
         self.health_failures.store(0, Ordering::SeqCst);
         tracing::warn!(cluster = %self.name, "stale kafka connection replaced with a fresh one");
@@ -428,7 +477,9 @@ mod tests {
         let mut cfg = base("a");
         cfg.sasl = Some(SaslConfig {
             mechanism: SaslMechanism::ScramSha512,
-            username: "u".into(), password: "p".into(), tls: true,
+            username: "u".into(),
+            password: "p".into(),
+            tls: true,
         });
         let cc = build_client_config(&cfg);
         assert_eq!(cc.get("security.protocol"), Some("sasl_ssl"));
@@ -442,7 +493,9 @@ mod tests {
         let mut cfg = base("a");
         cfg.sasl = Some(SaslConfig {
             mechanism: SaslMechanism::Plain,
-            username: "u".into(), password: "p".into(), tls: false,
+            username: "u".into(),
+            password: "p".into(),
+            tls: false,
         });
         let cc = build_client_config(&cfg);
         assert_eq!(cc.get("security.protocol"), Some("sasl_plaintext"));
@@ -459,9 +512,14 @@ mod tests {
     fn swap_replaces_client_identity() {
         let handle = ClusterHandle::connect(base("a")).expect("lazy create");
         let before = handle.consumer();
-        handle.replace_clients_with_bootstrap("127.0.0.1:1").expect("lazy create");
+        handle
+            .replace_clients_with_bootstrap("127.0.0.1:1")
+            .expect("lazy create");
         let after = handle.consumer();
-        assert!(!Arc::ptr_eq(&before, &after), "swap must install a new client");
+        assert!(
+            !Arc::ptr_eq(&before, &after),
+            "swap must install a new client"
+        );
         // the old Arc is still usable by in-flight work
         let _still_alive: &BaseConsumer<call_stats::StatsContext> = &before;
     }
@@ -469,7 +527,9 @@ mod tests {
     #[test]
     fn concurrent_probe_is_single_flight() {
         let handle = ClusterHandle::connect(base("a")).expect("lazy create");
-        handle.probe_in_flight.store(true, std::sync::atomic::Ordering::SeqCst);
+        handle
+            .probe_in_flight
+            .store(true, std::sync::atomic::Ordering::SeqCst);
         // a probe already in flight => try_recover declines immediately
         assert_eq!(handle.try_recover(), None);
     }
@@ -477,17 +537,32 @@ mod tests {
     #[test]
     fn failed_probe_releases_guard_and_keeps_resident_client() {
         // config points at a dead endpoint: probe must fail, not swap
-        let handle = ClusterHandle::connect(base_with_bootstrap("127.0.0.1:1")).expect("lazy create");
+        let handle =
+            ClusterHandle::connect(base_with_bootstrap("127.0.0.1:1")).expect("lazy create");
         let before = handle.consumer();
-        assert_eq!(handle.try_recover(), None, "probe against a dead endpoint must not heal");
-        assert!(!handle.probe_in_flight.load(std::sync::atomic::Ordering::SeqCst), "guard must be released after a failed probe");
-        assert!(Arc::ptr_eq(&before, &handle.consumer()), "failed probe must not swap the resident client");
+        assert_eq!(
+            handle.try_recover(),
+            None,
+            "probe against a dead endpoint must not heal"
+        );
+        assert!(
+            !handle
+                .probe_in_flight
+                .load(std::sync::atomic::Ordering::SeqCst),
+            "guard must be released after a failed probe"
+        );
+        assert!(
+            Arc::ptr_eq(&before, &handle.consumer()),
+            "failed probe must not swap the resident client"
+        );
     }
 
     #[test]
     fn failure_counter_saturates_instead_of_wrapping() {
         let handle = ClusterHandle::connect(base("a")).expect("lazy create");
-        handle.health_failures.store(u32::MAX, std::sync::atomic::Ordering::SeqCst);
+        handle
+            .health_failures
+            .store(u32::MAX, std::sync::atomic::Ordering::SeqCst);
         // would panic (debug) or wrap to 0 (release) with a plain fetch_add + 1
         assert_eq!(handle.record_shared_failure(), u32::MAX);
         handle.reset_shared_failures();
@@ -499,16 +574,31 @@ mod tests {
         // config points at a dead endpoint: probes can never heal, so the only
         // observable difference between "no probe" and "failed probe" is time —
         // and the counter/identity assertions below.
-        let handle = ClusterHandle::connect(base_with_bootstrap("127.0.0.1:1")).expect("lazy create");
+        let handle =
+            ClusterHandle::connect(base_with_bootstrap("127.0.0.1:1")).expect("lazy create");
         let before = handle.consumer();
         // below threshold: counted, no heal
         assert_eq!(handle.note_shared_failure_and_maybe_recover(), None);
-        assert_eq!(handle.health_failures.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(
+            handle
+                .health_failures
+                .load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
         // at threshold: probe runs (bounded by HEALTH_TIMEOUT), fails against the
         // dead endpoint, stays honest — no swap, guard released
         assert_eq!(handle.note_shared_failure_and_maybe_recover(), None);
-        assert_eq!(handle.health_failures.load(std::sync::atomic::Ordering::SeqCst), 2);
-        assert!(!handle.probe_in_flight.load(std::sync::atomic::Ordering::SeqCst));
+        assert_eq!(
+            handle
+                .health_failures
+                .load(std::sync::atomic::Ordering::SeqCst),
+            2
+        );
+        assert!(
+            !handle
+                .probe_in_flight
+                .load(std::sync::atomic::Ordering::SeqCst)
+        );
         assert!(Arc::ptr_eq(&before, &handle.consumer()));
     }
 }
