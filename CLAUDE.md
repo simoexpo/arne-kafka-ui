@@ -14,7 +14,10 @@ separate design document to keep in sync.
 ## Non-negotiable working rules
 
 - **Always TDD.** Test first, watch it fail, then implement. No exceptions, ever.
-- **Git:** commands allowed, but **NEVER push**.
+- **Git:** commands are fine, but **NEVER push.** Pushing is the maintainer's
+  decision, asked for and granted explicitly, every time — finishing the work
+  is not an implicit yes. Anyone else (human or agent) works on a branch and
+  opens a PR.
 - **Commit messages:** short and clear, one line. No Co-Authored-By, no
   session links, no generated-with trailers, no long bodies.
 
@@ -22,6 +25,10 @@ separate design document to keep in sync.
 
 - Speed and trustworthy data above all — the point of Arne is a Kafka UI whose
   numbers you can act on, and which says so when it does not know.
+- **Every broker call is demand-driven, shared and bounded.** Load follows
+  the refresh policy, never the number of viewers, tabs, topics or groups.
+  An idle cluster costs zero calls. State a change's scale cost — in calls,
+  as a function of brokers/topics/partitions/groups — before building it.
 - Never show stale data silently: every metric carries its sample timestamp.
 - Errors render in the failing panel; one broken cluster never blanks the page.
 - Search must show real progress (known total up front), stream results, and
