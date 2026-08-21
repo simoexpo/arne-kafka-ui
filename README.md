@@ -18,27 +18,34 @@ and when it measured it.
 
 ---
 
-## Why another Kafka UI
+## What Arne is trying to be
 
-Every Kafka UI can list your topics. The problems start with everything else:
-pages that take ten seconds to paint, a "messages" count that is really a
-subtraction of two offsets nobody sampled at the same time, lag that quietly
-omits the partitions it could not read, and dashboards that keep showing you a
-number long after it stopped being true.
+Several numbers a Kafka UI shows you are harder to state truthfully than they
+look, and the difficulty is in Kafka's own APIs:
 
-Arne is built on two rules.
+- A topic's "message count" is a subtraction of two offsets. Sample them a
+  moment apart and the answer was never true at any instant.
+- Consumer lag is a subtraction too, and a partition whose head could not be
+  read drops silently out of the sum — under-reporting the backlog.
+- The legacy `DescribeGroups` API reports a KIP-848 consumer group as `Dead`
+  with no members while it is consuming happily. (Verified against Kafka 4.3:
+  `kafka-consumer-groups --describe` says Stable, the API says Dead.)
+- Every one of these numbers is stale by the time it reaches a screen. The only
+  question is whether the screen admits it.
 
-**It never lies.** Every metric carries the timestamp of the sample it came
-from. A total that cannot be computed completely says so — lag summed from a
-partial snapshot renders as `≥ 4.2k`, never as a confident total. A partition
-that no live member owns is labelled `unassigned`, because lag nobody is
-draining is the thing you actually need to see. A message that fails to decode
-appears in the results, loudly, instead of vanishing.
+Arne's answer is two rules, and they are the whole design.
 
-**It is gentle with your brokers.** Every broker call is demand-driven, shared
-and bounded. Load follows the refresh policy — never the number of open tabs,
-never the size of the cluster. An idle Arne makes **zero** broker calls, and
-that is asserted by tests rather than hoped for.
+**Say what is known, and when it was measured.** Every metric carries the
+timestamp of its sample. A total that cannot be computed completely says so:
+lag summed from a partial snapshot renders as `≥ 4.2k`, never as a confident
+total. A partition no live member owns is labelled `unassigned`, because lag
+nobody is draining is worth seeing. A message that fails to decode appears in
+the results, loudly, instead of vanishing.
+
+**Cost the brokers as little as possible.** Every broker call is demand-driven,
+shared and bounded. Load follows the refresh policy — not the number of open
+tabs, not the size of the cluster. An idle Arne makes **zero** broker calls,
+and a test asserts it rather than a comment claiming it.
 
 <div align="center">
 <img src="docs/images/tour.gif" alt="A tour of Arne: overview, topics, live tail, consumer groups" width="900">
@@ -86,18 +93,19 @@ SASL, TLS and Schema Registry are configured in the same file — see
 ### Read-only for now
 
 v1 observes and never mutates: no offset resets, no topic creation, no message
-production — so pointing it at production is a non-decision today. Write
+production. Nothing it can do will change your cluster's state. Write
 operations are planned, starting with consumer-group offset management, and the
 architecture was built not to preclude them.
 
 ### Kafka 4 and KIP-848
 
 Groups using the new consumer protocol are reported correctly — state, members,
-assignor and per-partition ownership. That matters more than it sounds: the
-legacy `DescribeGroups` API reports such a group as `Dead` with no members
-*while it is happily consuming*, which is what most tools still show you.
+assignor and per-partition ownership — by describing them through their
+coordinator. Read via the legacy `DescribeGroups` API, the same group comes back
+as `Dead` with no members *while it is consuming happily*, so anything built on
+that API alone will misreport it.
 
-## How it stays fast
+## How it is built
 
 - **One binary.** Rust and axum, with the React frontend embedded via
   `rust-embed`. No web server to configure, no node process in production.
