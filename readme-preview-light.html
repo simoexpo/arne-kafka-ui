@@ -1129,28 +1129,37 @@ body{background:#ffffff;margin:0;padding:32px}.markdown-body{max-width:1012px;ma
   <img src="docs/images/wordmark-light.svg" alt="Arne" width="380">
 </picture></themed-picture>
 <p><strong>A fast, honest Kafka UI.</strong></p>
-<p>Because the other ones are slow, and they lie about what is actually in your cluster.</p>
+<p>Monitoring and message lookup that tells you exactly what it knows, and when<br>
+it measured it.</p>
 <p><a href="https://github.com/simoexpo/arne-kafka-ui/actions/workflows/ci.yml"><img src="https://github.com/simoexpo/arne-kafka-ui/actions/workflows/ci.yml/badge.svg" alt="CI" style="max-width: 100%;"></a> <a href="https://hub.docker.com/r/simoexpo/arne-kafka-ui" rel="nofollow"><img src="https://camo.githubusercontent.com/7678716ab51e59c7f8315f61bc82ac4f17dc40cd0e259e336f56cf536f213409/68747470733a2f2f696d672e736869656c64732e696f2f646f636b65722f762f73696d6f6578706f2f61726e652d6b61666b612d75693f6c6f676f3d646f636b6572266c6162656c3d646f636b657225323068756226736f72743d73656d766572" alt="Docker Hub" data-canonical-src="https://img.shields.io/docker/v/simoexpo/arne-kafka-ui?logo=docker&amp;label=docker%20hub&amp;sort=semver" style="max-width: 100%;"></a> <a href="https://hub.docker.com/r/simoexpo/arne-kafka-ui" rel="nofollow"><img src="https://camo.githubusercontent.com/dc7dcbf9ceb2c6e131b6ce0266622a96cd88fa633dbdd191790044c1ce2a6581/68747470733a2f2f696d672e736869656c64732e696f2f646f636b65722f696d6167652d73697a652f73696d6f6578706f2f61726e652d6b61666b612d75692f6c61746573743f6c6f676f3d646f636b6572266c6162656c3d696d616765" alt="Image size" data-canonical-src="https://img.shields.io/docker/image-size/simoexpo/arne-kafka-ui/latest?logo=docker&amp;label=image" style="max-width: 100%;"></a> <a href="https://www.rust-lang.org/" rel="nofollow"><img src="https://camo.githubusercontent.com/582c0e5dd6f8cabcbb4945ac5339d70f825d80a2af29d7d07e75d624eb1d26da/68747470733a2f2f696d672e736869656c64732e696f2f62616467652f727573742d737461626c652d3030303030303f6c6f676f3d72757374" alt="Rust" data-canonical-src="https://img.shields.io/badge/rust-stable-000000?logo=rust" style="max-width: 100%;"></a> <a href="https://react.dev/" rel="nofollow"><img src="https://camo.githubusercontent.com/f00623a9d56c4510a4a31b90d9b0e2b649e12a20c1c62e3e0078a49b9ea067f7/68747470733a2f2f696d672e736869656c64732e696f2f62616467652f72656163742d31392d3134396563613f6c6f676f3d7265616374" alt="React" data-canonical-src="https://img.shields.io/badge/react-19-149eca?logo=react" style="max-width: 100%;"></a></p>
 <a target="_blank" rel="noopener noreferrer" href="docs/images/hero-messages.png"><img src="docs/images/hero-messages.png" alt="Browsing and live-tailing a topic in Arne" width="900" style="max-width: 100%;"></a>
 </div>
 <hr>
-<h2>Why another Kafka UI</h2>
-<p>Every Kafka UI can list your topics. The problems start with everything else:<br>
-pages that take ten seconds to paint, a "messages" count that is really a<br>
-subtraction of two offsets nobody sampled at the same time, lag that quietly<br>
-omits the partitions it could not read, and dashboards that keep showing you a<br>
-number long after it stopped being true.</p>
-<p>Arne is built on two rules.</p>
-<p><strong>It never lies.</strong> Every metric carries the timestamp of the sample it came<br>
-from. A total that cannot be computed completely says so — lag summed from a<br>
-partial snapshot renders as <code class="notranslate">≥ 4.2k</code>, never as a confident total. A partition<br>
-that no live member owns is labelled <code class="notranslate">unassigned</code>, because lag nobody is<br>
-draining is the thing you actually need to see. A message that fails to decode<br>
-appears in the results, loudly, instead of vanishing.</p>
-<p><strong>It is gentle with your brokers.</strong> Every broker call is demand-driven, shared<br>
-and bounded. Load follows the refresh policy — never the number of open tabs,<br>
-never the size of the cluster. An idle Arne makes <strong>zero</strong> broker calls, and<br>
-that is asserted by tests rather than hoped for.</p>
+<h2>What Arne is trying to be</h2>
+<p>Several numbers a Kafka UI shows you are harder to state truthfully than they<br>
+look, and the difficulty is in Kafka's own APIs:</p>
+<ul>
+<li>A topic's "message count" is a subtraction of two offsets. Sample them a<br>
+moment apart and the answer was never true at any instant.</li>
+<li>Consumer lag is a subtraction too, and a partition whose head could not be<br>
+read drops silently out of the sum — under-reporting the backlog.</li>
+<li>The legacy <code class="notranslate">DescribeGroups</code> API reports a KIP-848 consumer group as <code class="notranslate">Dead</code><br>
+with no members while it is consuming happily. (Verified against Kafka 4.3:<br>
+<code class="notranslate">kafka-consumer-groups --describe</code> says Stable, the API says Dead.)</li>
+<li>Every one of these numbers is stale by the time it reaches a screen. The only<br>
+question is whether the screen admits it.</li>
+</ul>
+<p>Arne's answer is two rules, and they are the whole design.</p>
+<p><strong>Say what is known, and when it was measured.</strong> Every metric carries the<br>
+timestamp of its sample. A total that cannot be computed completely says so:<br>
+lag summed from a partial snapshot renders as <code class="notranslate">≥ 4.2k</code>, never as a confident<br>
+total. A partition no live member owns is labelled <code class="notranslate">unassigned</code>, because lag<br>
+nobody is draining is worth seeing. A message that fails to decode appears in<br>
+the results, loudly, instead of vanishing.</p>
+<p><strong>Cost the brokers as little as possible.</strong> Every broker call is demand-driven,<br>
+shared and bounded. Load follows the refresh policy — not the number of open<br>
+tabs, not the size of the cluster. An idle Arne makes <strong>zero</strong> broker calls,<br>
+and a test asserts it rather than a comment claiming it.</p>
 <div align="center">
 <a target="_blank" rel="noopener noreferrer" href="docs/images/tour.gif"><img src="docs/images/tour.gif" alt="A tour of Arne: overview, topics, live tail, consumer groups" width="900" style="max-width: 100%;"></a>
 </div>
@@ -1216,17 +1225,16 @@ Images are published for <code class="notranslate">linux/amd64</code> and <code 
 <a target="_blank" rel="noopener noreferrer" href="docs/images/consumers.png"><img src="docs/images/consumers.png" alt="Consumer groups with lag and protocol" width="440" style="max-width: 100%;"></a>
 <a target="_blank" rel="noopener noreferrer" href="docs/images/group-detail.png"><img src="docs/images/group-detail.png" alt="A consumer group's members and per-partition ownership" width="440" style="max-width: 100%;"></a>
 </div>
-<h3>Read-only for now</h3>
-<p>v1 observes and never mutates: no offset resets, no topic creation, no message<br>
-production — so pointing it at production is a non-decision today. Write<br>
-operations are planned, starting with consumer-group offset management, and the<br>
-architecture was built not to preclude them.</p>
+<h3>Scope today</h3>
+<p>v1 covers observation: cluster, topics, messages, consumer groups and schemas.<br>
+Write operations come next, starting with consumer-group offset management.</p>
 <h3>Kafka 4 and KIP-848</h3>
 <p>Groups using the new consumer protocol are reported correctly — state, members,<br>
-assignor and per-partition ownership. That matters more than it sounds: the<br>
-legacy <code class="notranslate">DescribeGroups</code> API reports such a group as <code class="notranslate">Dead</code> with no members<br>
-<em>while it is happily consuming</em>, which is what most tools still show you.</p>
-<h2>How it stays fast</h2>
+assignor and per-partition ownership — by describing them through their<br>
+coordinator. Read via the legacy <code class="notranslate">DescribeGroups</code> API, the same group comes back<br>
+as <code class="notranslate">Dead</code> with no members <em>while it is consuming happily</em>, so anything built on<br>
+that API alone will misreport it.</p>
+<h2>How it is built</h2>
 <ul>
 <li><strong>One binary.</strong> Rust and axum, with the React frontend embedded via<br>
 <code class="notranslate">rust-embed</code>. No web server to configure, no node process in production.</li>

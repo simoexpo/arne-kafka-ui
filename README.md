@@ -7,8 +7,8 @@
 
 **A fast, honest Kafka UI.**
 
-Read-only monitoring and message lookup that tells you exactly what it knows,
-and when it measured it.
+Monitoring and message lookup that tells you exactly what it knows, and when
+it measured it.
 
 [![CI](https://github.com/simoexpo/arne-kafka-ui/actions/workflows/ci.yml/badge.svg)](https://github.com/simoexpo/arne-kafka-ui/actions/workflows/ci.yml) [![Docker Hub](https://img.shields.io/docker/v/simoexpo/arne-kafka-ui?logo=docker&label=docker%20hub&sort=semver)](https://hub.docker.com/r/simoexpo/arne-kafka-ui) [![Image size](https://img.shields.io/docker/image-size/simoexpo/arne-kafka-ui/latest?logo=docker&label=image)](https://hub.docker.com/r/simoexpo/arne-kafka-ui) [![Rust](https://img.shields.io/badge/rust-stable-000000?logo=rust)](https://www.rust-lang.org/) [![React](https://img.shields.io/badge/react-19-149eca?logo=react)](https://react.dev/)
 
@@ -90,12 +90,10 @@ SASL, TLS and Schema Registry are configured in the same file — see
 <img src="docs/images/group-detail.png" alt="A consumer group's members and per-partition ownership" width="440">
 </div>
 
-### Read-only for now
+### Scope today
 
-v1 observes and never mutates: no offset resets, no topic creation, no message
-production. Nothing it can do will change your cluster's state. Write
-operations are planned, starting with consumer-group offset management, and the
-architecture was built not to preclude them.
+v1 covers observation: cluster, topics, messages, consumer groups and schemas.
+Write operations come next, starting with consumer-group offset management.
 
 ### Kafka 4 and KIP-848
 
