@@ -9,12 +9,11 @@
 Read-only monitoring and message lookup that tells you exactly what it knows,
 and when it measured it.
 
-[![CI](https://github.com/simoexpo/arne/actions/workflows/ci.yml/badge.svg)](https://github.com/simoexpo/arne/actions/workflows/ci.yml)
+[![CI](https://github.com/simoexpo/arne-kafka-ui/actions/workflows/ci.yml/badge.svg)](https://github.com/simoexpo/arne-kafka-ui/actions/workflows/ci.yml)
 [![Docker Hub](https://img.shields.io/docker/v/simoexpo/arne?logo=docker&label=docker%20hub&sort=semver)](https://hub.docker.com/r/simoexpo/arne)
 [![Image size](https://img.shields.io/docker/image-size/simoexpo/arne/latest?logo=docker&label=image)](https://hub.docker.com/r/simoexpo/arne)
 [![Rust](https://img.shields.io/badge/rust-stable-000000?logo=rust)](https://www.rust-lang.org/)
 [![React](https://img.shields.io/badge/react-19-149eca?logo=react)](https://react.dev/)
-![Read-only](https://img.shields.io/badge/v1-read--only-blue)
 
 <img src="docs/images/hero-messages.png" alt="Browsing and live-tailing a topic in Arne" width="900">
 
@@ -63,6 +62,7 @@ docker run -p 8080:8080 -v $(pwd)/config.yaml:/etc/arne/config.yaml simoexpo/arn
 
 Open <http://localhost:8080>. That is the whole installation: one container, no
 database, no agent, no sidecar. State lives in Kafka or in memory, nowhere else.
+Images are published for `linux/amd64` and `linux/arm64`, both built natively.
 
 SASL, TLS and Schema Registry are configured in the same file — see
 [`config.example.yaml`](config.example.yaml). Passwords can be given as
@@ -86,12 +86,12 @@ SASL, TLS and Schema Registry are configured in the same file — see
 <img src="docs/images/group-detail.png" alt="A consumer group's members and per-partition ownership" width="440">
 </div>
 
-### Read-only, on purpose
+### Read-only for now
 
 v1 observes and never mutates: no offset resets, no topic creation, no message
-production. Point it at production without a second thought. Consumer-group
-operations are the natural next step, and the architecture is built not to
-preclude them.
+production — so pointing it at production is a non-decision today. Write
+operations are planned, starting with consumer-group offset management, and the
+architecture was built not to preclude them.
 
 ### Kafka 4 and KIP-848
 
