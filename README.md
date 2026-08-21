@@ -9,11 +9,7 @@
 Read-only monitoring and message lookup that tells you exactly what it knows,
 and when it measured it.
 
-[![CI](https://github.com/simoexpo/arne-kafka-ui/actions/workflows/ci.yml/badge.svg)](https://github.com/simoexpo/arne-kafka-ui/actions/workflows/ci.yml)
-[![Docker Hub](https://img.shields.io/docker/v/simoexpo/arne-kafka-ui?logo=docker&label=docker%20hub&sort=semver)](https://hub.docker.com/r/simoexpo/arne-kafka-ui)
-[![Image size](https://img.shields.io/docker/image-size/simoexpo/arne-kafka-ui/latest?logo=docker&label=image)](https://hub.docker.com/r/simoexpo/arne-kafka-ui)
-[![Rust](https://img.shields.io/badge/rust-stable-000000?logo=rust)](https://www.rust-lang.org/)
-[![React](https://img.shields.io/badge/react-19-149eca?logo=react)](https://react.dev/)
+[![CI](https://github.com/simoexpo/arne-kafka-ui/actions/workflows/ci.yml/badge.svg)](https://github.com/simoexpo/arne-kafka-ui/actions/workflows/ci.yml) [![Docker Hub](https://img.shields.io/docker/v/simoexpo/arne-kafka-ui?logo=docker&label=docker%20hub&sort=semver)](https://hub.docker.com/r/simoexpo/arne-kafka-ui) [![Image size](https://img.shields.io/docker/image-size/simoexpo/arne-kafka-ui/latest?logo=docker&label=image)](https://hub.docker.com/r/simoexpo/arne-kafka-ui) [![Rust](https://img.shields.io/badge/rust-stable-000000?logo=rust)](https://www.rust-lang.org/) [![React](https://img.shields.io/badge/react-19-149eca?logo=react)](https://react.dev/)
 
 <img src="docs/images/hero-messages.png" alt="Browsing and live-tailing a topic in Arne" width="900">
 
