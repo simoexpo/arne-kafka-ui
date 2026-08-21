@@ -10,8 +10,8 @@ Read-only monitoring and message lookup that tells you exactly what it knows,
 and when it measured it.
 
 [![CI](https://github.com/simoexpo/arne-kafka-ui/actions/workflows/ci.yml/badge.svg)](https://github.com/simoexpo/arne-kafka-ui/actions/workflows/ci.yml)
-[![Docker Hub](https://img.shields.io/docker/v/simoexpo/arne?logo=docker&label=docker%20hub&sort=semver)](https://hub.docker.com/r/simoexpo/arne)
-[![Image size](https://img.shields.io/docker/image-size/simoexpo/arne/latest?logo=docker&label=image)](https://hub.docker.com/r/simoexpo/arne)
+[![Docker Hub](https://img.shields.io/docker/v/simoexpo/arne-kafka-ui?logo=docker&label=docker%20hub&sort=semver)](https://hub.docker.com/r/simoexpo/arne-kafka-ui)
+[![Image size](https://img.shields.io/docker/image-size/simoexpo/arne-kafka-ui/latest?logo=docker&label=image)](https://hub.docker.com/r/simoexpo/arne-kafka-ui)
 [![Rust](https://img.shields.io/badge/rust-stable-000000?logo=rust)](https://www.rust-lang.org/)
 [![React](https://img.shields.io/badge/react-19-149eca?logo=react)](https://react.dev/)
 
@@ -57,7 +57,7 @@ clusters:
 server: { port: 8080 }
 YAML
 
-docker run -p 8080:8080 -v $(pwd)/config.yaml:/etc/arne/config.yaml simoexpo/arne:latest
+docker run -p 8080:8080 -v $(pwd)/config.yaml:/etc/arne/config.yaml simoexpo/arne-kafka-ui:latest
 ```
 
 Open <http://localhost:8080>. That is the whole installation: one container, no

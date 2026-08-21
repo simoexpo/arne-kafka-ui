@@ -15,7 +15,7 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   # The only place the registry account appears.
-  IMAGE: simoexpo/arne
+  IMAGE: simoexpo/arne-kafka-ui
 
 jobs:
   backend:
