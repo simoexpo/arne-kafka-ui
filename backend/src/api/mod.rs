@@ -7,8 +7,14 @@ pub mod topics;
 
 use crate::state::AppState;
 use axum::{routing::get, Router};
+use tower_http::compression::CompressionLayer;
 
 pub fn app(state: AppState) -> Router {
+    // The topic list and the overview are the only responses whose SIZE grows
+    // with the cluster — repetitive JSON, mostly field names, around a
+    // megabyte at ten thousand topics. gzip takes the bulk of that off the
+    // wire for one line. The default predicate leaves event streams alone: an
+    // encoder buffers, and a buffered tail is not a live tail.
     Router::new()
         .route("/healthz", get(|| async { "ok" }))
         .route("/api/clusters", get(clusters::list))
@@ -42,6 +48,7 @@ pub fn app(state: AppState) -> Router {
         // (`method_not_allowed_fallback` exists to change that; v1's
         // frontend only ever sends the methods it registers, so it doesn't).
         .fallback(static_files::spa_fallback)
+        .layer(CompressionLayer::new())
         .with_state(state)
 }
 

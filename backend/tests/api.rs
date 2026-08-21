@@ -306,6 +306,104 @@ async fn a_group_page_asks_its_coordinator_and_never_enumerates_the_brokers() {
     assert!(delta.get("DescribeGroups").copied().unwrap_or(0) >= 1, "and describes in one batch: {delta:?}");
 }
 
+/// A topic list is `O(topics)` of highly repetitive JSON — the one response
+/// whose SIZE grows with the cluster. It is compressed on the wire when the
+/// caller accepts it; a big cluster's ~1MB payload is mostly field names.
+#[tokio::test]
+async fn large_json_responses_are_compressed_but_streams_are_not() {
+    let bootstrap = start_kafka().await;
+    create_topic(&bootstrap, "gz-topic", 3).await;
+    let state = state_for(&bootstrap, vec![]);
+
+    let plain = get_bytes(app(state.clone()), "/api/clusters/test/topics", None).await;
+    let (headers, gzipped) =
+        get_with_headers(app(state.clone()), "/api/clusters/test/topics", Some("gzip")).await;
+    assert_eq!(
+        headers.get("content-encoding").map(|v| v.to_str().unwrap()),
+        Some("gzip"),
+        "the topic list is compressed for a caller that accepts it"
+    );
+    assert!(
+        gzipped.len() < plain.len(),
+        "and it is actually smaller: {} vs {} bytes",
+        gzipped.len(),
+        plain.len()
+    );
+
+    // A live stream must NOT be compressed: an encoder buffers, and a tail
+    // that arrives in batches minutes late is not a live tail.
+    let (headers, _) = get_with_headers(
+        app(state),
+        "/api/clusters/test/topics/gz-topic/tail",
+        Some("gzip"),
+    )
+    .await;
+    assert!(
+        headers.get("content-encoding").is_none(),
+        "an event stream stays uncompressed: {headers:?}"
+    );
+}
+
+/// The caching design's central promise, asserted against what librdkafka
+/// says it sent rather than against a reading of the code: a second look
+/// inside the freshness window costs the brokers NOTHING, however many
+/// viewers or tabs ask, and views that share a snapshot share its cost.
+///
+/// Until the call counters existed this could only be checked by hand — any
+/// wall-clock assertion raced the shared test broker.
+#[tokio::test]
+async fn a_second_look_inside_the_window_costs_the_brokers_nothing() {
+    let bootstrap = start_kafka().await;
+    create_topic(&bootstrap, "tier-topic", 1).await;
+    produce(&bootstrap, "tier-topic", 3).await;
+    consume_and_commit(&bootstrap, "tier-topic", "tier-group", 2).await;
+    let state = state_with_call_stats(&bootstrap);
+
+    // Cold: the topic list must actually ask.
+    let before = broker_calls(&state).await;
+    get_json(app(state.clone()), "/api/clusters/test/topics").await;
+    let cold = calls_since(&state, &before).await;
+    assert!(cold.get("Metadata").copied().unwrap_or(0) >= 1, "a cold topic list asks: {cold:?}");
+
+    // Warm: five more viewers of the same page, still inside the window.
+    let before = broker_calls(&state).await;
+    for _ in 0..5 {
+        get_json(app(state.clone()), "/api/clusters/test/topics").await;
+    }
+    let warm = calls_since(&state, &before).await;
+    assert!(warm.is_empty(), "five more viewers cost nothing: {warm:?}");
+
+    // The consumers list and a topic's activity tab read ONE roster.
+    let before = broker_calls(&state).await;
+    get_json(app(state.clone()), "/api/clusters/test/groups").await;
+    let listed = calls_since(&state, &before).await;
+    assert!(listed.get("ListGroups").copied().unwrap_or(0) >= 1, "a cold group list asks: {listed:?}");
+
+    let before = broker_calls(&state).await;
+    get_json(app(state.clone()), "/api/clusters/test/topics/tier-topic/consumers").await;
+    let tab = calls_since(&state, &before).await;
+    assert_eq!(
+        tab.get("ListGroups").copied().unwrap_or(0),
+        0,
+        "the activity tab rode the list's roster: {tab:?}"
+    );
+    assert_eq!(
+        tab.get("DescribeGroups").copied().unwrap_or(0),
+        0,
+        "and its describe too: {tab:?}"
+    );
+
+    // A group's own page rides the lag the tab just sampled.
+    let before = broker_calls(&state).await;
+    get_json(app(state.clone()), "/api/clusters/test/groups/tier-group").await;
+    let page = calls_since(&state, &before).await;
+    assert_eq!(
+        page.get("OffsetFetch").copied().unwrap_or(0),
+        0,
+        "the group page rode the tab's committed offsets: {page:?}"
+    );
+}
+
 #[tokio::test]
 async fn groups_list_and_detail_report_lag() {
     let bootstrap = start_kafka().await;

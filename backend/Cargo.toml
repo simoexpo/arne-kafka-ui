@@ -7,6 +7,7 @@ edition = "2024"
 anyhow = "1.0.104"
 apache-avro = "0.22.0"
 axum = "0.8.9"
+tower-http = { version = "0.6", features = ["compression-gzip"] }
 base64 = "0.23.1"
 futures-util = "0.3.33"
 mime_guess = "2.0.5"

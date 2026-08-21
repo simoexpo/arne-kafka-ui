@@ -238,6 +238,32 @@ pub fn state_with_limits(bootstrap: &str, extra: Vec<ClusterConfig>, limits: Lim
     }
 }
 
+/// The raw bytes of a response, optionally telling the server what encodings
+/// the caller accepts — the only way to observe compression, which `get_json`
+/// hides by decoding for you.
+pub async fn get_bytes(app: Router, uri: &str, accept_encoding: Option<&str>) -> Vec<u8> {
+    get_with_headers(app, uri, accept_encoding).await.1
+}
+
+pub async fn get_with_headers(
+    app: Router,
+    uri: &str,
+    accept_encoding: Option<&str>,
+) -> (axum::http::HeaderMap, Vec<u8>) {
+    let mut req = Request::builder().uri(uri);
+    if let Some(encoding) = accept_encoding {
+        req = req.header("accept-encoding", encoding);
+    }
+    let res = app.oneshot(req.body(Body::empty()).unwrap()).await.unwrap();
+    let headers = res.headers().clone();
+    // A stream never ends on its own, so take only what is already buffered.
+    let body = tokio::time::timeout(Duration::from_secs(2), res.into_body().collect())
+        .await
+        .map(|b| b.unwrap().to_bytes().to_vec())
+        .unwrap_or_default();
+    (headers, body)
+}
+
 pub async fn get_json(app: Router, uri: &str) -> (StatusCode, serde_json::Value) {
     let res = app
         .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
