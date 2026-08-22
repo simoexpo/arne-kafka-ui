@@ -36,10 +36,12 @@ export function sectionFromPathname(pathname: string, cluster: string): Section 
   return segment === 'topics' || segment === 'consumers' || segment === 'schemas' ? segment : 'overview'
 }
 
-export function Sidebar({ cluster, clusters, active, error }: {
+export function Sidebar({ cluster, clusters, active, error, version }: {
   cluster: string
   clusters: ClusterHealth[]
   active: Section
+  // The running build's `git describe` identity; shown only when known.
+  version?: string | null
   // The clusters-list query failing is not "zero other clusters" — silently
   // rendering an empty switcher would look identical to a healthy single-
   // cluster setup. Surface it the same way Panel does: a real headline via
@@ -97,8 +99,13 @@ export function Sidebar({ cluster, clusters, active, error }: {
               </Link>
             ))}
         </div>
-        <div className="mt-4 flex items-center gap-2">
+        <div className="mt-4 flex items-center justify-between gap-2">
           <ThemeToggle />
+          {version && (
+            <span data-testid="app-version" className="font-mono text-[10px] text-zinc-400 dark:text-zinc-600">
+              {version}
+            </span>
+          )}
         </div>
       </div>
     </aside>
@@ -192,7 +199,9 @@ export function AppShell() {
   const active = sectionFromPathname(pathname, cluster)
   return (
     <div className="flex h-dvh bg-white text-zinc-900 dark:bg-zinc-950 dark:text-zinc-100">
-      {cluster && <Sidebar cluster={cluster} clusters={data?.clusters ?? []} active={active} error={error} />}
+      {cluster && (
+        <Sidebar cluster={cluster} clusters={data?.clusters ?? []} active={active} error={error} version={data?.version} />
+      )}
       {/* Viewport-fixed shell (owner feedback 2026-08-15): the app itself
           never scrolls — `main` is a bounded-height flex item (h-dvh ->
           flex stretch) with overflow-hidden, so document/body can't scroll

@@ -27,6 +27,22 @@ describe('Sidebar', () => {
     expect(screen.getByRole('link', { name: /topics/i })).toHaveAttribute('data-status', 'active')
   })
 
+  it('states the build identity beside the theme toggle, verbatim', async () => {
+    await renderWithRouter(
+      <Sidebar cluster="prod" clusters={[...clusters]} active="topics" version="v0.1.0-5-ga1b2c3d" />,
+      { initialPath: '/c/prod/topics' },
+    )
+    // `git describe` output as-is — no reformatting, no added prefix.
+    expect(screen.getByTestId('app-version')).toHaveTextContent('v0.1.0-5-ga1b2c3d')
+  })
+
+  it('shows no build identity when the build was given none', async () => {
+    await renderWithRouter(<Sidebar cluster="prod" clusters={[...clusters]} active="topics" />, {
+      initialPath: '/c/prod/topics',
+    })
+    expect(screen.queryByTestId('app-version')).toBeNull()
+  })
+
   it('renders the brand logo', async () => {
     await renderWithRouter(<Sidebar cluster="prod" clusters={[...clusters]} active="topics" />, {
       initialPath: '/c/prod/topics',

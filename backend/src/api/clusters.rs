@@ -21,7 +21,14 @@ pub async fn list(State(state): State<AppState>) -> Json<Value> {
             })
         })
         .collect();
-    Json(json!({ "clusters": clusters }))
+    // The build's identity is verbatim `git describe --tags --always` output,
+    // baked in when the image was built (compile-time env, set from a Docker
+    // build arg). It rides this response because the sidebar already polls it
+    // — no extra request. Absent (null) when the build was given none: a bare
+    // `cargo run` states nothing rather than inventing a version. option_env!
+    // is compile-time, so the positive path is verified against the built
+    // image, not in unit tests.
+    Json(json!({ "clusters": clusters, "version": option_env!("ARNE_BUILD_VERSION") }))
 }
 
 /// What Arne has asked this cluster's brokers, as librdkafka counted it.

@@ -47,6 +47,7 @@ describe('CommandPalette', () => {
   beforeEach(() => {
     vi.mocked(client.getClusters).mockResolvedValue({
       clusters: [{ name: 'prod', status: 'healthy', broker_count: 3, error: null }],
+      version: null,
     })
     vi.mocked(client.getTopics).mockResolvedValue({
       topics: [

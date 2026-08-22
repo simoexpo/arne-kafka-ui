@@ -23,6 +23,10 @@ async fn clusters_endpoint_reports_health_per_cluster() {
     assert_eq!(clusters[1]["name"], "dead");
     assert_eq!(clusters[1]["status"], "unreachable");
     assert!(clusters[1]["error"].is_string());
+    // The build identifies itself with `git describe` output baked in at build
+    // time. A build that was not given one (this test binary, a bare `cargo
+    // run`) says null — never an invented version.
+    assert!(body["version"].is_null());
 }
 
 /// Two unreachable clusters: sequential health checks cost ~2x HEALTH_TIMEOUT,

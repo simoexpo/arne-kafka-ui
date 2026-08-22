@@ -82,11 +82,35 @@ jobs:
       - run: npm run build
         working-directory: frontend
 
+  # Pushing main and a tag for the same commit fires two runs. Pushed together
+  # (one `git push origin main vX.Y.Z`), the branch run sees the tag on its
+  # commit and stands down, so the commit is built once — by the tag run,
+  # which owns the release tags. Pushed separately, the worst case is a
+  # duplicate build of identical content, never a missing one.
+  gate:
+    name: one build per commit
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push'
+    outputs:
+      build: ${{ steps.decide.outputs.build }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: decide
+        run: |
+          if [ "${{ github.ref_type }}" = "branch" ] && git describe --tags --exact-match HEAD >/dev/null 2>&1; then
+            echo "build=false" >> "$GITHUB_OUTPUT"
+            echo "commit is tagged — the tag run builds it"
+          else
+            echo "build=true" >> "$GITHUB_OUTPUT"
+          fi
+
   image:
     name: image (${{ matrix.platform }})
     # Nothing reaches Docker Hub unless both suites are green.
-    needs: [backend, frontend]
-    if: github.event_name == 'push'
+    needs: [backend, frontend, gate]
+    if: github.event_name == 'push' && needs.gate.outputs.build == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -100,7 +124,14 @@ jobs:
             runner: ubuntu-24.04-arm
     runs-on: ${{ matrix.runner }}
     steps:
+      # Full history: the build identity is `git describe`, which needs the
+      # tags and the ancestry path to the nearest one.
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Build identity
+        run: echo "BUILD_VERSION=$(git describe --tags --always)" >> "$GITHUB_ENV"
 
       - uses: docker/setup-buildx-action@v3
 
@@ -118,6 +149,8 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
+          build-args: |
+            BUILD_VERSION=${{ env.BUILD_VERSION }}
           platforms: ${{ matrix.platform }}
           outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
           # Separate scopes: one architecture's layers must not evict the other's.

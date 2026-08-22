@@ -4,7 +4,12 @@ export interface ClusterHealth {
   broker_count: number | null
   error: string | null
 }
-export interface ClustersResponse { clusters: ClusterHealth[] }
+export interface ClustersResponse {
+  clusters: ClusterHealth[]
+  // Verbatim `git describe --tags --always` of the running build; null when
+  // the build was given none (e.g. a bare `cargo run`).
+  version: string | null
+}
 
 export interface BrokerInfo { id: number; host: string; port: number }
 export interface TopicPartitions { name: string; partitions: number }
