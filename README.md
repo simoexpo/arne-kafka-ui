@@ -193,4 +193,4 @@ Issues and pull requests are welcome. Please keep the TDD rule and run
 Wordmark font: [Cinzel](https://fonts.google.com/specimen/Cinzel) by Natanael
 Gama, SIL Open Font License 1.1, bundled via `@fontsource`.
 
-Arne is named after a bird.
+Arne is named after a ~~princess~~ bird.
