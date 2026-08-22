@@ -2,6 +2,9 @@
 name = "arne"
 version = "0.1.0"
 edition = "2024"
+license = "Apache-2.0"
+description = "A Kafka UI for monitoring and message lookup"
+repository = "https://github.com/simoexpo/arne-kafka-ui"
 
 [dependencies]
 anyhow = "1.0.104"
