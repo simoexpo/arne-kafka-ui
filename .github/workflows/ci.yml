@@ -23,7 +23,7 @@ jobs:
     name: backend (fmt + clippy + tests)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # rust-rdkafka compiles librdkafka from source; these are the same
       # packages the Dockerfile installs.
@@ -63,9 +63,9 @@ jobs:
     name: frontend (lint + tests + build)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: npm
@@ -102,18 +102,18 @@ jobs:
             runner: ubuntu-24.04-arm
     runs-on: ${{ matrix.runner }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # The corner shows the exact commit this image was built from.
       - name: Build identity
         run: echo "BUILD_VERSION=$(git rev-parse --short=7 HEAD)" >> "$GITHUB_ENV"
 
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@v4
 
       # The username is public (it is the image name); only the token is a
       # secret — and keeping the username out of secrets keeps GitHub's log
       # masking from garbling every line that mentions the image.
-      - uses: docker/login-action@v3
+      - uses: docker/login-action@v4
         with:
           username: simoexpo
           password: ${{ secrets.DOCKERHUB_TOKEN }}
@@ -121,7 +121,7 @@ jobs:
       # Each architecture is pushed by digest only; the `merge` job below is
       # what attaches the human-readable tags, as one multi-arch manifest.
       - id: build
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           build-args: |
@@ -137,7 +137,7 @@ jobs:
           mkdir -p /tmp/digests
           echo "${{ steps.build.outputs.digest }}" > "/tmp/digests/$(echo '${{ matrix.platform }}' | tr / -)"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: digest-${{ strategy.job-index }}
           path: /tmp/digests/*
@@ -148,15 +148,15 @@ jobs:
     needs: image
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: /tmp/digests
           pattern: digest-*
           merge-multiple: true
 
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@v4
 
-      - uses: docker/login-action@v3
+      - uses: docker/login-action@v4
         with:
           username: simoexpo
           password: ${{ secrets.DOCKERHUB_TOKEN }}
@@ -164,7 +164,7 @@ jobs:
       # A main build is published under its own name only. Versions and
       # `latest` are attached later, by promoting the exact tested build.
       - id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@v6
         with:
           images: ${{ env.IMAGE }}
           tags: |
@@ -184,9 +184,9 @@ jobs:
     if: github.event_name == 'push' && github.ref_type == 'tag'
     runs-on: ubuntu-latest
     steps:
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@v4
 
-      - uses: docker/login-action@v3
+      - uses: docker/login-action@v4
         with:
           username: simoexpo
           password: ${{ secrets.DOCKERHUB_TOKEN }}
