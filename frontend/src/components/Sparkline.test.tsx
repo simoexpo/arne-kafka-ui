@@ -27,6 +27,14 @@ describe('Sparkline', () => {
     expect(labels).toContain('1.4 msg/s')
   })
 
+  // A window that peaked at zero has nothing to scale: "0.0 msg/s" as the top
+  // of an axis whose bottom is 0 reads as nonsense. The single 0 says it all.
+  it('drops the peak label when the whole window is zero', () => {
+    render(<Sparkline points={[{ x: 0, y: 0 }, { x: 1, y: 0 }]} unit="msg/s" />)
+    const labels = [...screen.getByRole('img', { name: /sparkline/i }).querySelectorAll('text')].map((t) => t.textContent)
+    expect(labels).toEqual(['0'])
+  })
+
   // Owner design 2026-08-19: sampling only happens while someone watches, so
   // a return visit leaves a hole. The line must break there instead of
   // drawing a rate across time nobody measured.

@@ -47,9 +47,12 @@ export function Sparkline({
       className="h-12 w-60 rounded"
     >
       <rect x={gutter} y="0" width={w - gutter} height={h} rx="4" className="fill-zinc-100 dark:fill-zinc-800" />
-      <text x={gutter - 5} y={pad + 7} textAnchor="end" className="fill-zinc-500 text-[9px]">
-        {peakLabel(yMax, unit)}
-      </text>
+      {/* A zero peak has nothing to scale — the bottom label says it all. */}
+      {Math.max(...ys) > 0 && (
+        <text x={gutter - 5} y={pad + 7} textAnchor="end" className="fill-zinc-500 text-[9px]">
+          {peakLabel(yMax, unit)}
+        </text>
+      )}
       <text x={gutter - 5} y={h - pad} textAnchor="end" className="fill-zinc-500 text-[9px]">
         0
       </text>
