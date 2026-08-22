@@ -51,7 +51,8 @@ export function ConsumersTab({ cluster, topic }: { cluster: string; topic: strin
         loading={throughput.isPending}
         hasData={throughput.data !== undefined}
       >
-        <div className="flex items-end gap-4">
+        {/* The current rate reads against the chart, not against its caption. */}
+        <div className="flex items-center gap-4">
           <div>
             <Sparkline
               points={samples.map((s) => ({ x: s.ts_ms, y: s.msgs_per_sec, gapBefore: !s.continuous }))}
