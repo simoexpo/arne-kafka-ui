@@ -5,10 +5,10 @@
   <img src="docs/images/wordmark-light.svg" alt="Arne" width="380">
 </picture>
 
-**A fast, honest Kafka UI.**
+**A Kafka UI for monitoring and message lookup.**
 
-Monitoring and message lookup that tells you exactly what it knows, and when
-it measured it.
+Built to be fast, gentle with your brokers, and honest about what it knows —
+and when it knew it.
 
 [![CI](https://github.com/simoexpo/arne-kafka-ui/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/simoexpo/arne-kafka-ui/actions/workflows/ci.yml) [![Docker Hub](https://img.shields.io/docker/v/simoexpo/arne-kafka-ui?logo=docker&label=docker%20hub&sort=semver)](https://hub.docker.com/r/simoexpo/arne-kafka-ui) [![Image size](https://img.shields.io/docker/image-size/simoexpo/arne-kafka-ui/latest?logo=docker&label=image)](https://hub.docker.com/r/simoexpo/arne-kafka-ui) [![Rust](https://img.shields.io/badge/rust-stable-000000?logo=rust)](https://www.rust-lang.org/) [![React](https://img.shields.io/badge/react-19-149eca?logo=react)](https://react.dev/)
 
@@ -20,9 +20,9 @@ it measured it.
 
 ## The aim
 
-Arne wants to be the instrument you can leave pointed at production: a Kafka
-UI whose numbers you can act on, that admits what it does not know, and whose
-presence the cluster barely notices.
+Arne aims to be a Kafka UI you can leave pointed at production: numbers you
+can act on, an honest “don’t know” where that is the truth, and as little
+load on the cluster as we can manage.
 
 That takes deliberate work, because some numbers in Kafka are harder to state
 truthfully than they look:
@@ -37,7 +37,7 @@ truthfully than they look:
 - Every one of these numbers is stale by the time it reaches a screen. The only
   question is whether the screen admits it.
 
-Arne's answer is two rules, and they are the whole design:
+Arne is built around two rules:
 
 **Say what is known, and when it was measured.** Every metric carries the
 timestamp of its sample. A total that cannot be computed completely says so:
@@ -50,8 +50,8 @@ the results, loudly, instead of vanishing.
 shared and bounded: nothing polls in the background, nothing samples a topic
 nobody is looking at, and a second viewer of a page someone just loaded costs
 the brokers nothing — asserted by tests against the broker's own request
-counts, not claimed in a comment. Load follows the refresh policy, never the
-number of open tabs or the size of the cluster. When nobody is looking, the
+counts. Load follows the refresh policy rather than the number of open tabs
+or the size of the cluster. When nobody is looking, the
 only traffic left is the Kafka client library's own periodic housekeeping.
 
 <div align="center">
@@ -104,26 +104,26 @@ Write operations come next, starting with consumer-group offset management.
 
 ### Kafka 4 and KIP-848
 
-Groups using the new consumer protocol are reported correctly — state, members,
-assignor and per-partition ownership — by describing them through their
-coordinator. Read via the legacy `DescribeGroups` API, the same group comes back
-as `Dead` with no members *while it is consuming happily* — so that API alone is
-not enough to describe a modern group.
+Groups on the new consumer protocol are described through their coordinator,
+so their state, members, assignor and per-partition ownership come through
+intact. This is worth doing: read via the legacy `DescribeGroups` API, the
+same group comes back as `Dead` with no members while it is consuming
+happily, so that API alone is not enough to describe a modern group.
 
-## How it is built
+## How it works
 
 - **One binary.** Rust and axum, with the React frontend embedded via
   `rust-embed`. No web server to configure, no node process in production.
 - **Nothing polls in the background.** Throughput sampling, lag, group
   descriptions — all triggered by a request that needs them, all cached per
   cluster and shared by every viewer.
-- **No request scales with the cluster.** Not with topics, partitions or
-  groups. Lag is fetched for the rows on screen and nothing else.
+- **Pages ask for what they show.** Lag is fetched for the rows on screen,
+  never per topic, per partition or per group across the cluster.
 - **Bindings for what the client library skipped.** `DescribeCluster`,
   `ListOffsets`, `ListConsumerGroups`, `DescribeConsumerGroups` and
   `ListConsumerGroupOffsets` are bound directly to librdkafka, replacing
   per-broker fan-outs and per-partition loops with single batched calls.
-- **Costs are measured, not assumed.** `/api/clusters/<name>/broker-calls`
+- **Broker traffic is observable.** `/api/clusters/<name>/broker-calls`
   exposes what librdkafka counted itself sending, per broker and per API
   (enable per cluster with `broker_call_stats_ms`), so a page's cost is a
   number rather than an opinion.

@@ -1128,17 +1128,17 @@ body{background:#ffffff;margin:0;padding:32px}.markdown-body{max-width:1012px;ma
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/wordmark-dark.svg">
   <img src="docs/images/wordmark-light.svg" alt="Arne" width="380">
 </picture></themed-picture>
-<p><strong>A fast, honest Kafka UI.</strong></p>
-<p>Monitoring and message lookup that tells you exactly what it knows, and when<br>
-it measured it.</p>
+<p><strong>A Kafka UI for monitoring and message lookup.</strong></p>
+<p>Built to be fast, gentle with your brokers, and honest about what it knows —<br>
+and when it knew it.</p>
 <p><a href="https://github.com/simoexpo/arne-kafka-ui/actions/workflows/ci.yml"><img src="https://github.com/simoexpo/arne-kafka-ui/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI" style="max-width: 100%;"></a> <a href="https://hub.docker.com/r/simoexpo/arne-kafka-ui" rel="nofollow"><img src="https://camo.githubusercontent.com/7678716ab51e59c7f8315f61bc82ac4f17dc40cd0e259e336f56cf536f213409/68747470733a2f2f696d672e736869656c64732e696f2f646f636b65722f762f73696d6f6578706f2f61726e652d6b61666b612d75693f6c6f676f3d646f636b6572266c6162656c3d646f636b657225323068756226736f72743d73656d766572" alt="Docker Hub" data-canonical-src="https://img.shields.io/docker/v/simoexpo/arne-kafka-ui?logo=docker&amp;label=docker%20hub&amp;sort=semver" style="max-width: 100%;"></a> <a href="https://hub.docker.com/r/simoexpo/arne-kafka-ui" rel="nofollow"><img src="https://camo.githubusercontent.com/dc7dcbf9ceb2c6e131b6ce0266622a96cd88fa633dbdd191790044c1ce2a6581/68747470733a2f2f696d672e736869656c64732e696f2f646f636b65722f696d6167652d73697a652f73696d6f6578706f2f61726e652d6b61666b612d75692f6c61746573743f6c6f676f3d646f636b6572266c6162656c3d696d616765" alt="Image size" data-canonical-src="https://img.shields.io/docker/image-size/simoexpo/arne-kafka-ui/latest?logo=docker&amp;label=image" style="max-width: 100%;"></a> <a href="https://www.rust-lang.org/" rel="nofollow"><img src="https://camo.githubusercontent.com/582c0e5dd6f8cabcbb4945ac5339d70f825d80a2af29d7d07e75d624eb1d26da/68747470733a2f2f696d672e736869656c64732e696f2f62616467652f727573742d737461626c652d3030303030303f6c6f676f3d72757374" alt="Rust" data-canonical-src="https://img.shields.io/badge/rust-stable-000000?logo=rust" style="max-width: 100%;"></a> <a href="https://react.dev/" rel="nofollow"><img src="https://camo.githubusercontent.com/f00623a9d56c4510a4a31b90d9b0e2b649e12a20c1c62e3e0078a49b9ea067f7/68747470733a2f2f696d672e736869656c64732e696f2f62616467652f72656163742d31392d3134396563613f6c6f676f3d7265616374" alt="React" data-canonical-src="https://img.shields.io/badge/react-19-149eca?logo=react" style="max-width: 100%;"></a></p>
 <a target="_blank" rel="noopener noreferrer" href="docs/images/hero-messages.png"><img src="docs/images/hero-messages.png" alt="Browsing and live-tailing a topic in Arne" width="900" style="max-width: 100%;"></a>
 </div>
 <hr>
 <h2>The aim</h2>
-<p>Arne wants to be the instrument you can leave pointed at production: a Kafka<br>
-UI whose numbers you can act on, that admits what it does not know, and whose<br>
-presence the cluster barely notices.</p>
+<p>Arne aims to be a Kafka UI you can leave pointed at production: numbers you<br>
+can act on, an honest “don’t know” where that is the truth, and as little<br>
+load on the cluster as we can manage.</p>
 <p>That takes deliberate work, because some numbers in Kafka are harder to state<br>
 truthfully than they look:</p>
 <ul>
@@ -1152,7 +1152,7 @@ with no members while it is consuming happily. (Verified against Kafka 4.3:<br>
 <li>Every one of these numbers is stale by the time it reaches a screen. The only<br>
 question is whether the screen admits it.</li>
 </ul>
-<p>Arne's answer is two rules, and they are the whole design:</p>
+<p>Arne is built around two rules:</p>
 <p><strong>Say what is known, and when it was measured.</strong> Every metric carries the<br>
 timestamp of its sample. A total that cannot be computed completely says so:<br>
 lag summed from a partial snapshot renders as <code class="notranslate">≥ 4.2k</code>, never as a confident<br>
@@ -1163,8 +1163,8 @@ the results, loudly, instead of vanishing.</p>
 shared and bounded: nothing polls in the background, nothing samples a topic<br>
 nobody is looking at, and a second viewer of a page someone just loaded costs<br>
 the brokers nothing — asserted by tests against the broker's own request<br>
-counts, not claimed in a comment. Load follows the refresh policy, never the<br>
-number of open tabs or the size of the cluster. When nobody is looking, the<br>
+counts. Load follows the refresh policy rather than the number of open tabs<br>
+or the size of the cluster. When nobody is looking, the<br>
 only traffic left is the Kafka client library's own periodic housekeeping.</p>
 <div align="center">
 <a target="_blank" rel="noopener noreferrer" href="docs/images/tour.gif"><img src="docs/images/tour.gif" alt="A tour of Arne: overview, topics, live tail, consumer groups" width="900" style="max-width: 100%;"></a>
@@ -1235,25 +1235,25 @@ Images are published for <code class="notranslate">linux/amd64</code> and <code 
 <p>v1 covers observation: cluster, topics, messages, consumer groups and schemas.<br>
 Write operations come next, starting with consumer-group offset management.</p>
 <h3>Kafka 4 and KIP-848</h3>
-<p>Groups using the new consumer protocol are reported correctly — state, members,<br>
-assignor and per-partition ownership — by describing them through their<br>
-coordinator. Read via the legacy <code class="notranslate">DescribeGroups</code> API, the same group comes back<br>
-as <code class="notranslate">Dead</code> with no members <em>while it is consuming happily</em> — so that API alone is<br>
-not enough to describe a modern group.</p>
-<h2>How it is built</h2>
+<p>Groups on the new consumer protocol are described through their coordinator,<br>
+so their state, members, assignor and per-partition ownership come through<br>
+intact. This is worth doing: read via the legacy <code class="notranslate">DescribeGroups</code> API, the<br>
+same group comes back as <code class="notranslate">Dead</code> with no members while it is consuming<br>
+happily, so that API alone is not enough to describe a modern group.</p>
+<h2>How it works</h2>
 <ul>
 <li><strong>One binary.</strong> Rust and axum, with the React frontend embedded via<br>
 <code class="notranslate">rust-embed</code>. No web server to configure, no node process in production.</li>
 <li><strong>Nothing polls in the background.</strong> Throughput sampling, lag, group<br>
 descriptions — all triggered by a request that needs them, all cached per<br>
 cluster and shared by every viewer.</li>
-<li><strong>No request scales with the cluster.</strong> Not with topics, partitions or<br>
-groups. Lag is fetched for the rows on screen and nothing else.</li>
+<li><strong>Pages ask for what they show.</strong> Lag is fetched for the rows on screen,<br>
+never per topic, per partition or per group across the cluster.</li>
 <li><strong>Bindings for what the client library skipped.</strong> <code class="notranslate">DescribeCluster</code>,<br>
 <code class="notranslate">ListOffsets</code>, <code class="notranslate">ListConsumerGroups</code>, <code class="notranslate">DescribeConsumerGroups</code> and<br>
 <code class="notranslate">ListConsumerGroupOffsets</code> are bound directly to librdkafka, replacing<br>
 per-broker fan-outs and per-partition loops with single batched calls.</li>
-<li><strong>Costs are measured, not assumed.</strong> <code class="notranslate">/api/clusters/&lt;name&gt;/broker-calls</code><br>
+<li><strong>Broker traffic is observable.</strong> <code class="notranslate">/api/clusters/&lt;name&gt;/broker-calls</code><br>
 exposes what librdkafka counted itself sending, per broker and per API<br>
 (enable per cluster with <code class="notranslate">broker_call_stats_ms</code>), so a page's cost is a<br>
 number rather than an opinion.</li>
