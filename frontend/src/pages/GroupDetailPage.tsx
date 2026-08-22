@@ -140,8 +140,6 @@ export function GroupDetailView({ cluster, group }: { cluster: string; group: st
   )
 }
 
-// Not tinted as a failure at any size: a healthy consumer on a busy topic sits
-// thousands of messages behind, so a red number here would cry wolf.
 // Who is working this partition off. An unowned partition with lag is nobody's
 // job — worth seeing — but it can only be stated when every member's
 // assignment decoded.
@@ -166,7 +164,20 @@ function Owner({ client, partial }: { client?: string; partial: boolean }) {
   )
 }
 
+// Never tinted red at any size — a healthy consumer on a busy topic sits
+// thousands of messages behind and is fine.
 function TotalLagStat({ rows, unreadable }: { rows: { lag: number }[]; unreadable: number }) {
+  // No committed offsets anywhere: there is no position to be behind, so the
+  // total is unknowable — never a confident zero. Same rule as the list page.
+  if (rows.length === 0 && unreadable === 0) {
+    return (
+      <Stat
+        label="total lag"
+        value="—"
+        title="this group has not committed any offset, so it has no position to be behind"
+      />
+    )
+  }
   const { text, title } = statedLag(rows.reduce((sum, p) => sum + p.lag, 0), unreadable)
   return <Stat label="total lag" value={text} title={title} />
 }

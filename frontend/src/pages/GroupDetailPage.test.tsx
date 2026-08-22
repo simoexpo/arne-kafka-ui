@@ -102,6 +102,22 @@ describe('GroupDetailView', () => {
     expect(screen.getByTestId('stat-assignment strategy')).toHaveTextContent('—')
   })
 
+  // Found by benchmarking Arne against other tools (2026-08-22): a live group
+  // that has never committed has NO position to be behind — the list page says
+  // "—", but this page summed zero rows into a confident "total lag 0".
+  it('does not claim zero lag for a group that has never committed', async () => {
+    vi.mocked(client.getGroupDetail).mockResolvedValue(detail({
+      partitions: [],
+      unreadable_partitions: 0,
+      members: [{ member_id: 'm1', client_id: 'worker-1', client_host: '/10.0.0.1', assigned: [] }],
+    }))
+    renderWithQuery(<GroupDetailView cluster="prod" group="billing" />)
+    const total = await screen.findByTestId('stat-total lag')
+    expect(total).not.toHaveTextContent('0')
+    expect(total).toHaveTextContent('—')
+    expect(total).toHaveAttribute('title', expect.stringContaining('committed'))
+  })
+
   // The lag table says which partitions are behind; only the assignment says
   // WHO is behind. Both come from calls the page already makes.
   it('names the member that owns each partition', async () => {
