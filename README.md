@@ -10,7 +10,7 @@
 Monitoring and message lookup that tells you exactly what it knows, and when
 it measured it.
 
-[![CI](https://github.com/simoexpo/arne-kafka-ui/actions/workflows/ci.yml/badge.svg)](https://github.com/simoexpo/arne-kafka-ui/actions/workflows/ci.yml) [![Docker Hub](https://img.shields.io/docker/v/simoexpo/arne-kafka-ui?logo=docker&label=docker%20hub&sort=semver)](https://hub.docker.com/r/simoexpo/arne-kafka-ui) [![Image size](https://img.shields.io/docker/image-size/simoexpo/arne-kafka-ui/latest?logo=docker&label=image)](https://hub.docker.com/r/simoexpo/arne-kafka-ui) [![Rust](https://img.shields.io/badge/rust-stable-000000?logo=rust)](https://www.rust-lang.org/) [![React](https://img.shields.io/badge/react-19-149eca?logo=react)](https://react.dev/)
+[![CI](https://github.com/simoexpo/arne-kafka-ui/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/simoexpo/arne-kafka-ui/actions/workflows/ci.yml) [![Docker Hub](https://img.shields.io/docker/v/simoexpo/arne-kafka-ui?logo=docker&label=docker%20hub&sort=semver)](https://hub.docker.com/r/simoexpo/arne-kafka-ui) [![Image size](https://img.shields.io/docker/image-size/simoexpo/arne-kafka-ui/latest?logo=docker&label=image)](https://hub.docker.com/r/simoexpo/arne-kafka-ui) [![Rust](https://img.shields.io/badge/rust-stable-000000?logo=rust)](https://www.rust-lang.org/) [![React](https://img.shields.io/badge/react-19-149eca?logo=react)](https://react.dev/)
 
 <img src="docs/images/hero-messages.png" alt="Browsing and live-tailing a topic in Arne" width="900">
 
@@ -18,9 +18,14 @@ it measured it.
 
 ---
 
-## What Arne is trying to be
+## The aim
 
-Some numbers in Kafka are harder to state truthfully than they look:
+Arne wants to be the instrument you can leave pointed at production: a Kafka
+UI whose numbers you can act on, that admits what it does not know, and whose
+presence the cluster barely notices.
+
+That takes deliberate work, because some numbers in Kafka are harder to state
+truthfully than they look:
 
 - A topic's "message count" is a subtraction of two offsets. Sample them a
   moment apart and the answer was never true at any instant.
@@ -32,7 +37,7 @@ Some numbers in Kafka are harder to state truthfully than they look:
 - Every one of these numbers is stale by the time it reaches a screen. The only
   question is whether the screen admits it.
 
-Arne's answer is two rules, and they are the whole design.
+Arne's answer is two rules, and they are the whole design:
 
 **Say what is known, and when it was measured.** Every metric carries the
 timestamp of its sample. A total that cannot be computed completely says so:
@@ -42,9 +47,12 @@ nobody is draining is worth seeing. A message that fails to decode appears in
 the results, loudly, instead of vanishing.
 
 **Cost the brokers as little as possible.** Every broker call is demand-driven,
-shared and bounded. Load follows the refresh policy — not the number of open
-tabs, not the size of the cluster. An idle Arne makes **zero** broker calls,
-and a test asserts it rather than a comment claiming it.
+shared and bounded: nothing polls in the background, nothing samples a topic
+nobody is looking at, and a second viewer of a page someone just loaded costs
+the brokers nothing — asserted by tests against the broker's own request
+counts, not claimed in a comment. Load follows the refresh policy, never the
+number of open tabs or the size of the cluster. When nobody is looking, the
+only traffic left is the Kafka client library's own periodic housekeeping.
 
 <div align="center">
 <img src="docs/images/tour.gif" alt="A tour of Arne: overview, topics, live tail, consumer groups" width="900">
