@@ -63,8 +63,8 @@ export function ConsumersTab({ cluster, topic }: { cluster: string; topic: strin
           </div>
           <div className="text-sm">
             {current
-              ? <span className="text-xl font-semibold">{current.msgs_per_sec.toFixed(1)} msg/s</span>
-              : <span className="text-zinc-500">—</span>}
+              ? <span data-testid="current-rate" className="text-xl font-semibold">{current.msgs_per_sec.toFixed(1)} msg/s</span>
+              : null}
             {current && !current.continuous && (
               <p data-testid="rate-window" className="text-xs text-zinc-500">
                 averaged over {formatAgo(Date.now() - current.window_ms, Date.now())}

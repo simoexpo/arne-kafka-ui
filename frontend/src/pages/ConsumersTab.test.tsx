@@ -12,6 +12,16 @@ vi.mock('../api/client', async (importOriginal) => ({
 }))
 
 describe('ConsumersTab', () => {
+  // "no samples yet" already covers the empty state; a dash next to it would
+  // be a second unknown-marker saying the same thing.
+  it('renders no rate placeholder when there are no samples', async () => {
+    vi.mocked(client.getThroughput).mockResolvedValue({ topic: 'orders', samples: [], as_of: null })
+    vi.mocked(client.getTopicConsumers).mockResolvedValue({ topic: 'orders', groups: [], unchecked: [], as_of: 1000 })
+    await renderWithRouter(<ConsumersTab cluster="prod" topic="orders" />)
+    await screen.findByText('no samples yet')
+    expect(screen.queryByTestId('current-rate')).toBeNull()
+  })
+
   // Owner ruling 2026-08-22: clicking a row expands it (kept), so the way to
   // the group's own page is a separate link on the row — one that must NOT
   // also toggle the expansion.
@@ -56,7 +66,7 @@ describe('ConsumersTab', () => {
       as_of: Date.now(),
     })
     await renderWithRouter(<ConsumersTab cluster="prod" topic="orders" />)
-    expect(await screen.findByText('5.5 msg/s')).toBeInTheDocument()
+    expect(await screen.findByTestId('current-rate')).toBeInTheDocument()
     expect(screen.getByText('billing')).toBeInTheDocument()
     expect(screen.getByText('7')).toBeInTheDocument()
     // lag data carries its own sample timestamp, distinct from the throughput panel's
@@ -93,7 +103,7 @@ describe('ConsumersTab', () => {
     })
     vi.mocked(client.getTopicConsumers).mockResolvedValue({ topic: 'orders', groups: [], unchecked: [], as_of: Date.now() })
     await renderWithRouter(<ConsumersTab cluster="prod" topic="orders" />)
-    expect(await screen.findByText('0.4 msg/s')).toBeInTheDocument()
+    expect(await screen.findByTestId('current-rate')).toBeInTheDocument()
     expect(screen.getByTestId('rate-window')).toHaveTextContent(/3m/)
   })
 
@@ -105,7 +115,7 @@ describe('ConsumersTab', () => {
     })
     vi.mocked(client.getTopicConsumers).mockResolvedValue({ topic: 'orders', groups: [], unchecked: [], as_of: Date.now() })
     await renderWithRouter(<ConsumersTab cluster="prod" topic="orders" />)
-    expect(await screen.findByText('5.5 msg/s')).toBeInTheDocument()
+    expect(await screen.findByTestId('current-rate')).toBeInTheDocument()
     expect(screen.queryByTestId('rate-window')).not.toBeInTheDocument()
   })
 
@@ -216,7 +226,7 @@ describe('ConsumersTab', () => {
     })
     vi.mocked(client.getTopicConsumers).mockResolvedValue({ topic: 'orders', groups: [], unchecked: [], as_of: newest })
     await renderWithRouter(<ConsumersTab cluster="prod" topic="orders" />)
-    await screen.findByText('5.5 msg/s')
+    await screen.findByTestId('current-rate')
     const svg = screen.getByRole('img', { name: /throughput/i })
     const polyline = svg.querySelector('polyline')
     // only 2 of the 3 samples fall within the 15m window -> only 2 points plotted
