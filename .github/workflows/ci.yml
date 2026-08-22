@@ -180,7 +180,7 @@ jobs:
         run: docker buildx imagetools inspect ${{ env.IMAGE }}:${{ steps.meta.outputs.version }}
 
   promote:
-    name: promote ${{ github.ref_name }}
+    name: promote release
     if: github.event_name == 'push' && github.ref_type == 'tag'
     runs-on: ubuntu-latest
     steps:
