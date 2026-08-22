@@ -25,9 +25,9 @@ RUN cd backend && cargo chef prepare --recipe-path recipe.json
 FROM chef AS backend
 COPY --from=planner /build/backend/recipe.json backend/recipe.json
 RUN cd backend && cargo chef cook --release --recipe-path recipe.json
-# `git describe --tags --always` of the commit being built, computed by the
-# caller (CI or justfile) because the build context excludes .git. After the
-# cook on purpose: it changes every commit and must not invalidate the cached
+# The commit this image is built from, computed by the caller (CI or the
+# justfile) because the build context excludes .git. After the cook on
+# purpose: it changes every commit and must not invalidate the cached
 # dependency build above.
 ARG BUILD_VERSION=""
 ENV ARNE_BUILD_VERSION=$BUILD_VERSION

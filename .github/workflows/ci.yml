@@ -19,6 +19,7 @@ env:
 
 jobs:
   backend:
+    if: github.ref_type != 'tag'
     name: backend (fmt + clippy + tests)
     runs-on: ubuntu-latest
     steps:
@@ -58,6 +59,7 @@ jobs:
         run: cargo test --all-targets
 
   frontend:
+    if: github.ref_type != 'tag'
     name: frontend (lint + tests + build)
     runs-on: ubuntu-latest
     steps:
@@ -82,35 +84,11 @@ jobs:
       - run: npm run build
         working-directory: frontend
 
-  # Pushing main and a tag for the same commit fires two runs. Pushed together
-  # (one `git push origin main vX.Y.Z`), the branch run sees the tag on its
-  # commit and stands down, so the commit is built once — by the tag run,
-  # which owns the release tags. Pushed separately, the worst case is a
-  # duplicate build of identical content, never a missing one.
-  gate:
-    name: one build per commit
-    runs-on: ubuntu-latest
-    if: github.event_name == 'push'
-    outputs:
-      build: ${{ steps.decide.outputs.build }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - id: decide
-        run: |
-          if [ "${{ github.ref_type }}" = "branch" ] && git describe --tags --exact-match HEAD >/dev/null 2>&1; then
-            echo "build=false" >> "$GITHUB_OUTPUT"
-            echo "commit is tagged — the tag run builds it"
-          else
-            echo "build=true" >> "$GITHUB_OUTPUT"
-          fi
-
   image:
     name: image (${{ matrix.platform }})
     # Nothing reaches Docker Hub unless both suites are green.
-    needs: [backend, frontend, gate]
-    if: github.event_name == 'push' && needs.gate.outputs.build == 'true'
+    needs: [backend, frontend]
+    if: github.event_name == 'push' && github.ref_type == 'branch'
     strategy:
       fail-fast: false
       matrix:
@@ -124,14 +102,11 @@ jobs:
             runner: ubuntu-24.04-arm
     runs-on: ${{ matrix.runner }}
     steps:
-      # Full history: the build identity is `git describe`, which needs the
-      # tags and the ancestry path to the nearest one.
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
+      # The corner shows the exact commit this image was built from.
       - name: Build identity
-        run: echo "BUILD_VERSION=$(git describe --tags --always)" >> "$GITHUB_ENV"
+        run: echo "BUILD_VERSION=$(git rev-parse --short=7 HEAD)" >> "$GITHUB_ENV"
 
       - uses: docker/setup-buildx-action@v3
 
@@ -186,18 +161,14 @@ jobs:
           username: simoexpo
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      # main -> :latest and :main-<sha>; a v1.2.3 tag -> :1.2.3, :1.2 and :latest.
+      # A main build is published under its own name only. Versions and
+      # `latest` are attached later, by promoting the exact tested build.
       - id: meta
         uses: docker/metadata-action@v5
         with:
           images: ${{ env.IMAGE }}
-          # `latest` means the newest RELEASE (the semver rules add it on tag
-          # builds); a main merge publishes only its own `main-<sha>`. Note:
-          # until the first release tag exists, there is no `latest` at all.
           tags: |
-            type=sha,prefix={{branch}}-,enable={{is_default_branch}}
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
+            type=sha,prefix={{branch}}-
 
       - name: Create the manifest list
         run: |
@@ -207,3 +178,32 @@ jobs:
 
       - name: Inspect what was published
         run: docker buildx imagetools inspect ${{ env.IMAGE }}:${{ steps.meta.outputs.version }}
+
+  promote:
+    name: promote ${{ github.ref_name }}
+    if: github.event_name == 'push' && github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          username: simoexpo
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # Releasing X.Y.Z means renaming the tested `main-<sha>` manifest —
+      # never rebuilding it. Fails fast ("manifest unknown") when the tagged
+      # commit has no green main build yet: tag after main is green.
+      - name: Retag the tested build
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          minor="${version%.*}"
+          src="${{ env.IMAGE }}:main-${GITHUB_SHA::7}"
+          docker buildx imagetools create \
+            -t "${{ env.IMAGE }}:${version}" \
+            -t "${{ env.IMAGE }}:${minor}" \
+            -t "${{ env.IMAGE }}:latest" \
+            "$src"
+
+      - name: Inspect what was published
+        run: docker buildx imagetools inspect ${{ env.IMAGE }}:${GITHUB_REF_NAME#v}

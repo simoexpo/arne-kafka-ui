@@ -38,3 +38,17 @@ separate design document to keep in sync.
 ## Dev commands
 
 `just dev`, `just test`, `just docker` — see the `justfile`.
+
+## Releasing
+
+A release is a PROMOTION, never a rebuild: every main merge publishes the
+image `main-<sha>`, and tagging renames those exact tested bits.
+
+1. Wait for the commit's main build to be green.
+2. `git tag vX.Y.Z && git push origin vX.Y.Z` (the maintainer pushes).
+3. CI retags that commit's `main-<sha>` image as `X.Y.Z`, `X.Y` and `latest`
+   in seconds. Tagging a commit with no green main build fails fast
+   ("manifest unknown") — promote after green, rerun the job if you raced it.
+
+The app's corner shows the build's commit; version names live on the Docker
+tags and GitHub releases.

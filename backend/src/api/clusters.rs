@@ -21,13 +21,14 @@ pub async fn list(State(state): State<AppState>) -> Json<Value> {
             })
         })
         .collect();
-    // The build's identity is verbatim `git describe --tags --always` output,
-    // baked in when the image was built (compile-time env, set from a Docker
-    // build arg). It rides this response because the sidebar already polls it
-    // — no extra request. Absent (null) when the build was given none: a bare
-    // `cargo run` states nothing rather than inventing a version. option_env!
-    // is compile-time, so the positive path is verified against the built
-    // image, not in unit tests.
+    // The build identifies itself by the COMMIT it was built from (baked in
+    // as a compile-time env, set from a Docker build arg). Only the commit:
+    // releases are promotions of an existing main build, so a version number
+    // is a name the registry gives the artifact later — the binary states
+    // what it verifiably is. Rides this response because the sidebar already
+    // polls it. Absent (null) when the build was given none: a bare `cargo
+    // run` states nothing rather than inventing an identity. option_env! is
+    // compile-time, so the positive path is verified against the built image.
     Json(json!({ "clusters": clusters, "version": option_env!("ARNE_BUILD_VERSION") }))
 }
 

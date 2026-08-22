@@ -6,8 +6,8 @@ export interface ClusterHealth {
 }
 export interface ClustersResponse {
   clusters: ClusterHealth[]
-  // Verbatim `git describe --tags --always` of the running build; null when
-  // the build was given none (e.g. a bare `cargo run`).
+  // The commit the running build was built from; null when the build was
+  // given none (e.g. a bare `cargo run`).
   version: string | null
 }
 

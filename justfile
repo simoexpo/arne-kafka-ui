@@ -19,7 +19,7 @@ lint:
     cd frontend && npm run lint && npx tsc -b
 
 docker:
-    docker build --build-arg BUILD_VERSION=$(git describe --tags --always) -t arne-kafka-ui:dev .
+    docker build --build-arg BUILD_VERSION=$(git rev-parse --short=7 HEAD) -t arne-kafka-ui:dev .
 
 # one-command playground: kafka + schema registry + demo producer
 playground:

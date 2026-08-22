@@ -40,7 +40,7 @@ export function Sidebar({ cluster, clusters, active, error, version }: {
   cluster: string
   clusters: ClusterHealth[]
   active: Section
-  // The running build's `git describe` identity; shown only when known.
+  // The commit the running build was built from; shown only when known.
   version?: string | null
   // The clusters-list query failing is not "zero other clusters" — silently
   // rendering an empty switcher would look identical to a healthy single-

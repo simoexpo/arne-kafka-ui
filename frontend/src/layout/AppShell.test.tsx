@@ -27,13 +27,13 @@ describe('Sidebar', () => {
     expect(screen.getByRole('link', { name: /topics/i })).toHaveAttribute('data-status', 'active')
   })
 
-  it('states the build identity beside the theme toggle, verbatim', async () => {
+  it('states the build commit beside the theme toggle, verbatim', async () => {
     await renderWithRouter(
-      <Sidebar cluster="prod" clusters={[...clusters]} active="topics" version="v0.1.0-5-ga1b2c3d" />,
+      <Sidebar cluster="prod" clusters={[...clusters]} active="topics" version="730bfd6" />,
       { initialPath: '/c/prod/topics' },
     )
-    // `git describe` output as-is — no reformatting, no added prefix.
-    expect(screen.getByTestId('app-version')).toHaveTextContent('v0.1.0-5-ga1b2c3d')
+    // as-is — no reformatting, no invented prefix
+    expect(screen.getByTestId('app-version')).toHaveTextContent('730bfd6')
   })
 
   it('shows no build identity when the build was given none', async () => {
