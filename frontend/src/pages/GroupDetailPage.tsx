@@ -1,5 +1,5 @@
 import { useQuery } from '@tanstack/react-query'
-import { useParams } from '@tanstack/react-router'
+import { Link, useParams } from '@tanstack/react-router'
 import { getGroupDetail } from '../api/client'
 import { CopyButton } from '../components/CopyButton'
 import { Panel } from '../components/Panel'
@@ -122,7 +122,15 @@ export function GroupDetailView({ cluster, group }: { cluster: string; group: st
                 data-testid="partition-row"
                 className="border-t border-zinc-100 dark:border-zinc-800"
               >
-                <td className="py-1">{p.topic}</td>
+                <td className="py-1">
+                  <Link
+                    to="/c/$cluster/topics/$topic"
+                    params={{ cluster, topic: p.topic }}
+                    className="text-blue-600 hover:underline dark:text-blue-400"
+                  >
+                    {p.topic}
+                  </Link>
+                </td>
                 <td>{p.partition}</td>
                 <td>{p.committed_offset}</td>
                 <td>{p.end_offset}</td>

@@ -1,11 +1,14 @@
 export function Sparkline({
   points,
   domain,
+  unit,
 }: {
   // `gapBefore` marks a point whose stretch back to its predecessor was never
   // measured — the line breaks there rather than drawing a rate we didn't see.
   points: { x: number; y: number; gapBefore?: boolean }[]
   domain?: { min: number; max: number }
+  // Names what y is, on the top axis label ("1.4 msg/s").
+  unit?: string
 }) {
   if (points.length === 0) {
     return <p className="text-sm text-zinc-500">no samples yet</p>
@@ -13,12 +16,18 @@ export function Sparkline({
   const w = 240
   const h = 48
   const pad = 2
+  // Left gutter for the two labels that anchor the scale: without them the
+  // line heights read as arbitrary values (owner: the flat bottom of the
+  // chart was being read as "-1"). y runs from 0 (bottom) to the window's
+  // peak (top) — rates are never negative.
+  const gutter = 52
   const xs = points.map((p) => p.x)
   const ys = points.map((p) => p.y)
   const xMin = domain ? domain.min : Math.min(...xs)
   const xMax = domain ? domain.max : Math.max(...xs)
   const yMax = Math.max(...ys, 1e-9)
-  const sx = (x: number) => (xMax === xMin ? w / 2 : pad + ((x - xMin) / (xMax - xMin)) * (w - 2 * pad))
+  const sx = (x: number) =>
+    xMax === xMin ? gutter + (w - gutter) / 2 : gutter + pad + ((x - xMin) / (xMax - xMin)) * (w - gutter - 2 * pad)
   const sy = (y: number) => h - pad - (y / yMax) * (h - 2 * pad)
   // Segments break at points whose stretch back to the previous sample was
   // never measured — sampling only runs while someone watches the topic, so a
@@ -35,8 +44,15 @@ export function Sparkline({
       role="img"
       aria-label="throughput sparkline"
       viewBox={`0 0 ${w} ${h}`}
-      className="h-12 w-60 rounded bg-zinc-100 dark:bg-zinc-800"
+      className="h-12 w-60 rounded"
     >
+      <rect x={gutter} y="0" width={w - gutter} height={h} rx="4" className="fill-zinc-100 dark:fill-zinc-800" />
+      <text x={gutter - 5} y={pad + 7} textAnchor="end" className="fill-zinc-500 text-[9px]">
+        {peakLabel(yMax, unit)}
+      </text>
+      <text x={gutter - 5} y={h - pad} textAnchor="end" className="fill-zinc-500 text-[9px]">
+        0
+      </text>
       {segments.map((seg, i) => (
         <g key={i}>
           <polyline
@@ -57,4 +73,9 @@ export function Sparkline({
       ))}
     </svg>
   )
+}
+
+function peakLabel(peak: number, unit?: string): string {
+  const n = peak >= 10 ? peak.toFixed(0) : peak.toFixed(1)
+  return unit ? `${n} ${unit}` : n
 }

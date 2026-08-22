@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import { screen } from '@testing-library/react'
-import { renderWithQuery } from '../test/utils'
+import userEvent from '@testing-library/user-event'
+import { renderWithRouter } from '../test/utils'
 import { ConsumersTab } from './ConsumersTab'
 import * as client from '../api/client'
 
@@ -11,6 +12,31 @@ vi.mock('../api/client', async (importOriginal) => ({
 }))
 
 describe('ConsumersTab', () => {
+  // Owner ruling 2026-08-22: clicking a row expands it (kept), so the way to
+  // the group's own page is a separate link on the row — one that must NOT
+  // also toggle the expansion.
+  it('links to the group page without toggling the row expansion', async () => {
+    const user = userEvent.setup()
+    vi.mocked(client.getThroughput).mockResolvedValue({ topic: 'orders', samples: [], as_of: null })
+    vi.mocked(client.getTopicConsumers).mockResolvedValue({
+      topic: 'orders',
+      groups: [{
+        group_id: 'billing', state: 'Stable', total_lag: 3, unreadable_partitions: 0, error: null,
+        partitions: [{ topic: 'orders', partition: 0, committed_offset: 1, end_offset: 4, lag: 3 }],
+      }],
+      unchecked: [],
+      as_of: 1000,
+    })
+    const { router } = await renderWithRouter(<ConsumersTab cluster="prod" topic="orders" />)
+    await screen.findByText('billing')
+    const link = screen.getByRole('link', { name: /open billing/i })
+    expect(link).toHaveAttribute('href', '/c/prod/consumers/billing')
+    await user.click(link)
+    expect(router.state.location.pathname).toBe('/c/prod/consumers/billing')
+    // the expansion did not open as a side effect of following the link
+    expect(screen.queryByText('committed')).toBeNull()
+  })
+
   it('renders current rate and consumer groups with lag', async () => {
     vi.mocked(client.getThroughput).mockResolvedValue({
       topic: 'orders',
@@ -29,7 +55,7 @@ describe('ConsumersTab', () => {
       unchecked: [],
       as_of: Date.now(),
     })
-    renderWithQuery(<ConsumersTab cluster="prod" topic="orders" />)
+    await renderWithRouter(<ConsumersTab cluster="prod" topic="orders" />)
     expect(await screen.findByText('5.5 msg/s')).toBeInTheDocument()
     expect(screen.getByText('billing')).toBeInTheDocument()
     expect(screen.getByText('7')).toBeInTheDocument()
@@ -48,7 +74,7 @@ describe('ConsumersTab', () => {
     vi.mocked(client.getTopicConsumers).mockResolvedValue({
       topic: 'orders', groups: [], unchecked: [], as_of: Date.now(),
     })
-    renderWithQuery(<ConsumersTab cluster="prod" topic="orders" />)
+    await renderWithRouter(<ConsumersTab cluster="prod" topic="orders" />)
     await screen.findByText(/no consumer groups/i)
     const headers = screen.getAllByTestId('panel-header')
     const throughput = headers.find((h) => h.textContent?.includes('Throughput'))!
@@ -66,7 +92,7 @@ describe('ConsumersTab', () => {
       as_of: Date.now(),
     })
     vi.mocked(client.getTopicConsumers).mockResolvedValue({ topic: 'orders', groups: [], unchecked: [], as_of: Date.now() })
-    renderWithQuery(<ConsumersTab cluster="prod" topic="orders" />)
+    await renderWithRouter(<ConsumersTab cluster="prod" topic="orders" />)
     expect(await screen.findByText('0.4 msg/s')).toBeInTheDocument()
     expect(screen.getByTestId('rate-window')).toHaveTextContent(/3m/)
   })
@@ -78,7 +104,7 @@ describe('ConsumersTab', () => {
       as_of: Date.now(),
     })
     vi.mocked(client.getTopicConsumers).mockResolvedValue({ topic: 'orders', groups: [], unchecked: [], as_of: Date.now() })
-    renderWithQuery(<ConsumersTab cluster="prod" topic="orders" />)
+    await renderWithRouter(<ConsumersTab cluster="prod" topic="orders" />)
     expect(await screen.findByText('5.5 msg/s')).toBeInTheDocument()
     expect(screen.queryByTestId('rate-window')).not.toBeInTheDocument()
   })
@@ -86,7 +112,7 @@ describe('ConsumersTab', () => {
   it('shows empty state when no group consumes the topic', async () => {
     vi.mocked(client.getThroughput).mockResolvedValue({ topic: 'orders', samples: [], as_of: null })
     vi.mocked(client.getTopicConsumers).mockResolvedValue({ topic: 'orders', groups: [], unchecked: [], as_of: 1000 })
-    renderWithQuery(<ConsumersTab cluster="prod" topic="orders" />)
+    await renderWithRouter(<ConsumersTab cluster="prod" topic="orders" />)
     expect(await screen.findByText(/no consumer groups/i)).toBeInTheDocument()
   })
 
@@ -104,7 +130,7 @@ describe('ConsumersTab', () => {
       unchecked: [],
       as_of: 1000,
     })
-    renderWithQuery(<ConsumersTab cluster="prod" topic="orders" />)
+    await renderWithRouter(<ConsumersTab cluster="prod" topic="orders" />)
     expect(await screen.findByText('billing')).toBeInTheDocument()
     const lag = screen.getByTestId('group-lag')
     expect(lag).toHaveTextContent('≥ 4.2k')
@@ -121,7 +147,7 @@ describe('ConsumersTab', () => {
       unchecked: [],
       as_of: 1000,
     })
-    renderWithQuery(<ConsumersTab cluster="prod" topic="orders" />)
+    await renderWithRouter(<ConsumersTab cluster="prod" topic="orders" />)
     expect(await screen.findByText('fresh')).toBeInTheDocument()
     const lag = screen.getByTestId('group-lag')
     expect(lag).toHaveTextContent('—')
@@ -140,7 +166,7 @@ describe('ConsumersTab', () => {
       unchecked: [],
       as_of: 1000,
     })
-    renderWithQuery(<ConsumersTab cluster="prod" topic="orders" />)
+    await renderWithRouter(<ConsumersTab cluster="prod" topic="orders" />)
     expect(await screen.findByText('billing')).toBeInTheDocument()
     expect(screen.getByTestId('group-lag')).toHaveAttribute(
       'title',
@@ -159,7 +185,7 @@ describe('ConsumersTab', () => {
       ],
       as_of: 1000,
     })
-    renderWithQuery(<ConsumersTab cluster="prod" topic="orders" />)
+    await renderWithRouter(<ConsumersTab cluster="prod" topic="orders" />)
     const note = await screen.findByTestId('unchecked-groups')
     expect(note).toHaveTextContent(/2 groups couldn't be checked/i)
     expect(note).toHaveTextContent('ghost-a')
@@ -173,7 +199,7 @@ describe('ConsumersTab', () => {
       as_of: 1000,
     })
     vi.mocked(client.getTopicConsumers).mockResolvedValue({ topic: 'orders', groups: [], unchecked: [], as_of: 1000 })
-    renderWithQuery(<ConsumersTab cluster="prod" topic="orders" />)
+    await renderWithRouter(<ConsumersTab cluster="prod" topic="orders" />)
     expect(await screen.findByText('last 15m')).toBeInTheDocument()
   })
 
@@ -189,7 +215,7 @@ describe('ConsumersTab', () => {
       as_of: newest,
     })
     vi.mocked(client.getTopicConsumers).mockResolvedValue({ topic: 'orders', groups: [], unchecked: [], as_of: newest })
-    renderWithQuery(<ConsumersTab cluster="prod" topic="orders" />)
+    await renderWithRouter(<ConsumersTab cluster="prod" topic="orders" />)
     await screen.findByText('5.5 msg/s')
     const svg = screen.getByRole('img', { name: /throughput/i })
     const polyline = svg.querySelector('polyline')

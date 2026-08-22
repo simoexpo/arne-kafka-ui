@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { getThroughput, getTopicConsumers } from '../api/client'
+import { Link } from '@tanstack/react-router'
 import { Panel } from '../components/Panel'
 import { StalenessChip } from '../components/StalenessChip'
 import { Sparkline } from '../components/Sparkline'
@@ -55,6 +56,7 @@ export function ConsumersTab({ cluster, topic }: { cluster: string; topic: strin
             <Sparkline
               points={samples.map((s) => ({ x: s.ts_ms, y: s.msgs_per_sec, gapBefore: !s.continuous }))}
               domain={latest ? { min: cutoff as number, max: latest.ts_ms } : undefined}
+              unit="msg/s"
             />
             <p className="mt-1 text-xs text-zinc-500">last {windowMinutes}m</p>
           </div>
@@ -82,7 +84,7 @@ export function ConsumersTab({ cluster, topic }: { cluster: string; topic: strin
         )}
         <div className="space-y-2">
           {consumers.data?.groups.map((g) => (
-            <GroupRow key={g.group_id} group={g} />
+            <GroupRow key={g.group_id} cluster={cluster} group={g} />
           ))}
         </div>
         {consumers.data && consumers.data.unchecked.length > 0 && (
@@ -98,7 +100,7 @@ export function ConsumersTab({ cluster, topic }: { cluster: string; topic: strin
   )
 }
 
-function GroupRow({ group }: { group: TopicGroupLag }) {
+function GroupRow({ cluster, group }: { cluster: string; group: TopicGroupLag }) {
   const [open, setOpen] = useState(false)
   return (
     <details
@@ -108,6 +110,22 @@ function GroupRow({ group }: { group: TopicGroupLag }) {
     >
       <summary className="flex cursor-pointer items-center gap-3 text-sm">
         <span className="font-mono font-medium">{group.group_id}</span>
+        {/* The row's own click expands it (kept); this link is the way OUT to
+            the group's page. Link preventDefaults the click for SPA
+            navigation, which also cancels the summary's toggle — the two
+            gestures stay independent. */}
+        <Link
+          to="/c/$cluster/consumers/$group"
+          params={{ cluster, group: group.group_id }}
+          aria-label={`open ${group.group_id}`}
+          title="open this group's page"
+          onClick={(e) => e.stopPropagation()}
+          className="text-blue-600 hover:underline dark:text-blue-400"
+        >
+          <svg viewBox="0 0 12 12" width="11" height="11" aria-hidden="true">
+            <path d="M4.5 1.5h6v6M10.5 1.5 5 7M8 10.5H1.5V4" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
+          </svg>
+        </Link>
         <span className="text-xs text-zinc-500">{group.state}</span>
         <span className="ml-auto">
           lag{' '}

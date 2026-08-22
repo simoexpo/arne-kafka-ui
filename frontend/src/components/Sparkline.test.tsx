@@ -12,7 +12,19 @@ describe('Sparkline', () => {
   // chart region reads as a chart instead of floating on the panel surface.
   it('tints the plot area so the chart region is visible', () => {
     render(<Sparkline points={[{ x: 1, y: 1 }, { x: 2, y: 3 }]} />)
-    expect(screen.getByRole('img', { name: /sparkline/i }).getAttribute('class')).toMatch(/bg-zinc-100/)
+    const rect = screen.getByRole('img', { name: /sparkline/i }).querySelector('rect')
+    expect(rect?.getAttribute('class')).toMatch(/fill-zinc-100/)
+  })
+
+  // Owner ruling 2026-08-22: with no axis labels the line heights read as
+  // arbitrary values (the flat bottom was being read as "-1"). The scale is
+  // anchored by two labels: 0 at the bottom, the window's peak at the top.
+  it('labels the y axis: zero at the bottom, the peak at the top', () => {
+    render(<Sparkline points={[{ x: 0, y: 0.2 }, { x: 1, y: 1.4 }]} unit="msg/s" />)
+    const svg = screen.getByRole('img', { name: /sparkline/i })
+    const labels = [...svg.querySelectorAll('text')].map((t) => t.textContent)
+    expect(labels).toContain('0')
+    expect(labels).toContain('1.4 msg/s')
   })
 
   // Owner design 2026-08-19: sampling only happens while someone watches, so
@@ -58,7 +70,7 @@ describe('Sparkline', () => {
     const svg = screen.getByRole('img', { name: /throughput/i })
     const polyline = svg.querySelector('polyline')
     // w=240, h=48, pad=2 -> sx(x) = 2 + (x/200)*236 ; sy(y) = 48 - 2 - (y/yMax)*44, yMax=2
-    expect(polyline?.getAttribute('points')).toBe('120.0,24.0 238.0,2.0')
+    expect(polyline?.getAttribute('points')).toBe('146.0,24.0 238.0,2.0')
   })
 
   it('does not re-center a single point around a fixed domain (no zoom-out)', () => {
@@ -66,6 +78,6 @@ describe('Sparkline', () => {
     const svg = screen.getByRole('img', { name: /throughput/i })
     const polyline = svg.querySelector('polyline')
     // sx(190) = 2 + (190/200)*236 = 226.2 ; sy(1) = 48-2-(1/1e-9... ) -> yMax = max(1,1e-9) = 1 -> sy = 48-2-44=2.0
-    expect(polyline?.getAttribute('points')).toBe('226.2,2.0')
+    expect(polyline?.getAttribute('points')).toBe('228.8,2.0')
   })
 })

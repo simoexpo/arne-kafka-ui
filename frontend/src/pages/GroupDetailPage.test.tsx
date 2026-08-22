@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import { screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { renderWithQuery } from '../test/utils'
+import { renderWithRouter } from '../test/utils'
 import { GroupDetailView } from './GroupDetailPage'
 import * as client from '../api/client'
 import type { GroupDetail } from '../api/types'
@@ -39,7 +39,7 @@ describe('GroupDetailView', () => {
         { member_id: 'm2', client_id: 'worker-2', client_host: '/10.0.0.2', assigned: [] },
       ],
     }))
-    renderWithQuery(<GroupDetailView cluster="prod" group="billing" />)
+    await renderWithRouter(<GroupDetailView cluster="prod" group="billing" />)
     const items = await screen.findAllByTestId('group-member')
     expect(items.map((li) => li.textContent?.split(' ')[0])).toEqual(['worker-1', 'worker-2', 'worker-3'])
     const header = screen.getAllByTestId('panel-header').find((h) => h.textContent?.includes('Members'))!
@@ -55,7 +55,7 @@ describe('GroupDetailView', () => {
   // named by assignor class.
   it('states the strategy, status and protocol on the group card', async () => {
     vi.mocked(client.getGroupDetail).mockResolvedValue(detail({ group_type: 'Consumer' }))
-    renderWithQuery(<GroupDetailView cluster="prod" group="billing" />)
+    await renderWithRouter(<GroupDetailView cluster="prod" group="billing" />)
     expect(await screen.findByTestId('stat-assignment strategy')).toHaveTextContent('Range')
     expect(screen.getByTestId('stat-status')).toHaveTextContent('Stable')
     expect(screen.getByTestId('stat-protocol')).toHaveTextContent('Consumer')
@@ -63,7 +63,7 @@ describe('GroupDetailView', () => {
 
   it('names the assignment strategy by its class', async () => {
     vi.mocked(client.getGroupDetail).mockResolvedValue(detail({ assignment_strategy: 'cooperative-sticky' }))
-    renderWithQuery(<GroupDetailView cluster="prod" group="billing" />)
+    await renderWithRouter(<GroupDetailView cluster="prod" group="billing" />)
     expect(await screen.findByTestId('stat-assignment strategy')).toHaveTextContent('CooperativeSticky')
   })
 
@@ -71,7 +71,7 @@ describe('GroupDetailView', () => {
   // figure sits under the one above it — no per-row content sizing.
   it('lays both rows on the same columns', async () => {
     vi.mocked(client.getGroupDetail).mockResolvedValue(detail())
-    renderWithQuery(<GroupDetailView cluster="prod" group="billing" />)
+    await renderWithRouter(<GroupDetailView cluster="prod" group="billing" />)
     const first = (await screen.findByTestId('stat-topics')).parentElement!
     const second = screen.getByTestId('stat-assignment strategy').parentElement!
     expect(first).not.toBe(second)
@@ -90,14 +90,14 @@ describe('GroupDetailView', () => {
   // custom assignor or a KIP-848 group must read as what the broker said.
   it('passes an unrecognised assignor through untranslated', async () => {
     vi.mocked(client.getGroupDetail).mockResolvedValue(detail({ assignment_strategy: 'uniform' }))
-    renderWithQuery(<GroupDetailView cluster="prod" group="billing" />)
+    await renderWithRouter(<GroupDetailView cluster="prod" group="billing" />)
     expect(await screen.findByTestId('stat-assignment strategy')).toHaveTextContent('uniform')
   })
 
   // An empty group negotiated nothing — saying "Range" would be an invention.
   it('does not invent a strategy for a group with no members', async () => {
     vi.mocked(client.getGroupDetail).mockResolvedValue(detail({ assignment_strategy: '', members: [], state: 'Empty' }))
-    renderWithQuery(<GroupDetailView cluster="prod" group="billing" />)
+    await renderWithRouter(<GroupDetailView cluster="prod" group="billing" />)
     expect(await screen.findByText('no active members')).toBeInTheDocument()
     expect(screen.getByTestId('stat-assignment strategy')).toHaveTextContent('—')
   })
@@ -111,11 +111,19 @@ describe('GroupDetailView', () => {
       unreadable_partitions: 0,
       members: [{ member_id: 'm1', client_id: 'worker-1', client_host: '/10.0.0.1', assigned: [] }],
     }))
-    renderWithQuery(<GroupDetailView cluster="prod" group="billing" />)
+    await renderWithRouter(<GroupDetailView cluster="prod" group="billing" />)
     const total = await screen.findByTestId('stat-total lag')
     expect(total).not.toHaveTextContent('0')
     expect(total).toHaveTextContent('—')
     expect(total).toHaveAttribute('title', expect.stringContaining('committed'))
+  })
+
+  it('links each partition row back to its topic page', async () => {
+    vi.mocked(client.getGroupDetail).mockResolvedValue(detail())
+    await renderWithRouter(<GroupDetailView cluster="prod" group="billing" />)
+    await screen.findAllByTestId('partition-row')
+    const links = screen.getAllByRole('link', { name: 'orders' })
+    expect(links[0]).toHaveAttribute('href', '/c/prod/topics/orders')
   })
 
   // The lag table says which partitions are behind; only the assignment says
@@ -129,7 +137,7 @@ describe('GroupDetailView', () => {
           assigned: [{ topic: 'users', partitions: [0] }] },
       ],
     }))
-    renderWithQuery(<GroupDetailView cluster="prod" group="billing" />)
+    await renderWithRouter(<GroupDetailView cluster="prod" group="billing" />)
     const rows = await screen.findAllByTestId('partition-row')
     expect(rows.map((r) => r.querySelector('[data-testid="partition-owner"]')?.textContent))
       .toEqual(['worker-1', 'worker-1', 'worker-2'])
@@ -144,7 +152,7 @@ describe('GroupDetailView', () => {
           assigned: [{ topic: 'orders', partitions: [0] }] },
       ],
     }))
-    renderWithQuery(<GroupDetailView cluster="prod" group="billing" />)
+    await renderWithRouter(<GroupDetailView cluster="prod" group="billing" />)
     const rows = await screen.findAllByTestId('partition-row')
     const owners = rows.map((r) => r.querySelector('[data-testid="partition-owner"]')?.textContent)
     expect(owners).toEqual(['worker-1', 'unassigned', 'unassigned'])
@@ -160,7 +168,7 @@ describe('GroupDetailView', () => {
         { member_id: 'm2', client_id: 'worker-2', client_host: '/10.0.0.2', assigned: [] },
       ],
     }))
-    renderWithQuery(<GroupDetailView cluster="prod" group="billing" />)
+    await renderWithRouter(<GroupDetailView cluster="prod" group="billing" />)
     const items = await screen.findAllByTestId('group-member')
     expect(items[0]).not.toHaveTextContent('idle')
     expect(items[1]).toHaveTextContent('idle')
@@ -174,7 +182,7 @@ describe('GroupDetailView', () => {
         { member_id: 'm1', client_id: 'worker-1', client_host: '/10.0.0.1', assigned: null },
       ],
     }))
-    renderWithQuery(<GroupDetailView cluster="prod" group="billing" />)
+    await renderWithRouter(<GroupDetailView cluster="prod" group="billing" />)
     const items = await screen.findAllByTestId('group-member')
     expect(items[0]).not.toHaveTextContent('idle')
     const rows = screen.getAllByTestId('partition-row')
@@ -186,7 +194,7 @@ describe('GroupDetailView', () => {
   // offsets into 70px; the columns are sized on purpose instead.
   it('sizes the lag columns deliberately rather than by content', async () => {
     vi.mocked(client.getGroupDetail).mockResolvedValue(detail())
-    renderWithQuery(<GroupDetailView cluster="prod" group="billing" />)
+    await renderWithRouter(<GroupDetailView cluster="prod" group="billing" />)
     const table = (await screen.findAllByTestId('partition-row'))[0].closest('table')!
     expect(table.className).toMatch(/table-fixed/)
     const widths = [...table.querySelectorAll('thead th')].map((th) => th.className.match(/w-\[\d+%\]/)?.[0])
@@ -197,7 +205,7 @@ describe('GroupDetailView', () => {
 
   it('shows members and per-partition lag', async () => {
     vi.mocked(client.getGroupDetail).mockResolvedValue(detail())
-    renderWithQuery(<GroupDetailView cluster="prod" group="billing" />)
+    await renderWithRouter(<GroupDetailView cluster="prod" group="billing" />)
     expect(await screen.findByText('billing-app')).toBeInTheDocument()
     expect(screen.getAllByText('orders').length).toBeGreaterThan(0)
     expect(screen.getByText('7')).toBeInTheDocument()
@@ -207,7 +215,7 @@ describe('GroupDetailView', () => {
   // and the members beside it, with the per-partition table below.
   it('summarises what the group consumes: topics, partitions, total lag', async () => {
     vi.mocked(client.getGroupDetail).mockResolvedValue(detail())
-    renderWithQuery(<GroupDetailView cluster="prod" group="billing" />)
+    await renderWithRouter(<GroupDetailView cluster="prod" group="billing" />)
     expect(await screen.findByTestId('stat-topics')).toHaveTextContent('2')
     expect(screen.getByTestId('stat-partitions')).toHaveTextContent('3')
     expect(screen.getByTestId('stat-total lag')).toHaveTextContent('9')
@@ -217,7 +225,7 @@ describe('GroupDetailView', () => {
   // busy topic sits thousands of messages behind and is perfectly fine.
   it('does not colour a non-zero total as a failure', async () => {
     vi.mocked(client.getGroupDetail).mockResolvedValue(detail())
-    renderWithQuery(<GroupDetailView cluster="prod" group="billing" />)
+    await renderWithRouter(<GroupDetailView cluster="prod" group="billing" />)
     const value = (await screen.findByTestId('stat-total lag')).querySelector('dd')!
     expect(value.className).not.toMatch(/red|amber/)
   })
@@ -227,7 +235,7 @@ describe('GroupDetailView', () => {
   // must never read as a complete total, hence `>=` plus the tooltip.
   it('states the readable total as a lower bound when a partition could not be read', async () => {
     vi.mocked(client.getGroupDetail).mockResolvedValue(detail({ unreadable_partitions: 2 }))
-    renderWithQuery(<GroupDetailView cluster="prod" group="billing" />)
+    await renderWithRouter(<GroupDetailView cluster="prod" group="billing" />)
     const total = await screen.findByTestId('stat-total lag')
     expect(total).toHaveTextContent('≥ 9')
     expect(total).toHaveAttribute('title', expect.stringContaining('2'))
@@ -239,7 +247,7 @@ describe('GroupDetailView', () => {
     const writeText = vi.fn().mockResolvedValue(undefined)
     Object.assign(navigator, { clipboard: { writeText } })
     vi.mocked(client.getGroupDetail).mockResolvedValue(detail())
-    renderWithQuery(<GroupDetailView cluster="prod" group="billing" />)
+    await renderWithRouter(<GroupDetailView cluster="prod" group="billing" />)
     await screen.findByText('billing-app')
     const heading = screen.getByRole('heading', { level: 1 })
     expect(heading).toHaveTextContent('billing')
@@ -254,7 +262,7 @@ describe('GroupDetailView', () => {
     vi.mocked(client.getGroupDetail).mockRejectedValue(
       new client.ApiError(404, 'group_not_found', "consumer group 'ghost' does not exist", 'prod', false),
     )
-    renderWithQuery(<GroupDetailView cluster="prod" group="ghost" />)
+    await renderWithRouter(<GroupDetailView cluster="prod" group="ghost" />)
     // one per panel: Group, Members, Partition lag — a failing query must not
     // leave a panel looking like it has nothing to show
     const errors = await screen.findAllByText(/group_not_found/)
