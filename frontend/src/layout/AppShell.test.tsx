@@ -27,19 +27,24 @@ describe('Sidebar', () => {
     expect(screen.getByRole('link', { name: /topics/i })).toHaveAttribute('data-status', 'active')
   })
 
-  it('states the build commit beside the theme toggle, verbatim', async () => {
+  it('the build commit links to that commit on GitHub, verbatim', async () => {
     await renderWithRouter(
       <Sidebar cluster="prod" clusters={[...clusters]} active="topics" version="730bfd6" />,
       { initialPath: '/c/prod/topics' },
     )
+    const sha = screen.getByTestId('app-version')
     // as-is — no reformatting, no invented prefix
-    expect(screen.getByTestId('app-version')).toHaveTextContent('730bfd6')
+    expect(sha).toHaveTextContent('730bfd6')
+    expect(sha).toHaveAttribute('href', 'https://github.com/simoexpo/arne-kafka-ui/commit/730bfd6')
   })
 
-  it('shows no build identity when the build was given none', async () => {
+  it('links to the repository from the corner, build identity or not', async () => {
     await renderWithRouter(<Sidebar cluster="prod" clusters={[...clusters]} active="topics" />, {
       initialPath: '/c/prod/topics',
     })
+    expect(screen.getByRole('link', { name: /arne on github/i }))
+      .toHaveAttribute('href', 'https://github.com/simoexpo/arne-kafka-ui')
+    // no commit known -> no commit link, and nothing invented
     expect(screen.queryByTestId('app-version')).toBeNull()
   })
 
