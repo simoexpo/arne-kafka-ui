@@ -2,11 +2,16 @@ import { useMemo, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { Link, useParams } from '@tanstack/react-router'
 import { getTopics } from '../api/client'
+import { useListWindow } from '../lib/listWindow'
 import { CopyButton } from '../components/CopyButton'
 import { FilterInput } from '../components/FilterInput'
 import { Panel } from '../components/Panel'
 import { StalenessChip } from '../components/StalenessChip'
 import { Switch } from '../components/Switch'
+
+/// FE windowing over the single topics response: no broker or API cost, only
+/// how many rows are mounted at once.
+const RENDER_STEP = 100
 
 export function TopicsView({ cluster }: { cluster: string }) {
   const [filter, setFilter] = useState('')
@@ -16,30 +21,51 @@ export function TopicsView({ cluster }: { cluster: string }) {
     queryFn: ({ signal }) => getTopics(cluster, signal),
     refetchInterval: 30_000,
   })
-  const visible = useMemo(() => {
+  const matching = useMemo(() => {
     const q = filter.trim().toLowerCase()
     return (topics.data?.topics ?? [])
       .filter((t) => showInternal || !t.internal)
       .filter((t) => q === '' || t.name.toLowerCase().includes(q))
   }, [topics.data, filter, showInternal])
+  const window = useListWindow(matching.length, RENDER_STEP, RENDER_STEP)
+  const visible = matching.slice(0, window.count)
 
   return (
-    // Owns its own scrolling region — see OverviewPage's comment.
-    <div className="h-full space-y-4 overflow-y-auto">
+    // The page itself never scrolls: header and filter stay put, and the list
+    // below owns the one scrolling region (the app shell's `main` is
+    // overflow-hidden — see AppShell).
+    <div className="flex h-full min-h-0 flex-col gap-4">
       <div className="flex items-center gap-3">
         <h1 className="text-lg font-semibold">Topics</h1>
         <StalenessChip asOf={topics.data?.as_of ?? null} refreshing={topics.isFetching} failed={topics.isError} />
       </div>
       <div className="flex items-center gap-4">
-        <FilterInput value={filter} onChange={setFilter} placeholder="filter topics…" ariaLabel="filter topics" />
-        <Switch checked={showInternal} label="show internal" onChange={() => setShowInternal((v) => !v)} />
+        <FilterInput
+          value={filter}
+          onChange={(next) => {
+            setFilter(next)
+            window.reset()
+          }}
+          placeholder="filter topics…"
+          ariaLabel="filter topics"
+        />
+        <Switch
+          checked={showInternal}
+          label="show internal"
+          onChange={() => {
+            setShowInternal((v) => !v)
+            window.reset()
+          }}
+        />
       </div>
       <Panel
-        title={`${visible.length} topics`}
+        title={`${matching.length} topics`}
         error={topics.error}
         loading={topics.isPending}
         hasData={topics.data !== undefined}
+        className="flex min-h-0 flex-1 flex-col"
       >
+        <div data-testid="list-scroller" onScroll={window.onScroll} className="min-h-0 flex-1 overflow-y-auto">
         <table className="w-full text-left text-sm">
           <thead className="text-xs text-zinc-500">
             <tr>
@@ -81,6 +107,7 @@ export function TopicsView({ cluster }: { cluster: string }) {
             ))}
           </tbody>
         </table>
+        </div>
       </Panel>
     </div>
   )

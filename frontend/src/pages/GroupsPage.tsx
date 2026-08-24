@@ -8,16 +8,17 @@ import { FilterInput } from '../components/FilterInput'
 import { Panel } from '../components/Panel'
 import { StalenessChip } from '../components/StalenessChip'
 import { statedLag } from '../lib/lag'
-import { nextAnchor, pageFrom, prevAnchor } from '../lib/namePage'
+import { useListWindow } from '../lib/listWindow'
 
-/// Lag costs one broker request per group, so a page is what we ask for.
-const PAGE_SIZE = 50
+/// FE windowing over the single groups response: rendering is free, so the
+/// window grows as the reader scrolls and never unmounts under them.
+const RENDER_STEP = 100
+/// Lag costs one broker request per group, so what we ask for is bounded by
+/// the viewport — the chunk of rows on screen — never by scroll depth.
+const LAG_CHUNK = 50
 
 export function GroupsView({ cluster }: { cluster: string }) {
   const [filter, setFilter] = useState('')
-  // Pages are anchored to a group id, never to an index: groups come and go
-  // between polls, and an index would shift the page under the reader.
-  const [anchor, setAnchor] = useState<string | null>(null)
   const groups = useQuery({
     queryKey: ['groups', cluster],
     queryFn: ({ signal }) => getGroups(cluster, signal),
@@ -29,14 +30,11 @@ export function GroupsView({ cluster }: { cluster: string }) {
     const q = filter.trim().toLowerCase()
     return (groups.data?.groups ?? []).filter((g) => q === '' || g.group_id.toLowerCase().includes(q))
   }, [groups.data, filter])
-  const id = (g: { group_id: string }) => g.group_id
-  const visible = useMemo(() => pageFrom(matching, id, anchor, PAGE_SIZE), [matching, anchor])
-  const forward = nextAnchor(matching, id, anchor, PAGE_SIZE)
-  const back = prevAnchor(matching, id, anchor, PAGE_SIZE)
-  const onFirstPage = anchor === null
+  const window = useListWindow(matching.length, RENDER_STEP, LAG_CHUNK)
+  const visible = matching.slice(0, window.count)
 
   // Only the rows on screen: off-screen groups are never inspected.
-  const shown = visible.map(id)
+  const shown = matching.slice(window.viewport.start, window.viewport.end).map((g) => g.group_id)
   const lag = useQuery({
     queryKey: ['group-lag', cluster, shown],
     queryFn: ({ signal }) => getGroupLag(cluster, shown, signal),
@@ -46,8 +44,10 @@ export function GroupsView({ cluster }: { cluster: string }) {
   const lagOf = (group: string) => lag.data?.groups.find((e) => e.group_id === group)
 
   return (
-    // Owns its own scrolling region — see OverviewPage's comment.
-    <div className="h-full space-y-4 overflow-y-auto">
+    // The page itself never scrolls: header and filter stay put, and the list
+    // below owns the one scrolling region (the app shell's `main` is
+    // overflow-hidden — see AppShell).
+    <div className="flex h-full min-h-0 flex-col gap-4">
       <div className="flex items-center gap-3">
         <h1 className="text-lg font-semibold">Consumer groups</h1>
         <StalenessChip asOf={groups.data?.as_of ?? null} refreshing={groups.isFetching} failed={groups.isError} />
@@ -56,21 +56,23 @@ export function GroupsView({ cluster }: { cluster: string }) {
         <FilterInput
           value={filter}
           onChange={(next) => {
-            // A new filter means a different list; paging into it from the old
-            // list's anchor would land somewhere arbitrary.
+            // A new filter means a different list; a window scrolled deep into
+            // the old one would land somewhere arbitrary.
             setFilter(next)
-            setAnchor(null)
+            window.reset()
           }}
           placeholder="filter consumers…"
           ariaLabel="filter consumers"
         />
       </div>
       <Panel
-        title={`${visible.length} groups`}
+        title={`${matching.length} groups`}
         error={groups.error}
         loading={groups.isPending}
         hasData={groups.data !== undefined}
+        className="flex min-h-0 flex-1 flex-col"
       >
+        <div data-testid="list-scroller" onScroll={window.onScroll} className="min-h-0 flex-1 overflow-y-auto">
         <table className="w-full text-left text-sm">
           <thead className="text-xs text-zinc-500">
             <tr><th className="py-1">group</th><th>state</th><th>protocol</th><th>members</th><th>total lag</th></tr>
@@ -100,27 +102,7 @@ export function GroupsView({ cluster }: { cluster: string }) {
             ))}
           </tbody>
         </table>
-        {matching.length > PAGE_SIZE && (
-          <div className="mt-3 flex items-center gap-3 text-sm">
-            <button
-              onClick={() => setAnchor(back)}
-              disabled={onFirstPage}
-              className="rounded border border-zinc-300 px-2 py-0.5 enabled:hover:bg-zinc-100 disabled:text-zinc-400 dark:border-zinc-700 dark:enabled:hover:bg-zinc-800"
-            >
-              prev
-            </button>
-            <button
-              onClick={() => setAnchor(forward)}
-              disabled={forward === null}
-              className="rounded border border-zinc-300 px-2 py-0.5 enabled:hover:bg-zinc-100 disabled:text-zinc-400 dark:border-zinc-700 dark:enabled:hover:bg-zinc-800"
-            >
-              next
-            </button>
-            <span className="text-zinc-500">
-              {visible.length} of {matching.length}
-            </span>
-          </div>
-        )}
+        </div>
       </Panel>
     </div>
   )

@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { screen, waitFor, within } from '@testing-library/react'
+import { fireEvent, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { renderWithRouter } from '../test/utils'
 import { TopicsView } from './TopicsPage'
@@ -9,6 +9,26 @@ vi.mock('../api/client', async (importOriginal) => ({
   ...(await importOriginal<typeof client>()),
   getTopics: vi.fn(),
 }))
+
+function manyTopics(n: number) {
+  return {
+    topics: Array.from({ length: n }, (_, i) => ({
+      name: `topic-${String(i).padStart(3, '0')}`,
+      partitions: 1,
+      replication_factor: 1,
+      isr: 1,
+      internal: false,
+    })),
+    as_of: Date.now(),
+  }
+}
+
+/// Drives the scroller as a real browser would: geometry first, then the event.
+function scrollTo(el: HTMLElement, scrollTop: number, scrollHeight: number, clientHeight: number) {
+  Object.defineProperty(el, 'scrollHeight', { value: scrollHeight, configurable: true })
+  Object.defineProperty(el, 'clientHeight', { value: clientHeight, configurable: true })
+  fireEvent.scroll(el, { target: { scrollTop } })
+}
 
 const topics = {
   topics: [
@@ -118,6 +138,48 @@ describe('TopicsView', () => {
     await waitFor(() => expect(screen.getByTestId('panel-error-banner')).toBeInTheDocument())
     expect(screen.getByText('orders')).toBeInTheDocument() // stale data stays visible
     expect(screen.queryByText(/retriable/i)).not.toBeInTheDocument() // banner, not the full-block takeover
+  })
+
+  it('scrolls only inside the list: the panel owns a scroller and no ancestor scrolls', async () => {
+    vi.mocked(client.getTopics).mockResolvedValue(topics)
+    await renderWithRouter(<TopicsView cluster="prod" />)
+    await screen.findByText('orders')
+    const scroller = screen.getByTestId('list-scroller')
+    expect(scroller.className).toContain('overflow-y-auto')
+    expect(within(scroller as HTMLElement).getByRole('table')).toBeInTheDocument()
+    for (let p = scroller.parentElement; p; p = p.parentElement) {
+      expect(p.className || '').not.toContain('overflow-y-auto')
+    }
+  })
+
+  it('renders the first window of a large list, while the title states the real total', async () => {
+    vi.mocked(client.getTopics).mockResolvedValue(manyTopics(250))
+    await renderWithRouter(<TopicsView cluster="prod" />)
+    await screen.findByText('topic-000')
+    expect(screen.getAllByTestId('isr')).toHaveLength(100)
+    expect(screen.getByText('250 topics')).toBeInTheDocument()
+  })
+
+  it('extends the window when the reader nears the bottom, keeping every loaded row', async () => {
+    vi.mocked(client.getTopics).mockResolvedValue(manyTopics(250))
+    await renderWithRouter(<TopicsView cluster="prod" />)
+    await screen.findByText('topic-000')
+    scrollTo(screen.getByTestId('list-scroller'), 2800, 3300, 600)
+    await waitFor(() => expect(screen.getAllByTestId('isr')).toHaveLength(200))
+    expect(screen.getByText('topic-000')).toBeInTheDocument()
+    scrollTo(screen.getByTestId('list-scroller'), 6000, 6600, 600)
+    await waitFor(() => expect(screen.getAllByTestId('isr')).toHaveLength(250))
+  })
+
+  it('a changed filter resets the window: the new list starts from its own top', async () => {
+    vi.mocked(client.getTopics).mockResolvedValue(manyTopics(250))
+    await renderWithRouter(<TopicsView cluster="prod" />)
+    await screen.findByText('topic-000')
+    scrollTo(screen.getByTestId('list-scroller'), 2800, 3300, 600)
+    await waitFor(() => expect(screen.getAllByTestId('isr')).toHaveLength(200))
+    await userEvent.type(screen.getByLabelText('filter topics'), 'topic')
+    await userEvent.click(screen.getByRole('button', { name: /clear/i }))
+    expect(screen.getAllByTestId('isr')).toHaveLength(100)
   })
 
   it('copies the topic name without navigating when the row copy button is clicked', async () => {

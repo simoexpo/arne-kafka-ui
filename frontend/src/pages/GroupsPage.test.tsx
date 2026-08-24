@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { screen } from '@testing-library/react'
+import { fireEvent, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { renderWithRouter } from '../test/utils'
 import { GroupsView } from './GroupsPage'
@@ -104,9 +104,23 @@ describe('GroupsView', () => {
     expect(await screen.findByText('42')).toBeInTheDocument()
   })
 
-  it('paginates by name, so the next page asks lag for its own rows', async () => {
-    const many = Array.from({ length: 60 }, (_, i) => ({
-      group_id: `g-${String(i).padStart(2, '0')}`,
+  it('scrolls only inside the list: the panel owns a scroller and no ancestor scrolls', async () => {
+    vi.mocked(client.getGroups).mockResolvedValue({
+      groups: [{ group_id: 'billing', state: 'Stable', protocol_type: 'consumer', member_count: 1, group_type: 'Classic' }],
+      as_of: Date.now(),
+    })
+    await renderWithRouter(<GroupsView cluster="prod" />)
+    await screen.findByText('billing')
+    const scroller = screen.getByTestId('list-scroller')
+    expect(scroller.className).toContain('overflow-y-auto')
+    for (let p = scroller.parentElement; p; p = p.parentElement) {
+      expect(p.className || '').not.toContain('overflow-y-auto')
+    }
+  })
+
+  it('scrolling extends the window without unmounting loaded rows, and slides the lag viewport with the reader', async () => {
+    const many = Array.from({ length: 120 }, (_, i) => ({
+      group_id: `g-${String(i).padStart(3, '0')}`,
       state: 'Stable',
       protocol_type: 'consumer',
       group_type: 'Classic',
@@ -115,14 +129,25 @@ describe('GroupsView', () => {
     vi.mocked(client.getGroups).mockResolvedValue({ groups: many, as_of: Date.now() })
     vi.mocked(client.getGroupLag).mockResolvedValue({ groups: [], as_of: Date.now() })
     await renderWithRouter(<GroupsView cluster="prod" />)
-    await screen.findByText('g-00')
-    expect(screen.queryByText('g-50')).not.toBeInTheDocument()
-    await userEvent.click(screen.getByRole('button', { name: /next/i }))
-    expect(await screen.findByText('g-50')).toBeInTheDocument()
-    expect(screen.queryByText('g-00')).not.toBeInTheDocument()
+    await screen.findByText('g-000')
+    // first window: 100 rows mounted, lag asked for the top chunk only
+    expect(screen.getAllByTestId('group-row')).toHaveLength(100)
+    expect(vi.mocked(client.getGroupLag).mock.calls.at(-1)![1]).not.toContain('g-050')
+
+    // reader scrolls deep: rows ~85–103 in view (100 rows ≈ 33px each)
+    const scroller = screen.getByTestId('list-scroller')
+    Object.defineProperty(scroller, 'scrollHeight', { value: 3300, configurable: true })
+    Object.defineProperty(scroller, 'clientHeight', { value: 600, configurable: true })
+    fireEvent.scroll(scroller, { target: { scrollTop: 2800 } })
+
+    // the window grew to the whole list, nothing unmounted
+    await waitFor(() => expect(screen.getAllByTestId('group-row')).toHaveLength(120))
+    expect(screen.getByText('g-000')).toBeInTheDocument()
+    // lag follows the viewport: the chunk in view, never the whole scrollback
     const asked = vi.mocked(client.getGroupLag).mock.calls.at(-1)![1]
-    expect(asked).toContain('g-50')
-    expect(asked).not.toContain('g-00')
+    expect(asked).toContain('g-099')
+    expect(asked).not.toContain('g-000')
+    expect(asked.length).toBeLessThanOrEqual(100)
   })
 
   it('a row whose lag is undetermined shows a dash, not a zero', async () => {
