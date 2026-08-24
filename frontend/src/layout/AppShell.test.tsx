@@ -27,6 +27,20 @@ describe('Sidebar', () => {
     expect(screen.getByRole('link', { name: /topics/i })).toHaveAttribute('data-status', 'active')
   })
 
+  it('lists the other clusters alphabetically, whatever order the config declared', async () => {
+    const unordered = [
+      { name: 'zeta', status: 'healthy', broker_count: 1, error: null } as const,
+      { name: 'prod', status: 'healthy', broker_count: 3, error: null } as const,
+      { name: 'alpha', status: 'healthy', broker_count: 1, error: null } as const,
+      { name: 'Mid', status: 'healthy', broker_count: 1, error: null } as const,
+    ]
+    await renderWithRouter(<Sidebar cluster="prod" clusters={unordered} active="topics" />, {
+      initialPath: '/c/prod/topics',
+    })
+    const others = screen.getAllByRole('link', { name: /alpha|Mid|zeta/ }).map((l) => l.textContent)
+    expect(others).toEqual(['alpha', 'Mid', 'zeta'])
+  })
+
   it('the build commit links to that commit on GitHub, verbatim', async () => {
     await renderWithRouter(
       <Sidebar cluster="prod" clusters={[...clusters]} active="topics" version="730bfd6" />,

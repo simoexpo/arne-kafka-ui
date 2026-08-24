@@ -87,7 +87,10 @@ export function Sidebar({ cluster, clusters, active, error, version }: {
         <div className="mt-2 flex flex-col gap-1">
           {error
             ? <ClustersFailure error={error} />
-            : clusters.filter((c) => c.name !== cluster).map((c) => (
+            : clusters
+              .filter((c) => c.name !== cluster)
+              .sort((a, b) => a.name.localeCompare(b.name))
+              .map((c) => (
               <Link
                 key={c.name}
                 to={SECTION_PATHS[active]}
